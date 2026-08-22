@@ -115,12 +115,11 @@ final class FeedsRuntime {
         cronPerProfile = false
         routinesNote = ""; routinesError = nil; lastRoutinesRefresh = nil
         routinesLoaded = false
-        artifactSessions.removeAll(); artifactDiscoveryStatus.removeAll()
-        artifactScannedSessions.removeAll()
+        // Artifact and inbox refs are gateway-qualified and may belong to
+        // retained secondary clients. Primary teardown removes only its scope
+        // through dropArtifactScope / dropA2AScope; a primary client identity
+        // change must preserve remotes.
         artifactsNote = ""; lastArtifactScan = nil
-        // Inbox refs are gateway-qualified and may belong to retained
-        // secondary clients. Primary teardown removes only its scope through
-        // dropA2AScope; a primary client identity change must preserve remotes.
         inboxNote = ""; lastInboxScan = nil
         artifactScanGeneration &+= 1
         artifactsTask?.cancel(); artifactsTask = nil; artifactsTaskID = nil
@@ -609,6 +608,23 @@ public extension AppModel {
         feeds.journal = filtered
         Self.saveJournal(filtered)
         publishActivity()
+    }
+
+    /// Drop one gateway's artifact cards, session refs, discovery status and
+    /// cached bodies. Remote sources stay; a missing ref must never be enough
+    /// to keep a card tappable after this source is gone.
+    func dropArtifactScope(gatewayID: String) {
+        let runtime = FeedsRuntime.shared
+        artifacts.removeAll { artifact in
+            runtime.artifactSessions[artifact.id]?.gatewayID == gatewayID
+        }
+        runtime.artifactSessions = runtime.artifactSessions.filter { _, ref in
+            ref.gatewayID != gatewayID
+        }
+        runtime.artifactDiscoveryStatus[gatewayID] = nil
+        runtime.artifactScannedSessions[gatewayID] = nil
+        ArtifactStore.shared.flush(gatewayID: gatewayID)
+        updateArtifactDiscoveryNote()
     }
 
     func dropRoutineScope(gatewayID: String) {
@@ -1832,15 +1848,13 @@ public extension AppModel {
     /// Card tap → open the exact session that produced it. `Artifact` carries
     /// no session field (shared model), so the owning session travels in the
     /// runtime's ref table and the chat is rebound to it before opening.
+    /// A missing ref fails closed: `artifact.botID` is an unqualified profile
+    /// and `openChat` would land on the primary same-name bot.
     func openArtifact(_ artifact: Artifact) {
-        selectedTab = .home
         guard mode == .live, let ref = FeedsRuntime.shared.artifactSessions[artifact.id] else {
-            // No owning session recorded — fall back to the bot's canonical
-            // chat through openChat, never a raw openBotID write (which leaves
-            // the transcript empty and forks on the first send).
-            openChat(botID: artifact.botID)
             return
         }
+        selectedTab = .home
         open(ref)
     }
 

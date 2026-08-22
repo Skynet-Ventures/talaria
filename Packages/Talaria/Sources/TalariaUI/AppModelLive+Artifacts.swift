@@ -292,16 +292,44 @@ public final class ArtifactStore {
         discard(body)
     }
 
-    /// Drop everything for the current gateway (sign-out, gateway swap). Keys
-    /// are gateway-scoped so this is belt-and-braces, but a stale render of
-    /// another machine's file is exactly the kind of thing that must not linger.
+    /// Drop everything (tests, last-gateway teardown). Keys are
+    /// gateway-scoped; prefer `flush(gatewayID:)` so a primary switch cannot
+    /// evict a retained remote's bodies.
     public func flush() {
-        for inflight in tasks.values { inflight.task.cancel() }
-        for body in bodies.values { Self.removeOwnedFile(body) }
-        tasks.removeAll()
-        inflightMediaFolders.removeAll()
-        bodies.removeAll(); thumbs.removeAll(); cost.removeAll(); order.removeAll()
-        bytes = 0
+        flushMatching { _ in true }
+    }
+
+    /// Drop one source's bodies, thumbnails, inflight fetches and owned media.
+    /// Sign-out/remove of any gateway — primary or secondary — must go through
+    /// here so leftover bytes cannot outlive that source's credential.
+    public func flush(gatewayID: String) {
+        let prefix = gatewayID + "\u{1f}"
+        flushMatching { $0.hasPrefix(prefix) }
+    }
+
+    private func flushMatching(_ belongs: (String) -> Bool) {
+        for key in tasks.keys.filter(belongs) {
+            tasks[key]?.task.cancel()
+            tasks[key] = nil
+        }
+        for key in inflightMediaFolders.keys.filter(belongs) {
+            if let byFetch = inflightMediaFolders.removeValue(forKey: key) {
+                for folders in byFetch.values {
+                    for path in folders {
+                        try? FileManager.default.removeItem(
+                            at: URL(fileURLWithPath: path, isDirectory: true))
+                    }
+                }
+            }
+        }
+        for key in bodies.keys.filter(belongs) {
+            if let body = bodies.removeValue(forKey: key) {
+                Self.removeOwnedFile(body)
+            }
+            bytes -= cost.removeValue(forKey: key) ?? 0
+            thumbs[key] = nil
+        }
+        order.removeAll(where: belongs)
     }
 
     private func touch(_ id: String) {
@@ -495,6 +523,7 @@ public extension AppModel {
     func artifactBody(_ artifact: Artifact) -> ArtifactBody? {
         guard let source = artifactProvenance(artifact) else { return nil }
         guard artifactPathAdmission(source).isAllowed else { return nil }
+        guard artifactSourceCredentialIsLive(source) else { return nil }
         return ArtifactStore.shared.body(for: source)
     }
 
@@ -502,7 +531,15 @@ public extension AppModel {
     func artifactThumbnail(_ artifact: Artifact) -> Image? {
         guard let source = artifactProvenance(artifact) else { return nil }
         guard artifactPathAdmission(source).isAllowed else { return nil }
+        guard artifactSourceCredentialIsLive(source) else { return nil }
         return ArtifactStore.shared.thumbnail(for: source)
+    }
+
+    /// Public/demo cache is not a gateway secret. Every other hit is only
+    /// readable while that source still has a Keychain credential.
+    private func artifactSourceCredentialIsLive(_ source: ArtifactProvenance) -> Bool {
+        if source.gatewayID == "public" || source.gatewayID == "demo" { return true }
+        return gatewayRESTContext(gatewayID: source.gatewayID) != nil
     }
 
     /// Fetch (or return) an artifact's bytes.
@@ -527,7 +564,13 @@ public extension AppModel {
         // are excluded from the TTL sweep before a new fetch starts. The
         // materializer itself never sweeps shared cache storage.
         store.sweepOrphanMediaDownloads()
-        if let cached = store.body(for: source) { return cached }
+        if let cached = store.body(for: source) {
+            guard artifactSourceCredentialIsLive(source) else {
+                store.flush(gatewayID: source.gatewayID)
+                return .unavailable(.noREST)
+            }
+            return cached
+        }
         let kind = artifact.kind
         let sourceGeneration = LiveRuntime.shared.generation
         let lease = store.acquire(for: source) {

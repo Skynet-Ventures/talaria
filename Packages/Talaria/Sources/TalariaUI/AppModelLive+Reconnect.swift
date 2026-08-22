@@ -597,7 +597,10 @@ extension AppModel {
         beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
         defer { finishExactStoredSessionSourceTeardown(gatewayID: gateway.id) }
         cancelRoomProjectionSync(gatewayID: gateway.id)
-        guard let base = gateway.baseURL else { return }
+        guard let base = gateway.baseURL else {
+            dropArtifactScope(gatewayID: gateway.id)
+            return
+        }
         if isActiveGateway(gateway) {
             await disconnectGateway()
             flushWorldForGatewaySwitch()
@@ -610,6 +613,10 @@ extension AppModel {
             await detachRoutedEvents(gatewayID: gateway.id)
         }
         ConnectionSupervisor.shared.keychain.delete(for: base)
+        // Detach/disconnect already dropped this source's scope. Repeat after
+        // the Keychain delete so a late cache publish cannot outlive the
+        // credential, and so a primary path that skipped detach still purges.
+        dropArtifactScope(gatewayID: gateway.id)
         if ConnectionSupervisor.shared.reauthGateway?.absoluteString == base.absoluteString {
             ConnectionSupervisor.shared.reauthGateway = nil
         }
@@ -633,6 +640,7 @@ extension AppModel {
             // source-qualified runtime survives removal.
             await detachRoutedEvents(gatewayID: gateway.id)
         }
+        dropArtifactScope(gatewayID: gateway.id)
         let supervisor = ConnectionSupervisor.shared
         if let base = gateway.baseURL,
            supervisor.reauthGateway?.absoluteString == base.absoluteString {
@@ -649,7 +657,8 @@ extension AppModel {
 
     /// Drop the outgoing gateway's world. flushDemoWorld() is the single place
     /// that knows every primary surface to clear. Source-qualified remote chat
-    /// state is restored afterward because those clients remain connected.
+    /// and artifact state is restored afterward because those clients remain
+    /// connected.
     private func flushWorldForGatewaySwitch() {
         if let departingGatewayID = LiveRuntime.shared.gatewayID {
             ChatRuntime.shared.clearPendingStops(forGatewayID: departingGatewayID)
@@ -663,6 +672,13 @@ extension AppModel {
         preservePrimaryUnreadForGatewaySwitch()
         let remoteChats = chats.filter { GatewayBotRoute(qualifiedID: $0.key) != nil }
         let remoteApprovals = approvals.filter { GatewayBotRoute(qualifiedID: $0.botID) != nil }
+        let departingArtifactGatewayID = LiveRuntime.shared.gatewayID
+        let remoteArtifacts = artifacts.filter { artifact in
+            guard let ref = FeedsRuntime.shared.artifactSessions[artifact.id] else {
+                return false
+            }
+            return departingArtifactGatewayID.map { ref.gatewayID != $0 } ?? true
+        }
         normalizeComposeQueueIDs()
         let retainedQueue = zip(composeQueue, composeQueueIDs).filter {
             GatewayBotRoute(qualifiedID: $0.0.botID) != nil
@@ -677,6 +693,7 @@ extension AppModel {
         flushDemoWorld()
         chats = remoteChats
         approvals = remoteApprovals
+        artifacts = remoteArtifacts
         composeQueue = remoteQueue
         composeQueueIDs = remoteQueueIDs
         composeQueueBindings = remoteQueueBindings
