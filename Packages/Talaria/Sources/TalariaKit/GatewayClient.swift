@@ -335,6 +335,11 @@ public struct LiveSession: Sendable {
     public var running: Bool
     /// Partial in-flight turn replayed after a reconnect.
     public var inflight: JSONValue?
+    /// Typed retained-turn projection. `nil` covers absent/null and malformed
+    /// non-object containers. Lifecycle consumers should use this bounded
+    /// projection; the raw field remains only for broader wire compatibility.
+    public var retainedInflightAdmission: RetainedInflightTurnAdmission
+    public var retainedInflight: RetainedInflightTurn? { retainedInflightAdmission.turn }
     /// Oldest unresolved approval, replayed on resume.
     public var pendingApproval: ApprovalRequest?
     /// Clarify question still blocking this session, replayed on resume
@@ -352,6 +357,7 @@ public struct LiveSession: Sendable {
         info = SessionInfo(v["info"])
         running = v["running"]?.boolValue ?? false
         inflight = v["inflight"]
+        retainedInflightAdmission = RetainedInflightTurnAdmission.admit(v["inflight"])
         pendingApproval = v["pending_approval"].map { ApprovalRequest($0, sessionID: v["session_id"]?.stringValue ?? "") }
         pendingClarify = v["pending_clarify"]
     }

@@ -1,6 +1,125 @@
 import Foundation
 import TalariaKit
 
+/// Failed-turn evidence can arrive twice: first on the live terminal frame,
+/// then again in `session.resume.inflight` when the socket died around that
+/// frame. Keep the evidence on one assistant row and only make it more
+/// specific. A contradictory later descriptor is not authority to relabel a
+/// failure the user already saw.
+enum TurnFailureLifecycle {
+    static let maximumMessageScalars = 8_192
+    /// Shared with retained-inflight admission so the same oversized failure
+    /// has one stable identity across live completion, resume, and Dismiss.
+    private static let clippedMarker = "\n… [turn detail clipped]"
+
+    /// Bound work before whitespace trimming or UI storage. Preserve ordinary
+    /// multiline diagnostics, but remove terminal/bidi controls that can spoof
+    /// card labels or copied details.
+    static func admittedMessage(_ value: String?) -> String {
+        guard let value else { return "" }
+        let markerCount = clippedMarker.unicodeScalars.count
+        let contentLimit = maximumMessageScalars - markerCount
+        let rawWorkMaximum = maximumMessageScalars * 4
+        let raw = value.unicodeScalars.prefix(rawWorkMaximum + 1)
+        let rawWasClipped = raw.count > rawWorkMaximum
+        var output = String.UnicodeScalarView()
+        output.reserveCapacity(maximumMessageScalars + 1)
+        var visibleCount = 0
+        for scalar in raw.prefix(rawWorkMaximum) {
+            if scalar.value == 0x09 || scalar.value == 0x0A {
+                output.append(scalar)
+                visibleCount += 1
+            } else if !isUnsafeControl(scalar.value) {
+                output.append(scalar)
+                visibleCount += 1
+            }
+            if visibleCount > maximumMessageScalars { break }
+        }
+        guard rawWasClipped || visibleCount > maximumMessageScalars else {
+            return String(output).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var clipped = String.UnicodeScalarView(output.prefix(contentLimit))
+        clipped.append(contentsOf: clippedMarker.unicodeScalars)
+        return String(clipped).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isUnsafeControl(_ value: UInt32) -> Bool {
+        if value <= 0x1F || (0x7F...0x9F).contains(value) { return true }
+        switch value {
+        case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func failure(from payload: MessageCompletePayload) -> TurnFailure? {
+        let raw = admittedMessage(payload.error)
+        let isFailure = payload.status == .error || payload.status == .malformed
+        guard isFailure else { return nil }
+        let fallback = admittedMessage(payload.text)
+        return TurnFailure(
+            message: raw.isEmpty ? (fallback.isEmpty ? "Hermes reported an error" : fallback) : raw,
+            recoverable: payload.recoverable,
+            errorSurface: payload.errorSurface)
+    }
+
+    static func failure(from retained: RetainedInflightTurn) -> TurnFailure? {
+        let raw = admittedMessage(retained.error)
+        let isFailure = retained.status == .error
+            || retained.status == .malformed
+            || !raw.isEmpty
+        guard isFailure else { return nil }
+        let fallback = admittedMessage(retained.assistant)
+        return TurnFailure(
+            message: raw.isEmpty ? (fallback.isEmpty ? "Hermes reported an error" : fallback) : raw,
+            recoverable: retained.recoverable ?? false,
+            errorSurface: retained.errorSurface)
+    }
+
+    static func merge(_ existing: TurnFailure?, _ incoming: TurnFailure?) -> TurnFailure? {
+        guard let incoming else { return existing }
+        guard let existing else { return incoming }
+        return TurnFailure(
+            message: existing.message.isEmpty ? incoming.message : existing.message,
+            recoverable: existing.recoverable || incoming.recoverable,
+            errorSurface: merge(existing.errorSurface, incoming.errorSurface))
+    }
+
+    private static func merge(_ existing: TurnErrorSurface?,
+                              _ incoming: TurnErrorSurface?) -> TurnErrorSurface? {
+        guard let incoming else { return existing }
+        guard let existing else { return incoming }
+        guard existing.layer == incoming.layer else { return existing }
+        let code: String
+        if existing.code == "unknown", incoming.code != "unknown" {
+            code = incoming.code
+        } else if incoming.code == "unknown" || existing.code == incoming.code {
+            code = existing.code
+        } else {
+            return existing
+        }
+        return TurnErrorSurface(
+            layer: existing.layer,
+            code: code,
+            retryable: existing.retryable && incoming.retryable,
+            provider: existing.provider ?? incoming.provider,
+            model: existing.model ?? incoming.model)
+    }
+
+    static func compatible(existing: ChatMessage, partial: String,
+                           failure: TurnFailure?) -> Bool {
+        guard existing.author == .bot else { return false }
+        let textMatches = existing.text == partial || existing.text.isEmpty || partial.isEmpty
+            || existing.text.hasPrefix(partial) || partial.hasPrefix(existing.text)
+        guard textMatches else { return false }
+        guard let old = existing.failure, let failure else {
+            return existing.isStreaming || existing.failure == nil || failure == nil
+        }
+        return old.message == failure.message
+    }
+}
+
 // Live-gateway side of AppModel: connect, route events into observable state,
 // and back the shared actions with real RPCs. Demo mode never touches this.
 //
@@ -688,7 +807,8 @@ extension AppModel {
             ChatRuntime.shared.migrateMutationState(
                 botID: botID, route: route, sessionID: live.sessionID,
                 storedID: durableID, generation: runtime.generation,
-                chatID: ObjectIdentifier(chat))
+                chatID: ObjectIdentifier(chat), oldSessionID: oldSessionID)
+            chat.hasUnresolvedRetry = ChatRuntime.shared.failedRetryRows[botID] != nil
             if let kickoffStored = durableID ?? oldStoredID,
                CanonicalChatRuntime.shared.migrateKickoff(
                    botID: botID, route: route, sessionID: live.sessionID,
@@ -820,30 +940,238 @@ extension AppModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Replay a reconnect/resume inflight snapshot ({user, assistant,
-    /// streaming, error?}) into the chat so a dropped socket loses nothing.
-    func replayInflight(_ live: LiveSession, botID: String) {
-        guard let inflight = live.inflight, inflight != .null else { return }
+    /// Replay a reconnect/resume inflight snapshot into the exact bound chat.
+    /// Failed turns are retained by Hermes precisely because their terminal
+    /// frame and canonical DB row may both be absent. Keep failure metadata on
+    /// the assistant row, structurally upsert a repeated live/resume copy, and
+    /// preserve mid-turn correction ordering when the gateway supplied a
+    /// trustworthy offset vector.
+    func replayInflight(_ live: LiveSession, botID: String,
+                        replacingTranscript: Bool = false) {
+        guard let retained = live.retainedInflight else { return }
         let chat = chat(for: botID)
-        if let user = inflight["user"]?.stringValue, !user.isEmpty,
-           !chat.messages.suffix(4).contains(where: { $0.author == .user && $0.text == user }) {
-            chat.messages.append(ChatMessage(author: .user, time: AppModel.clock(), text: user))
+        let retainedFailure = TurnFailureLifecycle.failure(from: retained)
+        let dismissal = retainedFailure.flatMap { failure -> DismissedTurnFailure? in
+            guard let route = gatewayRoute(for: botID),
+                  let storedID = chat.storedSessionID, !storedID.isEmpty else { return nil }
+            return DismissedTurnFailure(route: route, storedID: storedID,
+                                        message: failure.message)
         }
-        let partial = inflight["assistant"]?.stringValue ?? ""
-        let streaming = inflight["streaming"]?.boolValue ?? false
-        if !partial.isEmpty {
-            if let last = chat.messages.last, last.isStreaming {
-                chat.messages[chat.messages.count - 1].text = partial
-                chat.messages[chat.messages.count - 1].isStreaming = streaming
-            } else {
-                chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(),
-                                                 text: partial, isStreaming: streaming))
+        let dismissed = dismissal.map {
+            ChatRuntime.shared.dismissedFailures[ObjectIdentifier(chat)] == $0
+        } ?? false
+        let failure = dismissed ? nil : retainedFailure
+        let partial = retainedFailure == nil
+            ? (retained.assistant ?? "")
+            : TurnFailureLifecycle.admittedMessage(retained.assistant)
+
+        if dismissed, !replacingTranscript,
+           let user = retained.user?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !user.isEmpty,
+           chat.messages.last(where: { $0.author == .user })?.text == user {
+            // The empty failed placeholder may have been deliberately removed.
+            // Replaying the same retained snapshot must not resurrect either
+            // its card or a duplicate user bubble before the next turn starts.
+            return
+        }
+
+        // A retry may have been accepted just as the socket disappeared,
+        // before message.start could clear the old failed row. The retained
+        // projection is authoritative evidence of that fresh turn: reuse the
+        // leased assistant identity and replace, rather than monotonically
+        // merging the previous turn's failure into the retry.
+        if !replacingTranscript,
+           let retryLease = ChatRuntime.shared.failedRetryRows[botID],
+           retryLease.phase == .started || retryLease.phase == .submitting,
+           retryLease.route == gatewayRoute(for: botID),
+           retryLease.sessionID == live.sessionID,
+           chat.sessionID == live.sessionID,
+           retryLease.storedID == chat.storedSessionID,
+           retryLease.chatID == ObjectIdentifier(chat),
+           (retained.streaming
+               || partial != retryLease.baselineText
+               || retainedFailure != retryLease.baselineFailure),
+           let index = chat.messages.firstIndex(where: {
+               $0.id == retryLease.assistantID
+           }) {
+            chat.messages[index].text = partial
+            chat.messages[index].isStreaming = retained.streaming && failure == nil
+            chat.messages[index].failure = failure
+            ChatRuntime.shared.failedRetryRows[botID] = nil
+            chat.hasUnresolvedRetry = false
+            if retainedFailure != nil {
+                let start = chat.messages[...index].lastIndex(where: { $0.author == .user })
+                    ?? index
+                ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)] =
+                    Set(chat.messages[start...index].map(\.id))
             }
             chat.isTyping = false
+            return
         }
-        if let error = inflight["error"]?.stringValue, !error.isEmpty {
-            chat.messages.append(ChatMessage(author: .system, text: error))
+
+        // An unchanged retained snapshot is the failed attempt captured as
+        // the retry baseline, not evidence from the new submission. Keep the
+        // lease and card until fresh streaming/content/failure or authority.
+        if !replacingTranscript,
+           let retryLease = ChatRuntime.shared.failedRetryRows[botID],
+           retryLease.phase != .prepared,
+           retryLease.route == gatewayRoute(for: botID),
+           retryLease.sessionID == live.sessionID,
+           chat.sessionID == live.sessionID,
+           retryLease.storedID == chat.storedSessionID,
+           retryLease.chatID == ObjectIdentifier(chat) {
+            return
         }
+
+        // A live terminal frame may already own the exact assistant bubble.
+        // Anchor the search after the latest matching retained user. An empty
+        // new-turn assistant must never reuse a failed/streaming row belonging
+        // to an earlier prompt above that user.
+        let retainedUser = retained.user?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let retainedUserIndex = retainedUser.isEmpty ? nil
+            : chat.messages.indices.reversed().first(where: {
+                chat.messages[$0].author == .user
+                    && chat.messages[$0].text == retainedUser
+            })
+        let latestUserIndex = chat.messages.indices.reversed().first(where: {
+            chat.messages[$0].author == .user
+        })
+        let currentTurnLowerBound = retainedUser.isEmpty
+            ? (latestUserIndex.map { $0 + 1 } ?? 0)
+            : retainedUserIndex.map { $0 + 1 }
+        if !replacingTranscript,
+           let lowerBound = currentTurnLowerBound,
+           let index = chat.messages.indices.reversed().first(where: {
+               guard $0 >= lowerBound,
+                     chat.messages[$0].author == .bot else { return false }
+               let row = chat.messages[$0]
+               return TurnFailureLifecycle.compatible(
+                   existing: row, partial: partial, failure: retainedFailure)
+                   && (row.failure != nil || row.isStreaming || dismissed)
+           }) {
+            let old = chat.messages[index].text
+            if old.isEmpty || partial.hasPrefix(old) {
+                chat.messages[index].text = partial
+            }
+            chat.messages[index].isStreaming = retained.streaming && failure == nil
+            chat.messages[index].failure = TurnFailureLifecycle.merge(
+                chat.messages[index].failure, failure)
+            if retainedFailure != nil {
+                let start = min(ChatRuntime.shared.turnFloor[botID] ?? index, index)
+                ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)] =
+                    Set(chat.messages[start...index].map(\.id))
+            }
+            chat.isTyping = false
+            return
+        }
+
+        let persisted = Self.chatMessages(fromTranscript: .array(live.messages))
+            .filter { $0.author == .user }
+        let rows = Self.retainedInflightProjection(
+            retained, failure: failure, persistedUsers: persisted)
+
+        var retainedIDs: Set<UUID> = []
+        for (offset, row) in rows.enumerated() {
+            // The retained projection begins with its owning user. If that
+            // exact user is already the latest matching turn in the visible
+            // transcript, keep the existing row and append only the new
+            // assistant/correction tail beneath it.
+            if offset == 0, row.author == .user,
+               let retainedUserIndex,
+               row.text == retainedUser {
+                if let rowID = row.rowID,
+                   chat.messages[retainedUserIndex].rowID == nil {
+                    chat.messages[retainedUserIndex].rowID = rowID
+                }
+                if retainedFailure != nil {
+                    retainedIDs.insert(chat.messages[retainedUserIndex].id)
+                }
+                continue
+            }
+            if row.author == .user, let rowID = row.rowID,
+               let existing = chat.messages.first(where: {
+                   $0.author == .user && $0.rowID == rowID
+               }) {
+                if retainedFailure != nil { retainedIDs.insert(existing.id) }
+                continue
+            }
+            chat.messages.append(row)
+            if retainedFailure != nil { retainedIDs.insert(row.id) }
+        }
+        if retainedFailure != nil {
+            ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)] = retainedIDs
+        }
+        if rows.contains(where: { $0.author == .bot }) { chat.isTyping = false }
+    }
+
+    /// Pure projection seam for retained-turn ordering regressions. Python's
+    /// correction offsets count Unicode code points; Swift Unicode scalars are
+    /// the corresponding bounded indexing unit (never `Character`, whose one
+    /// grapheme may contain unbounded combining marks).
+    static func retainedInflightProjection(
+        _ retained: RetainedInflightTurn,
+        failure: TurnFailure?,
+        persistedUsers: [ChatMessage] = []
+    ) -> [ChatMessage] {
+        let user = retained.user?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let corrections = retained.corrections
+        let expectedUserTexts = ([user] + corrections).filter { !$0.isEmpty }
+        let persistedTail = Array(persistedUsers.suffix(expectedUserTexts.count))
+        let persistedMatches = persistedTail.map(\.text) == expectedUserTexts
+        var persistedIndex = 0
+
+        func userRow(_ text: String) -> ChatMessage? {
+            guard !text.isEmpty else { return nil }
+            defer { persistedIndex += 1 }
+            if persistedMatches, persistedIndex < persistedTail.count {
+                return persistedTail[persistedIndex]
+            }
+            return ChatMessage(author: .user, time: AppModel.clock(), text: text)
+        }
+
+        var rows: [ChatMessage] = []
+        if let row = userRow(user) { rows.append(row) }
+        let hasFailureEvidence = TurnFailureLifecycle.failure(from: retained) != nil
+        let assistant = hasFailureEvidence || !retained.corrections.isEmpty
+            ? TurnFailureLifecycle.admittedMessage(retained.assistant)
+            : (retained.assistant ?? "")
+        let scalars = Array(assistant.unicodeScalars)
+        let offsets = retained.correctionOffsets
+        let offsetsUsable = !retained.correctionsMalformed
+            && !corrections.isEmpty
+            && offsets?.count == corrections.count
+
+        if offsetsUsable, let offsets {
+            var cursor = 0
+            for (correction, rawOffset) in zip(corrections, offsets) {
+                let boundary = min(max(rawOffset, cursor), scalars.count)
+                if boundary > cursor {
+                    let segment = String(String.UnicodeScalarView(scalars[cursor..<boundary]))
+                    rows.append(ChatMessage(author: .bot, time: AppModel.clock(), text: segment))
+                }
+                if let row = userRow(correction) { rows.append(row) }
+                cursor = boundary
+            }
+            let tail = String(String.UnicodeScalarView(scalars[cursor...]))
+            if !tail.isEmpty || retained.streaming || failure != nil {
+                rows.append(ChatMessage(
+                    author: .bot, time: AppModel.clock(), text: tail,
+                    isStreaming: retained.streaming && failure == nil,
+                    failure: failure))
+            }
+        } else {
+            if !assistant.isEmpty || retained.streaming || failure != nil {
+                rows.append(ChatMessage(
+                    author: .bot, time: AppModel.clock(), text: assistant,
+                    isStreaming: retained.streaming && failure == nil,
+                    failure: failure))
+            }
+            for correction in corrections {
+                if let row = userRow(correction) { rows.append(row) }
+            }
+        }
+        return rows
     }
 
     /// Replay the blocking prompts `session.resume` carries. Both park a real
@@ -881,13 +1209,52 @@ extension AppModel {
         let botID = botID(forSession: event.sessionID, sourceGatewayID: sourceGatewayID)
         switch TypedGatewayEvent(event) {
         case .messageStart:
-            if let botID {
-                chat(for: botID).isTyping = true
+            if let botID, currentChatOwnsMessageEvent(
+                botID: botID, sessionID: event.sessionID,
+                sourceGatewayID: sourceGatewayID) {
+                let chat = chat(for: botID)
+                chat.isTyping = true
+                ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)] = nil
+                ChatRuntime.shared.dismissedFailures[ObjectIdentifier(chat)] = nil
+                if var retryLease = ChatRuntime.shared.failedRetryRows[botID],
+                   retryLease.phase == .submitting,
+                   retryLeaseMatchesEvent(
+                       retryLease, botID: botID, sessionID: event.sessionID,
+                       sourceGatewayID: sourceGatewayID),
+                   let index = chat.messages.firstIndex(where: {
+                       $0.id == retryLease.assistantID
+                   }) {
+                    retryLease.phase = .started
+                    ChatRuntime.shared.failedRetryRows[botID] = retryLease
+                    chat.messages[index].text = ""
+                    chat.messages[index].reasoning = nil
+                    chat.messages[index].toolCalls = []
+                    chat.messages[index].card = nil
+                    chat.messages[index].failure = nil
+                    chat.messages[index].isStreaming = true
+                    ChatRuntime.shared.turnFloor[botID] = index
+                } else {
+                    if ChatRuntime.shared.failedRetryRows[botID]?.phase == .prepared {
+                        ChatRuntime.shared.failedRetryRows[botID] = nil
+                        chat.hasUnresolvedRetry = false
+                    }
+                    // This ordered pump sees message.start before the auxiliary
+                    // tool router. Establish the new turn's ownership here so
+                    // an immediately-following error-only completion cannot
+                    // attach its failure card to historical assistant output.
+                    ChatRuntime.shared.turnFloor[botID] =
+                        chat.messages.indices.last(where: {
+                            chat.messages[$0].author == .bot
+                                && chat.messages[$0].isStreaming
+                        }) ?? chat.messages.count
+                }
                 setWorking(botID, true)
             }
 
         case .messageDelta(let text):
-            guard let botID, !text.isEmpty else { return }
+            guard let botID, !text.isEmpty,
+                  currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
+                                              sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
             chat.isTyping = false
             if let last = chat.messages.last, last.isStreaming {
@@ -900,7 +1267,9 @@ extension AppModel {
         case .thinkingDelta(let text), .reasoningDelta(let text):
             // Reasoning usually precedes the first visible token — open the
             // streaming bubble early so the "Thought" block has a home.
-            guard let botID, !text.isEmpty else { return }
+            guard let botID, !text.isEmpty,
+                  currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
+                                              sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
             chat.isTyping = false
             if let last = chat.messages.last, last.isStreaming {
@@ -914,7 +1283,9 @@ extension AppModel {
         case .messageInterim(let text, let alreadyStreamed):
             // Complete assistant segment between tool calls: finalize the
             // streaming bubble, or append when it never streamed.
-            guard let botID, !text.isEmpty else { return }
+            guard let botID, !text.isEmpty,
+                  currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
+                                              sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
             if let last = chat.messages.last, last.isStreaming {
                 chat.messages[chat.messages.count - 1].text = text
@@ -925,28 +1296,117 @@ extension AppModel {
             chat.isTyping = true   // the turn continues (tools next)
 
         case .messageComplete(let payload):
-            guard let botID else { return }
+            guard let botID,
+                  currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
+                                              sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
             chat.isTyping = false
-            if let last = chat.messages.last, last.isStreaming {
-                if !payload.text.isEmpty { chat.messages[chat.messages.count - 1].text = payload.text }
+            let retainedFailure = TurnFailureLifecycle.failure(from: payload)
+            let dismissal = retainedFailure.flatMap { failure -> DismissedTurnFailure? in
+                guard let route = gatewayRoute(for: botID),
+                      let storedID = chat.storedSessionID, !storedID.isEmpty else { return nil }
+                return DismissedTurnFailure(route: route, storedID: storedID,
+                                            message: failure.message)
+            }
+            let failure = dismissal.map {
+                ChatRuntime.shared.dismissedFailures[ObjectIdentifier(chat)] == $0
+            } == true ? nil : retainedFailure
+            if let retryLease = ChatRuntime.shared.failedRetryRows[botID],
+               retryLease.phase == .submitting,
+               retryLeaseMatchesEvent(
+                   retryLease, botID: botID, sessionID: event.sessionID,
+                   sourceGatewayID: sourceGatewayID),
+               retainedFailure == retryLease.baselineFailure,
+               (!payload.partial
+                   || TurnFailureLifecycle.admittedMessage(payload.text)
+                       == retryLease.baselineText) {
+                // A delayed copy of the failed turn's old terminal frame is
+                // not evidence about the accepted retry. Preserve its lease,
+                // card, and no-replay reconciliation obligation unchanged.
+                chat.usage = payload.usage
+                return
+            }
+            // On non-partial failures Hermes' `text` is the rendered error
+            // fallback, not assistant output. The card owns that string.
+            let visibleText: String
+            if retainedFailure != nil {
+                visibleText = payload.partial
+                    ? TurnFailureLifecycle.admittedMessage(payload.text) : ""
+            } else {
+                visibleText = payload.text
+            }
+            let retryIndex: Int?
+            if let retryLease = ChatRuntime.shared.failedRetryRows[botID],
+               retryLeaseMatchesEvent(
+                   retryLease, botID: botID, sessionID: event.sessionID,
+                   sourceGatewayID: sourceGatewayID),
+               retryLease.phase == .started
+                   || (retryLease.phase == .submitting
+                       && (retainedFailure != retryLease.baselineFailure
+                           || (payload.partial
+                               && TurnFailureLifecycle.admittedMessage(payload.text)
+                                   != retryLease.baselineText))) {
+                retryIndex = chat.messages.firstIndex(where: {
+                    $0.id == retryLease.assistantID
+                })
+            } else {
+                retryIndex = nil
+            }
+            if let retryIndex {
+                chat.messages[retryIndex].text = visibleText
+                chat.messages[retryIndex].isStreaming = false
+                chat.messages[retryIndex].failure = failure
+                if let reasoning = payload.reasoning, !reasoning.isEmpty {
+                    chat.messages[retryIndex].reasoning = reasoning
+                }
+                ChatRuntime.shared.failedRetryRows[botID] = nil
+                chat.hasUnresolvedRetry = false
+            } else if let last = chat.messages.last, last.isStreaming {
+                if !visibleText.isEmpty {
+                    chat.messages[chat.messages.count - 1].text = visibleText
+                }
                 chat.messages[chat.messages.count - 1].isStreaming = false
                 if let reasoning = payload.reasoning, !reasoning.isEmpty,
                    chat.messages[chat.messages.count - 1].reasoning == nil {
                     chat.messages[chat.messages.count - 1].reasoning = reasoning
                 }
-            } else if !payload.text.isEmpty, chat.messages.last?.text != payload.text {
-                chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(), text: payload.text))
+            } else if !visibleText.isEmpty, chat.messages.last?.text != visibleText {
+                chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(),
+                                                 text: visibleText, failure: failure))
             }
-            if let error = payload.error, payload.status == .error {
-                chat.messages.append(ChatMessage(author: .system, text: error))
+            if retainedFailure != nil {
+                let inferredFloor = chat.messages.indices.reversed().first(where: {
+                    chat.messages[$0].author == .user
+                }).map { $0 + 1 } ?? chat.messages.count
+                let floor = min(ChatRuntime.shared.turnFloor[botID] ?? inferredFloor,
+                                chat.messages.count)
+                let failureIndex = retryIndex ?? chat.messages.indices.reversed().first(where: {
+                    $0 >= floor && chat.messages[$0].author == .bot
+                })
+                if let index = failureIndex {
+                    chat.messages[index].isStreaming = false
+                    chat.messages[index].failure = TurnFailureLifecycle.merge(
+                        chat.messages[index].failure, failure)
+                } else if let failure {
+                    chat.messages.append(ChatMessage(
+                        author: .bot, time: AppModel.clock(), text: visibleText,
+                        failure: failure))
+                }
+                if !chat.messages.isEmpty {
+                    let end = chat.messages.index(before: chat.messages.endIndex)
+                    let start = retryIndex.flatMap { index in
+                        chat.messages[...index].lastIndex(where: { $0.author == .user })
+                    } ?? min(floor, end)
+                    ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)] =
+                        Set(chat.messages[start...end].map(\.id))
+                }
             }
             chat.usage = payload.usage
             pruneApprovals(sessionID: event.sessionID, sourceGatewayID: sourceGatewayID)
             setWorking(botID, false)
             if let idx = bots.firstIndex(where: { $0.id == botID }) {
-                if !payload.text.isEmpty {
-                    bots[idx].preview = Self.previewLine(payload.text)
+                if !visibleText.isEmpty {
+                    bots[idx].preview = Self.previewLine(visibleText)
                     bots[idx].previewTime = AppModel.clock()
                 }
             }
@@ -1039,6 +1499,38 @@ extension AppModel {
         default:
             break
         }
+    }
+
+    private func retryLeaseMatchesEvent(_ lease: FailedTurnRetryLease,
+                                        botID: String, sessionID: String,
+                                        sourceGatewayID: String?) -> Bool {
+        guard let sourceGatewayID,
+              sourceGatewayID == lease.route.gatewayID,
+              gatewayRoute(for: botID) == lease.route,
+              lease.sessionID == sessionID,
+              let chat = chats[botID], ObjectIdentifier(chat) == lease.chatID,
+              chat.sessionID == sessionID,
+              chat.storedSessionID == lease.storedID else { return false }
+        return true
+    }
+
+    func currentChatOwnsMessageEvent(botID: String, sessionID: String,
+                                     sourceGatewayID: String?) -> Bool {
+        guard let sourceGatewayID,
+              (stateRoute(for: botID) ?? gatewayRoute(for: botID))?.gatewayID
+                == sourceGatewayID,
+              let chat = chats[botID] else { return false }
+        if let currentSessionID = chat.sessionID {
+            return currentSessionID == sessionID
+        }
+        // Exact routedSessionToBot ownership is sufficient for a background
+        // ChatState that has never been foreground-bound. A reconnect park is
+        // different: it remembers the only SID allowed during the temporary
+        // nil window, so a stale mapped SID cannot mutate the rebound chat.
+        if let parkedSessionID = LiveRuntime.shared.reconnectParkedSessionIDs[botID] {
+            return parkedSessionID == sessionID
+        }
+        return true
     }
 
     // MARK: - Approvals
@@ -1193,20 +1685,45 @@ extension AppModel {
     @discardableResult
     func liveSendAwaiting(text: String, botID: String, chat: ChatState,
                           optimisticID: UUID? = nil,
-                          composeItemID: UUID? = nil) async -> LiveSendResult {
+                          composeItemID: UUID? = nil,
+                          preSubmitAdmission: (() -> Bool)? = nil) async -> LiveSendResult {
         guard mode == .live,
               let route = stateRoute(for: botID) ?? gatewayRoute(for: botID),
               !mutationIsFenced(botID: botID) else {
             return .retained
         }
         let chatID = ObjectIdentifier(chat)
+        let localBaselineDurableUserRowIDs = Set(chat.messages.compactMap { row in
+            row.author == .user ? row.rowID : nil
+        })
+        let localBaselineUndurableMatchingUserCount = chat.messages.filter {
+            $0.author == .user && $0.rowID == nil && $0.text == text
+        }.count
+        let retryBaseline = composeItemID.flatMap { itemID -> FailedTurnRetryLease? in
+            guard let lease = ChatRuntime.shared.failedRetryRows[botID],
+                  lease.token == itemID, lease.authoritativeBaselineKnown,
+                  lease.chatID == ObjectIdentifier(chat) else { return nil }
+            return lease
+        }
+        let baselineDurableUserRowIDs = retryBaseline == nil
+            ? localBaselineDurableUserRowIDs : []
+        let baselineDurableUserRowIDWatermark = retryBaseline?
+            .baselineDurableUserRowIDWatermark ?? localBaselineDurableUserRowIDs.max()
+        let baselineUndurableMatchingUserCount = retryBaseline?
+            .baselineUndurableMatchingUserCount ?? localBaselineUndurableMatchingUserCount
+        let baselineAuthorityKnown = retryBaseline?.authoritativeBaselineKnown ?? false
         let capturedStoredID = chat.storedSessionID
         let capturedGeneration = LiveRuntime.shared.generation
         guard let lifecycleToken = profileLifecycleGenerationToken(for: botID) else {
             return .retained
         }
         let operationComposeID = composeItemID ?? UUID()
+        var preSubmitAdmitted = false
         func retainComposeItem() -> LiveSendResult {
+            // A failed-turn retry that never crossed its exact pre-submit gate
+            // remains represented by the existing card. Do not also enqueue
+            // it for an unowned later replay.
+            if preSubmitAdmission != nil, !preSubmitAdmitted { return .retained }
             normalizeComposeQueueIDs()
             guard !composeQueueIDs.contains(operationComposeID) else { return .retained }
             appendComposeQueue(botID: botID, text: text, id: operationComposeID,
@@ -1250,6 +1767,8 @@ extension AppModel {
             guard owns(sid) else { return retainComposeItem() }
             let client = try await routedClient(for: route)
             guard owns(sid) else { return retainComposeItem() }
+            guard preSubmitAdmission?() != false else { return .retained }
+            preSubmitAdmitted = true
             submitStarted = true
             let receipt = try await client.submitPrompt(sessionID: sid, text: text)
             // Validate the wire receipt before consulting mutable UI ownership.
@@ -1271,7 +1790,13 @@ extension AppModel {
                 ChatRuntime.shared.offlineComposeFences[operationComposeID] =
                     OfflineComposeFence(itemID: operationComposeID, botID: botID, text: text,
                                        route: route, sessionID: expectedSessionID ?? "",
-                                       storedID: storedID, chatID: chatID)
+                                       storedID: storedID, chatID: chatID,
+                                       baselineDurableUserRowIDs: baselineDurableUserRowIDs,
+                                       baselineDurableUserRowIDWatermark:
+                                           baselineDurableUserRowIDWatermark,
+                                       baselineUndurableMatchingUserCount:
+                                           baselineUndurableMatchingUserCount,
+                                       baselineAuthorityKnown: baselineAuthorityKnown)
                 return retainComposeItem()
             }
             guard owns() else { return retainComposeItem() }
@@ -1296,7 +1821,13 @@ extension AppModel {
                 ChatRuntime.shared.offlineComposeFences[operationComposeID] =
                     OfflineComposeFence(itemID: operationComposeID, botID: botID, text: text,
                                        route: route, sessionID: expectedSessionID ?? "",
-                                       storedID: storedID, chatID: chatID)
+                                       storedID: storedID, chatID: chatID,
+                                       baselineDurableUserRowIDs: baselineDurableUserRowIDs,
+                                       baselineDurableUserRowIDWatermark:
+                                           baselineDurableUserRowIDWatermark,
+                                       baselineUndurableMatchingUserCount:
+                                           baselineUndurableMatchingUserCount,
+                                       baselineAuthorityKnown: baselineAuthorityKnown)
                 return retainComposeItem()
             }
             guard owns() else { return retainComposeItem() }
@@ -1627,5 +2158,158 @@ extension AppModel {
                 return
             }
         }
+    }
+
+    /// An authoritative durable user row proves this exact ambiguous prompt
+    /// was delivered. Retire every local replay surface atomically so neither
+    /// reconnect nor queue flush can submit it a second time.
+    func retireProvenOfflineCompose(_ fence: OfflineComposeFence, running: Bool,
+                                    retainedInflight: RetainedInflightTurn? = nil,
+                                    authoritativeRows: [ChatMessage]? = nil) {
+        guard ChatRuntime.shared.offlineComposeFences[fence.itemID] == fence else { return }
+        if let retryLease = ChatRuntime.shared.failedRetryRows[fence.botID],
+           retryLease.token == fence.itemID {
+            guard retryLease.phase != .prepared,
+                  retryLease.route == fence.route,
+                  retryLease.storedID == fence.storedID,
+                  retryLease.chatID == fence.chatID,
+                  settleProvenFailedRetryLease(
+                      retryLease, botID: fence.botID, running: running,
+                      retainedInflight: retainedInflight,
+                      authoritativeRows: authoritativeRows) else {
+                // Retry-backed compose state is one transaction. If the
+                // leased assistant cannot be settled, preserve every replay
+                // and ownership surface for a later authoritative attempt.
+                return
+            }
+        }
+        normalizeComposeQueueIDs()
+        if let index = composeQueueIDs.indices.first(where: { index in
+            composeQueueIDs[index] == fence.itemID
+                && composeQueue.indices.contains(index)
+                && composeQueue[index].botID == fence.botID
+                && composeQueue[index].text == fence.text
+        }) {
+            composeQueue.remove(at: index)
+            composeQueueIDs.remove(at: index)
+        }
+        composeQueueBindings[fence.itemID] = nil
+        ChatRuntime.shared.offlineComposeFences[fence.itemID] = nil
+    }
+
+    @discardableResult
+    func reconcileFailedRetryLeaseFromAuthority(
+        _ lease: FailedTurnRetryLease, botID: String,
+        rows: [ChatMessage], running: Bool,
+        retainedInflight: RetainedInflightTurn? = nil
+    ) -> Bool {
+        guard let current = ChatRuntime.shared.failedRetryRows[botID],
+              current.token == lease.token, current.phase != .prepared,
+              current.route == lease.route, current.storedID == lease.storedID,
+              current.chatID == lease.chatID,
+              gatewayRoute(for: botID) == lease.route,
+              chats[botID].map({ ObjectIdentifier($0) == lease.chatID }) == true,
+              chats[botID]?.sessionID == current.sessionID,
+              chats[botID]?.storedSessionID == lease.storedID,
+              Self.provesFailedRetryDelivery(lease, rows: rows) else { return false }
+        return settleProvenFailedRetryLease(
+            current, botID: botID, running: running,
+            retainedInflight: retainedInflight, authoritativeRows: rows)
+    }
+
+    @discardableResult
+    private func settleProvenFailedRetryLease(_ lease: FailedTurnRetryLease,
+                                              botID: String, running: Bool,
+                                              retainedInflight: RetainedInflightTurn?,
+                                              authoritativeRows: [ChatMessage]?) -> Bool {
+        guard let currentLease = ChatRuntime.shared.failedRetryRows[botID],
+              currentLease.token == lease.token, currentLease == lease,
+              let chat = chats[botID], ObjectIdentifier(chat) == lease.chatID,
+              let index = chat.messages.firstIndex(where: { row in
+                  guard row.id == lease.assistantID else { return false }
+                  switch lease.phase {
+                  case .prepared:
+                      return false
+                  case .submitting:
+                      return row.text == lease.baselineText
+                          && row.failure == lease.baselineFailure
+                  case .started:
+                      return row.failure == nil && row.isStreaming
+                  }
+              }) else { return false }
+        let baseline = chat.messages
+        let retainedFailure = retainedInflight.flatMap(TurnFailureLifecycle.failure(from:))
+        let retainedText = retainedInflight.map {
+            TurnFailureLifecycle.admittedMessage($0.assistant)
+        } ?? ""
+        let retainedIsFresh = retainedInflight.map {
+            $0.streaming || retainedText != lease.baselineText
+                || retainedFailure != lease.baselineFailure
+        } ?? false
+        if let retainedInflight, retainedIsFresh {
+            chat.messages[index].text = retainedText
+            chat.messages[index].reasoning = nil
+            chat.messages[index].toolCalls = []
+            chat.messages[index].card = nil
+            chat.messages[index].failure = retainedFailure
+            chat.messages[index].isStreaming = retainedInflight.streaming
+        } else {
+            chat.messages.remove(at: index)
+        }
+        let authoritativeCandidates = retainedIsFresh
+            ? chat.messages.filter({ $0.id == lease.assistantID }) : []
+        let chatID = ObjectIdentifier(chat)
+        if ChatRuntime.shared.retainedFailureRows[chatID]?.contains(lease.assistantID) == true {
+            // The set protects the entire old failed turn (user + assistant).
+            // Authority now contains that turn, so carrying any member as a
+            // live candidate would append a duplicate after the durable page.
+            ChatRuntime.shared.retainedFailureRows[chatID] = nil
+        }
+        if retainedFailure != nil {
+            ChatRuntime.shared.retainedFailureRows[chatID, default: []]
+                .insert(lease.assistantID)
+        }
+        if let authoritativeRows, !authoritativeRows.isEmpty {
+            let protected = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+            chat.messages = TranscriptHydrationMerge.merge(
+                history: authoritativeRows, baseline: baseline,
+                current: authoritativeCandidates, clearWhenEmpty: true,
+                protectedIDs: protected)
+        }
+        // Clear ownership only after the exact phase-owned row was found and
+        // its retained/durable projection completed successfully.
+        ChatRuntime.shared.failedRetryRows[botID] = nil
+        chat.hasUnresolvedRetry = false
+        ChatRuntime.shared.submitWatchdogs[botID]?.cancel()
+        ChatRuntime.shared.submitWatchdogs[botID] = nil
+        chat.isRunning = running
+        return true
+    }
+
+    static func provesOfflineComposeDelivery(_ fence: OfflineComposeFence,
+                                             rows: [ChatMessage]) -> Bool {
+        guard fence.baselineDurableUserRowIDWatermark != nil
+                || fence.baselineAuthorityKnown else { return false }
+        let watermark = fence.baselineDurableUserRowIDWatermark
+        let postBaseline = Set(rows.compactMap { row -> Int? in
+            guard row.author == .user, row.text == fence.text,
+                  let rowID = row.rowID,
+                  watermark.map({ rowID > $0 }) ?? true else { return nil }
+            return rowID
+        })
+        return postBaseline.count > fence.baselineUndurableMatchingUserCount
+    }
+
+    static func provesFailedRetryDelivery(_ lease: FailedTurnRetryLease,
+                                          rows: [ChatMessage]) -> Bool {
+        guard lease.authoritativeBaselineKnown else { return false }
+        let watermark = lease.baselineDurableUserRowIDWatermark
+        let postBaseline = Set(rows.compactMap { row -> Int? in
+            guard row.author == .user, row.text == lease.promptText,
+                  let rowID = row.rowID,
+                  watermark.map({ rowID > $0 }) ?? true else { return nil }
+            return rowID
+        })
+        return postBaseline.count > lease.baselineUndurableMatchingUserCount
     }
 }

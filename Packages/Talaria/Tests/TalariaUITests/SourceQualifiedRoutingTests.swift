@@ -378,7 +378,6 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         runtime.routedSessionToBot[
             GatewaySessionRoute(gatewayID: "homelab", sessionID: "deadbeef")
         ] = "homelab::researcher"
-
         XCTAssertEqual(model.botID(forSession: "deadbeef", sourceGatewayID: "primary"),
                        "default")
         XCTAssertEqual(model.botID(forSession: "deadbeef", sourceGatewayID: "homelab"),
@@ -495,6 +494,7 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         runtime.routedSessionToBot[
             GatewaySessionRoute(gatewayID: "homelab", sessionID: "deadbeef")
         ] = "homelab::researcher"
+        model.chat(for: "homelab::researcher").sessionID = "deadbeef"
 
         let event = GatewayEvent(type: "message.delta", sessionID: "deadbeef",
                                  payload: .object(["text": .string("remote answer")]))
@@ -584,6 +584,7 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         runtime.routedSessionToBot[
             GatewaySessionRoute(gatewayID: "homelab", sessionID: "deadbeef")
         ] = "homelab::researcher"
+        model.chat(for: "homelab::researcher").sessionID = "deadbeef"
         runtime.approvalTargets["primary-approval"] = target(
             gatewayID: "primary", profile: "default", sessionID: "deadbeef",
             requestID: "primary-wire")
@@ -1407,6 +1408,7 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         runtime.gatewayID = "primary"
         let route = GatewaySessionRoute(gatewayID: "homelab", sessionID: "deadbeef")
         runtime.routedSessionToBot[route] = "homelab::default"
+        model.chat(for: "homelab::default").sessionID = "deadbeef"
         let remote = GatewayBotRoute(gatewayID: "homelab", profile: "default")
 
         model.handle(event: GatewayEvent(

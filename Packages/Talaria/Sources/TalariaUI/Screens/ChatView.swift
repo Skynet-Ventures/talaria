@@ -117,6 +117,10 @@ public struct ChatView: View {
         (chat?.isRunning ?? false) || (chat?.isTyping ?? false)
     }
 
+    private var hasUnresolvedFailedTurnRetry: Bool {
+        model.hasUnresolvedFailedTurnRetry(in: botID)
+    }
+
     private var attachmentCount: Int { chat?.attachments.count ?? 0 }
     private var transcriptPolicy: TranscriptPresentationPolicy {
         TranscriptPresentationPolicy(detail: model.settings.transcriptDetail)
@@ -608,6 +612,19 @@ public struct ChatView: View {
                         .padding(.top, 8)
                         .padding(.leading, theme.id == .ink ? 14 : 0)
                 }
+                if let failure = message.failure {
+                    FailedTurnCard(
+                        failure: failure,
+                        theme: theme,
+                        canRetry: model.canRetryFailedTurn(message, in: botID),
+                        canDismiss: model.canDismissFailedTurn(message, in: botID),
+                        retry: { model.retryFailedTurn(message, in: botID) },
+                        dismiss: { model.dismissFailedTurn(message, in: botID) },
+                        openSettings: { model.requestSettings() }
+                    )
+                    .padding(.top, 8)
+                    .padding(.leading, theme.id == .ink ? 12 : 0)
+                }
                 if let emoji = model.reaction(for: message) {
                     reactionBadge(emoji)
                         .padding(.top, 4)
@@ -677,14 +694,21 @@ public struct ChatView: View {
                 Label(copy.rewindMessage(theme.id), systemImage: "arrow.uturn.backward")
             }
         }
-        if message.author == .bot, model.canActOnTranscript(message, in: botID) {
+        // Failed turns own a classifier-gated plain Retry on their card.
+        // Never leak the ordinary destructive Regenerate action around that
+        // verdict through the long-press menu.
+        if message.author == .bot,
+           FailedTurnCardPolicy.allowsOrdinaryAssistantActions(for: message.failure),
+           model.canActOnTranscript(message, in: botID) {
             Button {
                 model.regenerate(from: message, in: botID)
             } label: {
                 Label(copy.regenerateMessage(theme.id), systemImage: "arrow.clockwise")
             }
         }
-        if message.author == .bot, model.canBranchFromMessage(message, in: botID) {
+        if message.author == .bot,
+           FailedTurnCardPolicy.allowsOrdinaryAssistantActions(for: message.failure),
+           model.canBranchFromMessage(message, in: botID) {
             Button {
                 model.branchFromMessage(message, in: botID)
             } label: {
@@ -1249,7 +1273,8 @@ public struct ChatView: View {
     /// Attachments alone are a valid turn — the gateway supplies the implicit
     /// "what is this?" prompt for an image sent without words.
     private var canSend: Bool {
-        guard !model.isBranchingFromMessage(in: botID) else { return false }
+        guard !model.isBranchingFromMessage(in: botID),
+              !hasUnresolvedFailedTurnRetry else { return false }
         return switch composerAction {
         case .disabled, .stop: false
         default: true
@@ -1258,7 +1283,9 @@ public struct ChatView: View {
 
     private var composerAction: ChatComposerAction {
         ChatComposerActionPolicy.action(draft: draft, attachmentCount: attachmentCount,
-                                        isTurnRunning: turnRunning)
+                                        isTurnRunning: turnRunning,
+                                        hasUnresolvedFailedTurnRetry:
+                                            hasUnresolvedFailedTurnRetry)
     }
 
     private var stopGlyphColor: Color {
@@ -1315,6 +1342,7 @@ public struct ChatView: View {
             .contentShape(sendShape)
         }
         .buttonStyle(.plain)
+        .disabled(!canSend && !showsStop)
         .shadow(color: showsStop && theme.glowRadius > 0 ? theme.danger.opacity(0.45) : .clear,
                 radius: 8)
         .animation(TalariaMotionTokens.opacityAnimation(.fast, reducedMotion: reducedMotion),

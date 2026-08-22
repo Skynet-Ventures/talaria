@@ -136,8 +136,142 @@ public struct Usage: Sendable, Equatable {
     }
 }
 
+/// Stable structured failure descriptor emitted by current Hermes. The
+/// descriptor is advisory, but a present malformed value is kept distinct
+/// from an older gateway that omitted it.
+public struct TurnErrorSurface: Codable, Sendable, Equatable {
+    public enum Layer: String, Codable, Sendable, CaseIterable {
+        case provider, endpoint, streaming, auth, billing, gateway, runtime, disk
+    }
+
+    public static let maximumCodeScalars = 128
+    public static let maximumIdentityScalars = 256
+
+    public var layer: Layer
+    public var code: String
+    public var retryable: Bool
+    public var provider: String?
+    public var model: String?
+
+    public init(layer: Layer, code: String, retryable: Bool,
+                provider: String? = nil, model: String? = nil) {
+        self.layer = layer
+        self.code = code
+        self.retryable = retryable
+        self.provider = provider
+        self.model = model
+    }
+
+    public init(from decoder: Decoder) throws {
+        let raw = try JSONValue(from: decoder)
+        guard case .value(let surface) = TurnErrorSurfaceCodec.admit(raw) else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "Malformed or unsafe turn error surface"))
+        }
+        self = surface
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(layer, forKey: .layer)
+        try container.encode(code, forKey: .code)
+        try container.encode(retryable, forKey: .retryable)
+        try container.encodeIfPresent(provider, forKey: .provider)
+        try container.encodeIfPresent(model, forKey: .model)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case layer, code, retryable, provider, model
+    }
+}
+
+public enum TurnErrorSurfaceAdmission: Sendable, Equatable {
+    case absent
+    case malformed
+    case value(TurnErrorSurface)
+
+    public var surface: TurnErrorSurface? {
+        if case .value(let surface) = self { return surface }
+        return nil
+    }
+
+    public var isMalformed: Bool {
+        if case .malformed = self { return true }
+        return false
+    }
+}
+
+enum TurnErrorSurfaceCodec {
+    static func admit(_ value: JSONValue?) -> TurnErrorSurfaceAdmission {
+        guard let value, value != .null else { return .absent }
+        guard let object = value.objectValue,
+              let layerText = object["layer"]?.stringValue,
+              let layer = TurnErrorSurface.Layer(rawValue: layerText) else { return .malformed }
+
+        let code: String
+        if let rawCode = object["code"] {
+            if let codeText = rawCode.stringValue {
+                guard isWithinSafeBound(codeText, maximum: TurnErrorSurface.maximumCodeScalars)
+                else { return .malformed }
+                code = hasVisibleScalar(codeText) ? codeText : "unknown"
+            } else {
+                // Desktop treats a non-string code like an omitted one.
+                code = "unknown"
+            }
+        } else {
+            code = "unknown"
+        }
+        // Current producers send an exact Bool. Compatibility matches pinned
+        // Desktop: only literal false disables retry; absent/foreign values
+        // remain retryable rather than hiding an otherwise valid layer.
+        let retryable = object["retryable"]?.boolValue != false
+
+        return .value(TurnErrorSurface(layer: layer, code: code, retryable: retryable,
+                                       provider: optionalField(object, key: "provider"),
+                                       model: optionalField(object, key: "model")))
+    }
+
+    private static func optionalField(_ object: [String: JSONValue], key: String)
+        -> String? {
+        guard let raw = object[key] else { return nil }
+        guard let string = raw.stringValue,
+              isWithinSafeBound(string, maximum: TurnErrorSurface.maximumIdentityScalars),
+              hasVisibleScalar(string) else { return nil }
+        return string
+    }
+
+    /// Work is bounded before whitespace/control inspection. Reject rather
+    /// than truncate: code/provider/model are diagnostic identity, and a
+    /// clipped value would name a different failure.
+    private static func isWithinSafeBound(_ value: String, maximum: Int) -> Bool {
+        let bounded = value.unicodeScalars.prefix(maximum + 1)
+        guard bounded.count <= maximum else { return false }
+        for scalar in bounded {
+            if isUnsafeControl(scalar.value) { return false }
+        }
+        return true
+    }
+
+    private static func hasVisibleScalar(_ value: String) -> Bool {
+        value.unicodeScalars.contains {
+            !CharacterSet.whitespacesAndNewlines.contains($0)
+        }
+    }
+
+    private static func isUnsafeControl(_ value: UInt32) -> Bool {
+        if value <= 0x1F || (0x7F...0x9F).contains(value) { return true }
+        switch value {
+        case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 public struct MessageCompletePayload: Sendable {
-    public enum Status: String, Sendable { case complete, interrupted, error }
+    public enum Status: String, Sendable { case complete, interrupted, error, malformed }
     public var text: String
     public var status: Status
     public var usage: Usage
@@ -145,15 +279,213 @@ public struct MessageCompletePayload: Sendable {
     public var warning: String?
     public var error: String?
     public var recoverable: Bool
+    public var partial: Bool
+    public var errorSurfaceAdmission: TurnErrorSurfaceAdmission
+
+    public var errorSurface: TurnErrorSurface? { errorSurfaceAdmission.surface }
 
     public init(_ v: JSONValue?) {
         text = v?["text"]?.stringValue ?? ""
-        status = Status(rawValue: v?["status"]?.stringValue ?? "complete") ?? .complete
+        if let rawStatus = v?["status"] {
+            status = rawStatus.stringValue.flatMap(Status.init(rawValue:)) ?? .malformed
+        } else {
+            // Older gateways omitted status on successful terminal frames.
+            status = .complete
+        }
         usage = Usage(v?["usage"])
         reasoning = v?["reasoning"]?.stringValue
         warning = v?["warning"]?.stringValue
         error = v?["error"]?.stringValue
         recoverable = v?["recoverable"]?.boolValue ?? false
+        partial = v?["partial"]?.boolValue ?? false
+        errorSurfaceAdmission = TurnErrorSurfaceCodec.admit(v?["error_surface"])
+    }
+}
+
+/// Typed view of `session.resume.live.inflight`. Healthy running snapshots
+/// omit status/error; retained failed snapshots carry the same descriptor as
+/// the terminal `message.complete` frame.
+public enum RetainedInflightTurnAdmission: Sendable, Equatable {
+    case absent
+    case malformed
+    case value(RetainedInflightTurn)
+
+    public var turn: RetainedInflightTurn? {
+        if case .value(let turn) = self { return turn }
+        return nil
+    }
+
+    static func admit(_ value: JSONValue?) -> RetainedInflightTurnAdmission {
+        guard let value, value != .null else { return .absent }
+        guard let turn = RetainedInflightTurn(value) else { return .malformed }
+        return .value(turn)
+    }
+}
+
+public struct RetainedInflightTurn: Sendable, Equatable {
+    public static let maximumCorrections = 32
+    public static let maximumCorrectionScalars = 4_096
+    public static let maximumUserScalars = 65_536
+    public static let maximumAssistantScalars = 65_536
+    public static let maximumErrorScalars = 8_192
+    /// Must match the live terminal admission marker: failure message identity
+    /// is used for resume dedupe and the user's local Dismiss fence.
+    private static let primaryClippedMarker = "\n… [turn detail clipped]"
+    private static let correctionClippedMarker = "\n… [correction clipped]"
+    private static let correctionRemovedMarker = "[correction content removed]"
+
+    public var user: String?
+    public var assistant: String?
+    public var corrections: [String]
+    public var correctionOffsets: [Int]?
+    /// True when correction text/count exceeded admission or the offsets were
+    /// present but not an exact nonnegative integer vector. The UI may use its
+    /// safe legacy placement, but must not trust/reparse the raw array.
+    public var correctionsMalformed: Bool
+    public var streaming: Bool
+    public var error: String?
+    public var status: MessageCompletePayload.Status?
+    public var recoverable: Bool?
+    public var errorSurfaceAdmission: TurnErrorSurfaceAdmission
+
+    public var errorSurface: TurnErrorSurface? { errorSurfaceAdmission.surface }
+
+    init?(_ value: JSONValue?) {
+        guard let object = value?.objectValue else { return nil }
+        user = Self.admitPrimary(object["user"], maximum: Self.maximumUserScalars)
+        assistant = Self.admitPrimary(object["assistant"], maximum: Self.maximumAssistantScalars)
+        let correctionAdmission = Self.admitCorrections(object["corrections"])
+        corrections = correctionAdmission.values
+        let offsetAdmission = Self.admitOffsets(object["correction_offsets"],
+                                                expectedCount: corrections.count)
+        correctionOffsets = offsetAdmission.values
+        correctionsMalformed = correctionAdmission.malformed || offsetAdmission.malformed
+        streaming = object["streaming"]?.boolValue ?? false
+        error = Self.admitPrimary(object["error"], maximum: Self.maximumErrorScalars)
+        if let rawStatus = object["status"] {
+            status = rawStatus.stringValue.flatMap(MessageCompletePayload.Status.init(rawValue:))
+                ?? .malformed
+        } else {
+            status = nil
+        }
+        recoverable = object["recoverable"]?.boolValue
+        errorSurfaceAdmission = TurnErrorSurfaceCodec.admit(object["error_surface"])
+    }
+
+    /// Keep retained turn bodies finite before projection performs trimming,
+    /// splitting, or scalar indexing. A separate raw-work cap lets dense
+    /// controls consume finite work without hiding all following safe text.
+    /// The returned value, including its marker, never exceeds `maximum`.
+    private static func admitPrimary(_ value: JSONValue?, maximum: Int) -> String? {
+        guard let string = value?.stringValue else { return nil }
+        let markerScalars = primaryClippedMarker.unicodeScalars
+        let markerCount = markerScalars.count
+        let rawWorkMaximum = maximum * 4
+        let raw = string.unicodeScalars.prefix(rawWorkMaximum + 1)
+        let rawWasClipped = raw.count > rawWorkMaximum
+        var safe = String.UnicodeScalarView()
+        safe.reserveCapacity(maximum + 1)
+        var safeCount = 0
+        for scalar in raw.prefix(rawWorkMaximum) {
+            if scalar.value == 0x09 || scalar.value == 0x0A {
+                safe.append(scalar)
+                safeCount += 1
+            } else if !isUnsafePrimaryControl(scalar.value) {
+                safe.append(scalar)
+                safeCount += 1
+            }
+            if safeCount > maximum { break }
+        }
+        guard rawWasClipped || safeCount > maximum else { return String(safe) }
+        let contentCount = max(0, maximum - markerCount)
+        var clipped = String.UnicodeScalarView(safe.prefix(contentCount))
+        clipped.append(contentsOf: markerScalars.prefix(maximum - clipped.count))
+        return String(clipped)
+    }
+
+    private static func isUnsafePrimaryControl(_ value: UInt32) -> Bool {
+        if value <= 0x1F || (0x7F...0x9F).contains(value) { return true }
+        switch value {
+        case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func admitCorrections(_ value: JSONValue?)
+        -> (values: [String], malformed: Bool) {
+        guard let value else { return ([], false) }
+        guard let array = value.arrayValue else { return ([], true) }
+        var values: [String] = []
+        var malformed = array.count > maximumCorrections
+        let retainedCount = array.count > maximumCorrections
+            ? maximumCorrections - 1 : array.count
+        for candidate in array.prefix(retainedCount) {
+            guard let string = candidate.stringValue else { malformed = true; continue }
+            let admission = admitCorrection(string)
+            values.append(admission.value)
+            malformed = malformed || admission.clipped
+        }
+        if array.count > maximumCorrections {
+            let omitted = array.count - retainedCount
+            values.append("[\(omitted) additional corrections omitted]")
+        }
+        return (values, malformed)
+    }
+
+    /// Keep every accepted string correction in its original array position.
+    /// A clipped correction is still visible and forces conservative legacy
+    /// placement because its original scalar offsets no longer address the
+    /// bounded presentation text.
+    private static func admitCorrection(_ string: String)
+        -> (value: String, clipped: Bool) {
+        let markerScalars = correctionClippedMarker.unicodeScalars
+        let markerCount = markerScalars.count
+        let rawWorkMaximum = maximumCorrectionScalars * 4
+        let raw = string.unicodeScalars.prefix(rawWorkMaximum + 1)
+        let rawWasClipped = raw.count > rawWorkMaximum
+        var safe = String.UnicodeScalarView()
+        safe.reserveCapacity(maximumCorrectionScalars + 1)
+        var safeCount = 0
+        for scalar in raw.prefix(rawWorkMaximum) {
+            if scalar.value == 0x09 || scalar.value == 0x0A {
+                safe.append(scalar)
+                safeCount += 1
+            } else if !isUnsafePrimaryControl(scalar.value) {
+                safe.append(scalar)
+                safeCount += 1
+            }
+            if safeCount > maximumCorrectionScalars { break }
+        }
+        guard rawWasClipped || safeCount > maximumCorrectionScalars else {
+            if safeCount == 0, !string.unicodeScalars.isEmpty {
+                return (correctionRemovedMarker, true)
+            }
+            return (String(safe), false)
+        }
+        let contentCount = max(0, maximumCorrectionScalars - markerCount)
+        var clipped = String.UnicodeScalarView(safe.prefix(contentCount))
+        clipped.append(contentsOf: markerScalars.prefix(
+            maximumCorrectionScalars - clipped.count))
+        return (String(clipped), true)
+    }
+
+    private static func admitOffsets(_ value: JSONValue?, expectedCount: Int)
+        -> (values: [Int]?, malformed: Bool) {
+        guard let value else { return (nil, false) }
+        guard let array = value.arrayValue,
+              array.count == expectedCount,
+              array.count <= maximumCorrections else { return (nil, true) }
+        var values: [Int] = []
+        values.reserveCapacity(array.count)
+        for candidate in array {
+            guard let number = candidate.doubleValue, number.isFinite,
+                  number >= 0, number.rounded(.towardZero) == number,
+                  number <= Double(Int.max) else { return (nil, true) }
+            values.append(Int(number))
+        }
+        return (values, false)
     }
 }
 

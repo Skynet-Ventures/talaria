@@ -33,6 +33,19 @@ final class ChatRuntime {
     /// token can't land on the previous turn's bubble.
     var turnFloor: [String: Int] = [:]
 
+    /// Exact local rows reconstructed from a retained failed turn. Canonical
+    /// history may legitimately omit them, so hydration receives this
+    /// identity set rather than trying to rediscover the turn from repeated
+    /// prompt text. Keyed by ChatState identity to prevent same runtime ids on
+    /// two gateways from sharing evidence.
+    var retainedFailureRows: [ObjectIdentifier: Set<UUID>] = [:]
+    var dismissedFailures: [ObjectIdentifier: DismissedTurnFailure] = [:]
+    /// Retry keeps the failed row/card intact until the exact prepared token
+    /// crosses the submit boundary. Only that submitting lease may reuse the
+    /// assistant on message.start/complete/resume; an unrelated start cancels
+    /// a merely prepared lease without touching its card.
+    var failedRetryRows: [String: FailedTurnRetryLease] = [:]
+
     /// A submit that never produces message.start must not leave the composer
     /// stuck on Stop (RPC accepted, gateway wedged, socket died mid-flight).
     var submitWatchdogs: [String: Task<Void, Never>] = [:]
@@ -120,7 +133,8 @@ final class ChatRuntime {
     /// old state instead.
     func migrateMutationState(botID: String, route: GatewayBotRoute,
                               sessionID: String, storedID: String?,
-                              generation: Int, chatID: ObjectIdentifier) {
+                              generation: Int, chatID: ObjectIdentifier,
+                              oldSessionID: String? = nil) {
         if var action = steerActions[botID] {
             if action.route == route, Self.sameDurable(action.storedID, storedID) {
                 action.sessionID = sessionID
@@ -169,6 +183,16 @@ final class ChatRuntime {
                 transcriptFences[botID] = fence
             } else {
                 transcriptFences[botID] = nil
+            }
+        }
+        if var retry = failedRetryRows[botID] {
+            if let oldSessionID, retry.sessionID == oldSessionID,
+               retry.route == route, retry.chatID == chatID,
+               Self.sameDurable(retry.storedID, storedID) {
+                retry.sessionID = sessionID
+                failedRetryRows[botID] = retry
+            } else {
+                failedRetryRows[botID] = nil
             }
         }
         migratePendingStop(botID: botID, route: route, sessionID: sessionID,
@@ -559,6 +583,42 @@ final class ChatRuntime {
     static let generatingPrefix = "generating:"
 }
 
+struct DismissedTurnFailure: Equatable {
+    var route: GatewayBotRoute
+    var storedID: String
+    var message: String
+}
+
+struct FailedTurnRetryRequest: Equatable {
+    var token: UUID
+    var text: String
+    var assistantID: UUID
+    var route: GatewayBotRoute
+    var storedID: String
+    var chatID: ObjectIdentifier
+    /// Explicitly empty: failed Retry is a fresh submit, never regenerate.
+    var truncate = TranscriptActing.TruncateAddress()
+}
+
+struct FailedTurnRetryLease: Equatable {
+    enum Phase: Equatable { case prepared, submitting, started }
+    var token: UUID
+    var assistantID: UUID
+    var route: GatewayBotRoute
+    var sessionID: String
+    var storedID: String
+    var chatID: ObjectIdentifier
+    var phase: Phase
+    var baselineText: String
+    var baselineFailure: TurnFailure
+    var promptText: String
+    var baselineDurableUserRowIDWatermark: Int?
+    var baselineUndurableMatchingUserCount: Int
+    /// True only after an exact authoritative history read. `nil` watermark
+    /// then means a proven empty durable baseline, rather than unknown.
+    var authoritativeBaselineKnown = false
+}
+
 struct TranscriptActionFence: Equatable {
     var operationID: UUID
     var sessionID: String
@@ -713,6 +773,16 @@ struct OfflineComposeFence: Equatable {
     var sessionID: String
     var storedID: String
     var chatID: ObjectIdentifier
+    /// Durable user rows carrying the same body before this submit began.
+    /// Reconciliation requires a new row id; text alone is never delivery
+    /// proof for a retry or repeated slash-generated prompt.
+    var baselineDurableUserRowIDs: Set<Int> = []
+    /// Strict monotonic proof boundary. A different older row id is still old.
+    var baselineDurableUserRowIDWatermark: Int? = nil
+    var baselineUndurableMatchingUserCount: Int = 0
+    /// Allows a nil watermark only when an exact authoritative read proved
+    /// that no durable user row existed before submission.
+    var baselineAuthorityKnown = false
 }
 
 struct StopTurnLease {
@@ -1040,7 +1110,11 @@ extension AppModel {
     public func routeToolEvent(_ event: GatewayEvent, sourceGatewayID: String? = nil) {
         guard mode == .live,
               let botID = botID(forSession: event.sessionID,
-                                sourceGatewayID: sourceGatewayID) else { return }
+                                sourceGatewayID: sourceGatewayID),
+              currentChatOwnsMessageEvent(
+                botID: botID, sessionID: event.sessionID,
+                sourceGatewayID: sourceGatewayID ?? LiveRuntime.shared.gatewayID)
+        else { return }
         let chat = chat(for: botID)
         ChatRuntime.shared.pruneTranscriptState(
             botID: botID, generation: LiveRuntime.shared.generation)
@@ -1051,7 +1125,9 @@ extension AppModel {
             drainStartedQueuedPrompt(botID: botID, sessionID: event.sessionID)
             clearWatchdog(botID)
             chat.isRunning = true
-            ChatRuntime.shared.turnFloor[botID] = chat.messages.count
+            ChatRuntime.shared.turnFloor[botID] = chat.messages.indices.last(where: {
+                chat.messages[$0].author == .bot && chat.messages[$0].isStreaming
+            }) ?? chat.messages.count
 
         case .messageComplete(let payload):
             noteQueuedPromptCompletion(botID: botID, sessionID: event.sessionID)
@@ -1216,6 +1292,14 @@ extension AppModel {
         // the words for an image sent without any.
         guard !trimmed.isEmpty || !chat.attachments.isEmpty else { return }
 
+        // A failed-turn retry owns the composer until its delivery is proved
+        // or rejected. The retry itself bypasses this surface and submits via
+        // liveSendAwaiting after its tokenized pre-submit admission gate.
+        guard ChatRuntime.shared.failedRetryRows[botID] == nil else {
+            scheduleRetainedMutationReconciliation(botID: botID)
+            return
+        }
+
         switch mode {
         case .demo:
             guard !trimmed.isEmpty else { return }
@@ -1347,6 +1431,7 @@ extension AppModel {
             || runtime.transcriptFences[botID] != nil
             || runtime.transcriptLeases[botID] != nil
             || runtime.offlineComposeFences.values.contains(where: { $0.botID == botID })
+            || runtime.failedRetryRows[botID].map({ $0.phase != .prepared }) == true
             || CanonicalChatRuntime.shared.ambiguousKickoffs[botID] != nil
     }
 
@@ -1456,17 +1541,25 @@ extension AppModel {
                     let payload = try await client.latestSessionMessages(
                         storedID: composeFence.storedID, profile: route.profile)
                     let rows = Self.chatMessages(fromTranscript: payload)
-                    let proof = rows.contains {
-                        $0.author == .user && $0.rowID != nil && $0.text == composeFence.text
-                    }
+                    let proof = Self.provesOfflineComposeDelivery(composeFence, rows: rows)
                     guard live.storedSessionID.isEmpty || live.storedSessionID == composeFence.storedID,
                           chats[botID].map({ ObjectIdentifier($0) == composeFence.chatID }) == true,
                           chats[botID]?.storedSessionID == composeFence.storedID,
                           proof else { return }
-                    ChatRuntime.shared.offlineComposeFences[composeFence.itemID] = nil
+                    self.retireProvenOfflineCompose(
+                        composeFence, running: live.running,
+                        retainedInflight: live.retainedInflight,
+                        authoritativeRows: rows)
                 } catch {
                     // An authoritative read failure is not proof of rejection.
                 }
+            }
+            guard !Task.isCancelled else { return }
+            if let retryLease = ChatRuntime.shared.failedRetryRows[botID],
+               retryLease.phase != .prepared,
+               ChatRuntime.shared.offlineComposeFences[retryLease.token] == nil {
+                await self.reconcileFailedRetryLease(
+                    retryLease, botID: botID, client: client)
             }
             guard !Task.isCancelled else { return }
             if let lease = CanonicalChatRuntime.shared.ambiguousKickoffs[botID] {
@@ -1476,6 +1569,33 @@ extension AppModel {
         }
         runtime.reconciliationTasks[botID] = task
         return true
+    }
+
+    private func reconcileFailedRetryLease(_ lease: FailedTurnRetryLease,
+                                           botID: String,
+                                           client: GatewayClient) async {
+        guard ChatRuntime.shared.failedRetryRows[botID]?.token == lease.token,
+              gatewayRoute(for: botID) == lease.route,
+              let chat = chats[botID], ObjectIdentifier(chat) == lease.chatID,
+              chat.sessionID == lease.sessionID,
+              chat.storedSessionID == lease.storedID else { return }
+        do {
+            let live = try await client.resumeSession(
+                lease.storedID, profile: lease.route.profile, deferHistory: false)
+            let payload = try await client.latestSessionMessages(
+                storedID: lease.storedID, profile: lease.route.profile)
+            let rows = Self.chatMessages(fromTranscript: payload)
+            guard live.storedSessionID.isEmpty || live.storedSessionID == lease.storedID,
+                  ChatRuntime.shared.failedRetryRows[botID]?.token == lease.token,
+                  chats[botID].map({ ObjectIdentifier($0) == lease.chatID }) == true,
+                  chats[botID]?.sessionID == ChatRuntime.shared.failedRetryRows[botID]?.sessionID,
+                  chats[botID]?.storedSessionID == lease.storedID else { return }
+            _ = reconcileFailedRetryLeaseFromAuthority(
+                lease, botID: botID, rows: rows, running: live.running,
+                retainedInflight: live.retainedInflight)
+        } catch {
+            // No authoritative proof: preserve the no-replay lease and card.
+        }
     }
 
     private func steer(text: String, botID: String, sessionID: String, chat: ChatState) {
@@ -2055,6 +2175,9 @@ extension AppModel {
             let chat = self.chat(for: botID)
             if chat.messages.last?.isStreaming != true { chat.isRunning = false }
             ChatRuntime.shared.submitWatchdogs[botID] = nil
+            if ChatRuntime.shared.failedRetryRows[botID]?.phase == .submitting {
+                self.scheduleRetainedMutationReconciliation(botID: botID)
+            }
         }
     }
 
@@ -2103,6 +2226,240 @@ extension AppModel {
             return TranscriptActing.planReload(chat.messages, from: message.id) != nil
         }
         return false
+    }
+
+    /// Presentation-only ownership query. The composer must preserve its draft
+    /// while this exact retry owns the next same-session lifecycle event.
+    public func hasUnresolvedFailedTurnRetry(in botID: String) -> Bool {
+        chat(for: botID).hasUnresolvedRetry
+    }
+
+    /// A failed-turn retry is a fresh prompt, never a destructive regenerate.
+    /// Hermes has already terminated the failed turn; sending the same body
+    /// without truncate matches Desktop and avoids treating a possibly
+    /// unpersisted retained user row as a safe truncation address.
+    public func canRetryFailedTurn(_ message: ChatMessage, in botID: String) -> Bool {
+        guard mode == .live, let failure = message.failure,
+              failure.errorSurface?.retryable != false,
+              ChatRuntime.shared.failedRetryRows[botID] == nil else { return false }
+        let chat = chat(for: botID)
+        guard let index = chat.messages.firstIndex(where: { $0.id == message.id }),
+              chat.messages[index].author == .bot,
+              chat.messages[...index].last(where: {
+                  $0.author == .user
+                      && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) != nil,
+              chat.sessionID?.isEmpty == false,
+              chat.storedSessionID?.isEmpty == false,
+              gatewayRoute(for: botID) != nil,
+              !chat.isRunning, !chat.isTyping,
+              LiveRuntime.shared.attachTasks[botID] == nil,
+              !mutationIsFenced(botID: botID) else { return false }
+        return true
+    }
+
+    public func retryFailedTurn(_ message: ChatMessage, in botID: String) {
+        guard let request = prepareFailedTurnRetry(message, in: botID) else { return }
+        let chat = chat(for: botID)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let lease = ChatRuntime.shared.failedRetryRows[botID],
+                  lease.token == request.token else { return }
+            guard lease.phase == .prepared,
+                  self.gatewayRoute(for: botID) == request.route,
+                  chat.storedSessionID == request.storedID,
+                  self.chats[botID].map(ObjectIdentifier.init) == request.chatID else {
+                if lease.phase == .prepared {
+                    self.cancelFailedTurnRetry(request, in: botID, chat: chat)
+                }
+                return
+            }
+            // A local transcript cannot distinguish a genuinely empty durable
+            // baseline from an optimistic/nil-id row. Establish the retry's
+            // exact authoritative watermark before any submit; a failed read
+            // leaves the original card retryable and sends nothing.
+            do {
+                let client = try await self.routedClient(for: request.route)
+                let payload = try await client.latestSessionMessages(
+                    storedID: request.storedID, profile: request.route.profile)
+                guard self.applyFailedRetryAuthoritativeBaseline(
+                    request, in: botID, payload: payload) else {
+                    self.cancelFailedTurnRetry(request, in: botID, chat: chat)
+                    return
+                }
+            } catch {
+                self.cancelFailedTurnRetry(request, in: botID, chat: chat)
+                return
+            }
+            let result = await self.liveSendAwaiting(
+                text: request.text, botID: botID, chat: chat,
+                composeItemID: request.token,
+                preSubmitAdmission: {
+                    self.admitFailedTurnRetrySubmission(request, in: botID)
+                })
+            self.settleFailedTurnRetry(request, result: result, in: botID, chat: chat)
+        }
+    }
+
+    /// Synchronous admission/projection seam. Tests use it to prove Retry
+    /// neither appends a second user bubble nor acquires a truncate address;
+    /// the public action performs only the subsequent exact-route submit.
+    func prepareFailedTurnRetry(_ message: ChatMessage,
+                                in botID: String) -> FailedTurnRetryRequest? {
+        guard canRetryFailedTurn(message, in: botID) else { return nil }
+        let chat = chat(for: botID)
+        guard let failure = message.failure,
+              let index = chat.messages.firstIndex(where: { $0.id == message.id }),
+              let route = gatewayRoute(for: botID),
+              let storedID = chat.storedSessionID, !storedID.isEmpty,
+              let user = chat.messages[...index].last(where: {
+                  $0.author == .user
+                      && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) else { return nil }
+        let token = UUID()
+        let watermark = chat.messages.compactMap { row in
+            row.author == .user ? row.rowID : nil
+        }.max()
+        let undurableMatchingCount = chat.messages.filter {
+            $0.author == .user && $0.rowID == nil && $0.text == user.text
+        }.count
+        let request = FailedTurnRetryRequest(
+            token: token, text: user.text, assistantID: message.id, route: route,
+            storedID: storedID, chatID: ObjectIdentifier(chat))
+        ChatRuntime.shared.failedRetryRows[botID] = FailedTurnRetryLease(
+            token: token, assistantID: message.id, route: route,
+            sessionID: chat.sessionID ?? "", storedID: storedID,
+            chatID: ObjectIdentifier(chat), phase: .prepared,
+            baselineText: message.text, baselineFailure: failure,
+            promptText: user.text, baselineDurableUserRowIDWatermark: watermark,
+            baselineUndurableMatchingUserCount: undurableMatchingCount)
+        chat.hasUnresolvedRetry = true
+        ChatRuntime.shared.dismissedFailures[ObjectIdentifier(chat)] = nil
+        return request
+    }
+
+    /// Synchronous last-moment gate invoked immediately before submitPrompt.
+    /// MainActor serialization makes prepared -> submitting atomic with every
+    /// event/lifecycle cancellation that can retire this exact token.
+    func admitFailedTurnRetrySubmission(_ request: FailedTurnRetryRequest,
+                                        in botID: String) -> Bool {
+        guard var lease = ChatRuntime.shared.failedRetryRows[botID],
+              lease.token == request.token, lease.phase == .prepared,
+              lease.assistantID == request.assistantID,
+              lease.route == request.route, lease.storedID == request.storedID,
+              lease.chatID == request.chatID else { return false }
+        lease.phase = .submitting
+        ChatRuntime.shared.failedRetryRows[botID] = lease
+        if let chat = chats[botID], ObjectIdentifier(chat) == request.chatID {
+            chat.isRunning = true
+        }
+        startWatchdog(botID)
+        return true
+    }
+
+    @discardableResult
+    func applyFailedRetryAuthoritativeBaseline(
+        _ request: FailedTurnRetryRequest, in botID: String,
+        payload: JSONValue
+    ) -> Bool {
+        guard let rawRows = payload["messages"]?.arrayValue ?? payload.arrayValue,
+              rawRows.allSatisfy({ $0.objectValue != nil }) else { return false }
+        let rows = Self.chatMessages(fromTranscript: payload)
+        guard applyFailedRetryAuthoritativeBaseline(
+            request, in: botID, rows: rows) else { return false }
+        guard var lease = ChatRuntime.shared.failedRetryRows[botID],
+              lease.token == request.token, lease.phase == .prepared else { return false }
+        // Include every durable user row in the strict proof boundary, even a
+        // hidden/system-marker row that is intentionally absent from display.
+        lease.baselineDurableUserRowIDWatermark = rawRows.compactMap { row in
+            guard row["role"]?.stringValue == "user" else { return nil }
+            return row["row_id"]?.intValue ?? row["id"]?.intValue
+        }.max()
+        ChatRuntime.shared.failedRetryRows[botID] = lease
+        return true
+    }
+
+    @discardableResult
+    func applyFailedRetryAuthoritativeBaseline(
+        _ request: FailedTurnRetryRequest, in botID: String,
+        rows: [ChatMessage]
+    ) -> Bool {
+        guard var lease = ChatRuntime.shared.failedRetryRows[botID],
+              lease.token == request.token, lease.phase == .prepared,
+              lease.route == request.route, lease.storedID == request.storedID,
+              lease.chatID == request.chatID,
+              gatewayRoute(for: botID) == request.route,
+              let chat = chats[botID], ObjectIdentifier(chat) == request.chatID,
+              chat.sessionID == lease.sessionID,
+              chat.storedSessionID == request.storedID else { return false }
+        lease.baselineDurableUserRowIDWatermark = rows.compactMap { row in
+            row.author == .user ? row.rowID : nil
+        }.max()
+        lease.baselineUndurableMatchingUserCount = rows.filter {
+            $0.author == .user && $0.rowID == nil && $0.text == request.text
+        }.count
+        lease.authoritativeBaselineKnown = true
+        ChatRuntime.shared.failedRetryRows[botID] = lease
+        return true
+    }
+
+    func settleFailedTurnRetry(_ request: FailedTurnRetryRequest,
+                               result: LiveSendResult, in botID: String,
+                               chat: ChatState) {
+        guard let lease = ChatRuntime.shared.failedRetryRows[botID],
+              lease.token == request.token else { return }
+        let clears: Bool
+        switch result {
+        case .failed: clears = true
+        case .retained: clears = lease.phase == .prepared
+        case .accepted: clears = false
+        }
+        guard clears else { return }
+        ChatRuntime.shared.failedRetryRows[botID] = nil
+        chat.hasUnresolvedRetry = false
+        chat.isRunning = false
+        clearWatchdog(botID)
+    }
+
+    private func cancelFailedTurnRetry(_ request: FailedTurnRetryRequest,
+                                       in botID: String, chat: ChatState) {
+        guard ChatRuntime.shared.failedRetryRows[botID]?.token == request.token else { return }
+        ChatRuntime.shared.failedRetryRows[botID] = nil
+        chat.hasUnresolvedRetry = false
+        chat.isRunning = false
+        clearWatchdog(botID)
+    }
+
+    public func canDismissFailedTurn(_ message: ChatMessage, in botID: String) -> Bool {
+        let chat = chat(for: botID)
+        guard chat.messages.contains(where: {
+            $0.id == message.id && $0.failure != nil
+        }) else { return false }
+        return ChatRuntime.shared.failedRetryRows[botID]?.assistantID != message.id
+    }
+
+    public func dismissFailedTurn(_ message: ChatMessage, in botID: String) {
+        guard canDismissFailedTurn(message, in: botID) else { return }
+        let chat = chat(for: botID)
+        guard let index = chat.messages.firstIndex(where: {
+            $0.id == message.id && $0.failure != nil
+        }) else { return }
+        guard let failure = chat.messages[index].failure else { return }
+        if let route = gatewayRoute(for: botID),
+           let storedID = chat.storedSessionID, !storedID.isEmpty {
+            ChatRuntime.shared.dismissedFailures[ObjectIdentifier(chat)] =
+                DismissedTurnFailure(route: route, storedID: storedID,
+                                     message: failure.message)
+        }
+        chat.messages[index].failure = nil
+        if chat.messages[index].text.isEmpty,
+           chat.messages[index].reasoning?.isEmpty != false,
+           chat.messages[index].toolCalls.isEmpty,
+           chat.messages[index].card == nil {
+            let removed = chat.messages.remove(at: index)
+            ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)]?
+                .remove(removed.id)
+        }
     }
 
     private func applyTranscriptPlan(_ plan: TranscriptActing.Plan?, botID: String) {
