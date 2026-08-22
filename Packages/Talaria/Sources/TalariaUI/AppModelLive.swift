@@ -356,11 +356,11 @@ extension AppModel {
         // histories, and the "this gateway has no cron REST router" verdict —
         // the last of which decides whether editing and history exist at all.
         detachCronDetailRouter()
-        // Up to 40 MB of decoded artifact bodies and thumbnails fetched from
-        // the departing gateway. Keys are gateway-scoped, so this is about the
-        // memory rather than a mix-up — but holding another machine's files
-        // resident after leaving it is not a thing to do quietly.
-        ArtifactStore.shared.flush()
+        // Artifacts are source-qualified. Drop only this gateway's cards,
+        // refs and cached bodies; remotes stay exactly as inbox remotes do.
+        if let gatewayID {
+            dropArtifactScope(gatewayID: gatewayID)
+        }
         // Agent-to-agent: surrender the departing primary's subscription,
         // source-qualified refs and captured-client watches. Secondary watches
         // remain retained; the explicit gateway id prevents a cleared runtime
