@@ -50,6 +50,27 @@ public struct AuthProviderInfo: Sendable {
     public var supportsPassword: Bool
 }
 
+/// A gateway HTTP response that was neither successful nor an authentication
+/// rejection. Keeping the numeric status structured lets higher layers apply
+/// managed-cloud policy to exact 502/503/504 responses without parsing prose.
+public struct GatewayHTTPError: Error, Sendable, Equatable {
+    public let statusCode: Int
+    /// Bounded, control-sanitized response detail. Request headers,
+    /// credentials, and the unbounded response body are never retained.
+    public let detail: String
+
+    init(statusCode: Int, detail: String) {
+        self.statusCode = statusCode
+        self.detail = detail
+    }
+}
+
+extension GatewayHTTPError: LocalizedError {
+    public var errorDescription: String? {
+        "Gateway returned HTTP \(statusCode): \(detail)"
+    }
+}
+
 // MARK: - Token set
 
 /// Result of the native token exchange; stored in the Keychain keyed by the
@@ -120,8 +141,19 @@ public struct GatewayAuthClient: Sendable {
     }
 
     public func status() async throws -> GatewayStatus {
-        let (data, _) = try await session.data(from: baseURL.appending(path: "api/status"))
-        return GatewayStatus(try JSONDecoder().decode(JSONValue.self, from: data))
+        let (data, response) = try await session.data(
+            from: baseURL.appending(path: "api/status"))
+        try Self.admitHTTPResponse(response, data: data, endpoint: "status")
+        let value: JSONValue
+        do {
+            value = try JSONDecoder().decode(JSONValue.self, from: data)
+        } catch {
+            throw AuthError.protocolError("status response was not valid JSON")
+        }
+        guard value.objectValue != nil else {
+            throw AuthError.protocolError("status response was not an object")
+        }
+        return GatewayStatus(value)
     }
 
     public func providers() async throws -> [AuthProviderInfo] {
@@ -141,11 +173,16 @@ public struct GatewayAuthClient: Sendable {
         req.httpMethod = "POST"
         apply(credential: credential, to: &req)
         let (data, response) = try await session.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw AuthError.unauthorized(parse401(data))
+        try Self.admitHTTPResponse(response, data: data, endpoint: "ws-ticket")
+        let v: JSONValue
+        do {
+            v = try JSONDecoder().decode(JSONValue.self, from: data)
+        } catch {
+            throw AuthError.protocolError("ws-ticket response was not valid JSON")
         }
-        let v = try JSONDecoder().decode(JSONValue.self, from: data)
-        guard let ticket = v["ticket"]?.stringValue else {
+        guard v.objectValue != nil,
+              let ticket = v["ticket"]?.stringValue,
+              !ticket.isEmpty else {
             throw AuthError.protocolError("ws-ticket response missing ticket")
         }
         return ticket
@@ -221,9 +258,115 @@ public struct GatewayAuthClient: Sendable {
                         userID: v["user_id"]?.stringValue)
     }
 
-    private func parse401(_ data: Data) -> String {
-        (try? JSONDecoder().decode(JSONValue.self, from: data))?["error"]?.stringValue ?? "unauthorized"
+    private static func admitHTTPResponse(_ response: URLResponse, data: Data,
+                                          endpoint: String) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw AuthError.protocolError("\(endpoint) response was not HTTP")
+        }
+        guard http.statusCode == 200 else {
+            let detail = safeHTTPDetail(data, statusCode: http.statusCode)
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw AuthError.unauthorized(detail)
+            }
+            throw GatewayHTTPError(statusCode: http.statusCode, detail: detail)
+        }
     }
+
+    /// Admit only a small response prefix, select the conventional gateway
+    /// error field when it is JSON, strip terminal/bidi controls, redact common
+    /// credential shapes, and cap the final presentation. The original body is
+    /// never retained in an Error.
+    static func safeHTTPDetail(_ data: Data, statusCode: Int) -> String {
+        let maximumRawBytes = 8_192
+        let maximumWorkScalars = 2_048
+        let maximumVisibleScalars = 512
+        // Never parse an arbitrary prefix as though it were a complete body.
+        // Truncation can break JSON grammar and turn a secret-bearing field
+        // into plaintext fallback. An oversized response therefore contributes
+        // no body prose at all.
+        if data.count > maximumRawBytes {
+            return HTTPURLResponse.localizedString(forStatusCode: statusCode)
+                + " … [oversized response detail omitted]"
+        }
+        let prefix = Data(data.prefix(maximumRawBytes))
+        let candidate = responseDetailCandidate(prefix)
+            ?? HTTPURLResponse.localizedString(forStatusCode: statusCode)
+
+        var scalars: [Unicode.Scalar] = []
+        scalars.reserveCapacity(min(maximumVisibleScalars, candidate.unicodeScalars.count))
+        var inspected = 0
+        var clippedScalars = false
+        for scalar in candidate.unicodeScalars {
+            inspected += 1
+            if inspected > maximumWorkScalars {
+                clippedScalars = true
+                break
+            }
+            let value = scalar.value
+            if value == 0x09 || value == 0x0A || value == 0x0D
+                || value == 0x85 || value == 0x2028 || value == 0x2029 {
+                if scalars.last?.properties.isWhitespace != true { scalars.append(" ") }
+            } else if value >= 0x20, !(0x7F...0x9F).contains(value),
+                      !bidiControlValues.contains(value) {
+                scalars.append(scalar)
+            }
+            if scalars.count == maximumVisibleScalars {
+                clippedScalars = inspected < candidate.unicodeScalars.count
+                break
+            }
+        }
+
+        var safe = String(String.UnicodeScalarView(scalars))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        safe = redactCredentialShapes(safe)
+        if safe.isEmpty {
+            safe = HTTPURLResponse.localizedString(forStatusCode: statusCode)
+        }
+        if clippedScalars {
+            let marker = "… [response detail clipped]"
+            let retained = max(0, maximumVisibleScalars - marker.unicodeScalars.count - 1)
+            safe = String(safe.unicodeScalars.prefix(retained)) + " " + marker
+        }
+        return safe
+    }
+
+    private static func responseDetailCandidate(_ data: Data) -> String? {
+        if let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+           let object = value.objectValue {
+            for key in ["detail", "error", "message"] {
+                if let text = object[key]?.stringValue { return text }
+                if let nested = object[key]?.objectValue {
+                    for nestedKey in ["message", "detail", "error"] {
+                        if let text = nested[nestedKey]?.stringValue { return text }
+                    }
+                }
+            }
+            // A JSON error body with no conventional prose should not be
+            // serialized wholesale: it may contain token/session fields.
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func redactCredentialShapes(_ source: String) -> String {
+        var result = source
+        let replacements: [(String, String)] = [
+            (#"(?i)(bearer\s+)[^\s\"'<>]+"#, "$1[redacted]"),
+            (#"(?i)((?:access|refresh|session|api)[_-]?token|authorization|x-hermes-session-token)\s*[:=]\s*[\"']?[^\s\"',<>}]+"#, "$1=[redacted]"),
+            (#"\beyJ[A-Za-z0-9_-]{12,}(?:\.[A-Za-z0-9_-]+){1,2}\b"#, "[redacted-token]"),
+        ]
+        for (pattern, replacement) in replacements {
+            result = result.replacingOccurrences(
+                of: pattern, with: replacement,
+                options: [.regularExpression], range: nil)
+        }
+        return result
+    }
+
+    private static let bidiControlValues: Set<UInt32> = [
+        0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+        0x2066, 0x2067, 0x2068, 0x2069,
+    ]
 }
 
 public enum AuthError: Error, Sendable, Equatable {
