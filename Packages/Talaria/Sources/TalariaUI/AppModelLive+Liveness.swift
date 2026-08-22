@@ -512,7 +512,7 @@ extension AppModel {
         let chat = chats[botID]
         let sid = chat?.sessionID.flatMap { $0.isEmpty ? nil : $0 }
         let key = chat?.storedSessionID.flatMap { $0.isEmpty ? nil : $0 }
-            ?? CanonicalChatRuntime.shared.pins[botID]
+            ?? LiveRuntime.shared.canonicalSessionByBot[botID]?.id
         guard sid == nil, key == nil else { return false }
         let since = liveness.unverifiableSince[botID] ?? now
         liveness.unverifiableSince[botID] = since
@@ -547,7 +547,7 @@ extension AppModel {
             let chat = chats[botID]
             let sid = chat?.sessionID.flatMap { $0.isEmpty ? nil : $0 }
             let key = chat?.storedSessionID.flatMap { $0.isEmpty ? nil : $0 }
-                ?? CanonicalChatRuntime.shared.pins[botID]
+                ?? LiveRuntime.shared.canonicalSessionByBot[botID]?.id
             let believedWorking = LiveRuntime.shared.workingBotIDs.contains(botID)
             // Was this turn already running when the snapshot was taken? Only
             // then can the snapshot be trusted to describe it.

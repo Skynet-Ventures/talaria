@@ -3,20 +3,15 @@ import TalariaKit
 
 // ── The canonical forever-chat ───────────────────────────────────────────────
 //
-// "Each bot has exactly one chat, forever." Its stored-session id is pinned in
-// the profile's SERVER-side ui_meta["hermes-bots"].chat, so the pin follows the
-// profile between machines, and opening a bot ALWAYS lands there. It is never
-// re-derived from recency: recency drifts the moment the profile is touched
-// from the CLI, from Sessions mode, or by a cronjob, and the user's
-// relationship with the bot would silently move into a scratch conversation
-// they never opened (plugin.js:2726-2738, BOT-MODE-PARITY §canonical-chat).
+// "Each bot has exactly one chat, forever." Current Hermes identifies it by
+// the exact `(profile, title: "Bot Chat")` registry row. Stored-session ids in
+// ui_meta were the old identity and are deliberately ignored: every lost-chat
+// incident upstream traced back to a dangling or stolen pointer.
 //
 // Ported from apps/desktop/src/plugins/hermes-bots/plugin.js:
-//   openBotCanonicalChat  2802-2896  resolution order, verification, recovery
-//   createCanonicalChat   2744-2800  birth: canonical title, pin immediately
-//   saveBotMeta            201-270   whole-block write, three-valued outcome
-//   mergeServerMeta        432-482   server block authoritative; an omitted
-//                                    `chat` key is an authoritative deletion
+//   findExistingCanonicalChat 4092-4110 exact hidden title lookup
+//   createCanonicalChat       4113-4202 recheck, hidden birth, eager title
+//   openBotCanonicalChat      4210-4221 exact lookup on every bot-row open
 //
 // Gateway contract cited inline from tui_gateway/methods_session.py,
 // tui_gateway/methods_profiles.py and hermes_cli/web_routers/sessions.py.
@@ -30,60 +25,12 @@ import TalariaKit
 final class CanonicalChatRuntime {
     static let shared = CanonicalChatRuntime()
 
-    /// bot id → the stored-session id of its forever chat. Seeded from the
-    /// server block on every roster poll (`refreshRoster`) and updated when a
-    /// chat is adopted or minted here. Desktop keeps the same value in its
-    /// plugin-local store so the pin survives a gateway that cannot persist it
-    /// (plugin.js:205-212).
-    var pins: [String: String] = [:]
-
-    /// The one roster-provided history row a profile without any canonical
-    /// identity may grandfather on its first Bot Mode open. This is
-    /// intentionally NOT a session-list result: `session.list` is ordered by
-    /// whatever most recently touched the profile, so treating its first row as
-    /// canonical would let a cron or scratch session hijack a forever chat.
-    ///
-    /// The table is populated only when the profile had no pin and the
-    /// preferred-session reply was absent (legacy gateway/no prior request).
-    /// A resolved preferred session becomes a pin; an explicit `.gone` reply
-    /// clears this table. See `applyRosterAnswer` for the tri-state fold.
-    var grandfatherCandidates: [String: String] = [:]
-
-    /// Bots with a pin write in flight. A roster poll that races the write
-    /// still carries the OLD block, and mergeServerMeta's deletion rule would
-    /// read the missing key as an authoritative clear of the pin just made.
-    var writing: Set<String> = []
-
-    /// Local pin writes per bot, counted. `writing` alone cannot close the
-    /// race: a poll dispatched BEFORE a pin write and answered after it
-    /// completes finds `writing` already empty, and its stale block — which
-    /// has no `chat` key yet — reads as an authoritative deletion of the pin
-    /// just made. Minting a chat fires `sessions.changed`, which itself
-    /// triggers `refreshRoster` (AppModelLive.swift), so that ordering is the
-    /// common one, not a corner case. Comparing this counter across the poll's
-    /// own await tells a stale answer from a current one.
-    var writeCount: [String: Int] = [:]
-
-    /// Last local canonical-meta write stamp, sampled against a roster
-    /// snapshot's ISSUE time. Stamped once when local authority changes and
-    /// again when profiles.configure settles, matching Hermes Desktop's
-    /// `botMetaWriteAt`: a poll issued during the RPC still predates the write
-    /// even when it happens to return afterward.
-    var writeStamp: [String: Double] = [:]
-
-    @discardableResult
-    func noteWrite(_ botID: String, at stamp: Double = Date().timeIntervalSinceReferenceDate) -> Double {
-        let next = max(writeStamp[botID] ?? 0, stamp)
-        writeStamp[botID] = next
-        return next
-    }
-
     /// One resolution per bot at a time — a double tap must not mint two
     /// canonical chats (plugin.js:2742, `canonicalCreations`).
     var opens: [String: Task<Void, Never>] = [:]
 
-    /// The exact birth operation currently allowed to clean up a newly-created
-    /// chat. A canceled/late kickoff must never erase a replacement pin.
+    /// The exact birth operation currently allowed to settle a newly-created
+    /// chat. A canceled/late kickoff must never mutate a replacement binding.
     var kickoffs: [String: UUID] = [:]
     /// Full lease metadata for the active kickoff. `kickoffs` remains as the
     /// small compatibility/ownership index, while this table lets a reconnect
@@ -91,33 +38,11 @@ final class CanonicalChatRuntime {
     var kickoffLeases: [String: CanonicalKickoffLease] = [:]
     var ambiguousKickoffs: [String: CanonicalKickoffLease] = [:]
 
-    /// True when `pins[botID]` is newer than a roster answer taken at
-    /// `sampled`, and the server block must not be allowed to overwrite it.
-    /// Failed persistence keeps this authority dirty until the server echoes
-    /// the same pin or an explicit source reset clears it.
-    var dirtyPins: Set<String> = []
-
-    func hasLocalPinWrite(_ botID: String, since sampled: [String: Int]) -> Bool {
-        dirtyPins.contains(botID) || writing.contains(botID) || writeCount[botID] != sampled[botID]
-    }
-
-    /// Clear bare ids owned by the primary gateway while retaining qualified
-    /// remote chats whose clients remain connected.
+    /// Clear primary-source in-flight work while retaining routed operations
+    /// owned by still-connected secondary clients. There is no canonical id
+    /// cache to clear; the next open consults the title registry again.
     func resetPrimaryScope(retainAmbiguousForReconnect: Bool = false,
-                           retainLocalPins: Bool = false) {
-        let primary = Set(pins.keys.filter { GatewayBotRoute(qualifiedID: $0) == nil })
-            .union(dirtyPins.filter { GatewayBotRoute(qualifiedID: $0) == nil })
-            .union(grandfatherCandidates.keys.filter { GatewayBotRoute(qualifiedID: $0) == nil })
-        if !retainLocalPins {
-            for key in primary {
-                pins.removeValue(forKey: key)
-                grandfatherCandidates.removeValue(forKey: key)
-            }
-            dirtyPins.subtract(primary)
-            writing = Set(writing.filter { GatewayBotRoute(qualifiedID: $0) != nil })
-            writeCount = writeCount.filter { GatewayBotRoute(qualifiedID: $0.key) != nil }
-            writeStamp = writeStamp.filter { GatewayBotRoute(qualifiedID: $0.key) != nil }
-        }
+                           retainLocalPins _: Bool = false) {
         let primaryOpens = opens.filter { GatewayBotRoute(qualifiedID: $0.key) == nil }
         for task in primaryOpens.values { task.cancel() }
         for key in primaryOpens.keys { opens.removeValue(forKey: key) }
@@ -127,7 +52,8 @@ final class CanonicalChatRuntime {
         for key in primaryLeases.keys where ambiguousKickoffs[key] == nil {
             kickoffLeases.removeValue(forKey: key)
         }
-        for key in primary where ambiguousKickoffs[key] == nil {
+        let primaryKickoffs = kickoffs.keys.filter { GatewayBotRoute(qualifiedID: $0) == nil }
+        for key in primaryKickoffs where ambiguousKickoffs[key] == nil {
             kickoffs.removeValue(forKey: key)
         }
         if !retainAmbiguousForReconnect {
@@ -144,17 +70,6 @@ final class CanonicalChatRuntime {
 
     func resetRoutedScope(gatewayID: String) {
         let prefix = gatewayID + GatewayBotRoute.separator
-        let keys = Set(pins.keys.filter { $0.hasPrefix(prefix) })
-            .union(dirtyPins.filter { $0.hasPrefix(prefix) })
-            .union(grandfatherCandidates.keys.filter { $0.hasPrefix(prefix) })
-        for key in keys {
-            pins.removeValue(forKey: key)
-            grandfatherCandidates.removeValue(forKey: key)
-        }
-        dirtyPins = Set(dirtyPins.filter { !$0.hasPrefix(prefix) })
-        writing = Set(writing.filter { !$0.hasPrefix(prefix) })
-        writeCount = writeCount.filter { !$0.key.hasPrefix(prefix) }
-        writeStamp = writeStamp.filter { !$0.key.hasPrefix(prefix) }
         let tasks = opens.filter { $0.key.hasPrefix(prefix) }
         for task in tasks.values { task.cancel() }
         for key in tasks.keys { opens.removeValue(forKey: key) }
@@ -162,7 +77,8 @@ final class CanonicalChatRuntime {
         for key in leases.keys where ambiguousKickoffs[key] == nil {
             kickoffLeases.removeValue(forKey: key)
         }
-        for key in keys where ambiguousKickoffs[key] == nil {
+        let routedKickoffs = kickoffs.keys.filter { $0.hasPrefix(prefix) }
+        for key in routedKickoffs where ambiguousKickoffs[key] == nil {
             kickoffs.removeValue(forKey: key)
         }
     }
@@ -267,8 +183,7 @@ private enum CanonicalAttach {
     case attached(sessionID: String, storedID: String)
     /// The gateway is certain the row does not exist (4007).
     case missing
-    /// Anything else — transport, backend restart, an older gateway. The pin
-    /// is innocent until proven guilty (plugin.js:2864-2871).
+    /// Anything else — transport, backend restart, an older gateway.
     case failed(Error)
 }
 
@@ -276,45 +191,27 @@ private enum CanonicalAttach {
 /// and AppModel's actor-isolated open path.
 private let canonicalBotChatTitle = "Bot Chat"
 
+enum CanonicalTitleOwnership {
+    static func isAuthoritative(_ receipt: SessionTitleReceipt,
+                                expected: String = canonicalBotChatTitle) -> Bool {
+        !receipt.pending && receipt.title == expected
+    }
+}
+
+enum CanonicalScratchReleaseDecision: Equatable {
+    case preserve
+    case authoritativeBirthReady
+}
+
 /// Evidence carried by a roster summary is intentionally narrower than
 /// "whatever session happened most recently." A compression tip can have a
 /// different leaf title, so `rootTitle` is authoritative when present; only a
 /// legacy summary without it may use the leaf title. The id remains the
-/// durable pin — `session.resume` follows it to a resolved tip when necessary.
+/// durable registry root — `session.resume` follows it to a resolved tip.
 enum CanonicalBotChatEvidence {
     static func durableID(in session: HermesProfile.ProfileSessionRef?) -> String? {
         guard let session, !session.id.isEmpty, session.isCanonicalBotChat else { return nil }
         return session.id
-    }
-}
-
-/// Exact interpretation of the gateway's preferred-session answer for a
-/// canonical pin. Title drift is not data loss: a pinned conversation with
-/// real history remains the user's forever thread. Only a resolved, empty,
-/// non-Bot-Chat target is corrupt metadata and may be cleared.
-enum CanonicalPinnedSessionPolicy: Equatable {
-    case canonical
-    case historyBearingTitleDrift
-    case emptyNonCanonical
-    case gone
-    case inconclusive
-
-    static func classify(_ answer: HermesProfile.PreferredSession,
-                         requestedPin: String) -> Self {
-        switch answer {
-        case .notRequested:
-            return .inconclusive
-        case .gone:
-            return .gone
-        case .resolved(let session):
-            guard !requestedPin.isEmpty,
-                  session.id == requestedPin || session.resolvedID == requestedPin else {
-                return .inconclusive
-            }
-            if session.isCanonicalBotChat { return .canonical }
-            return session.messageCount > 0
-                ? .historyBearingTitleDrift : .emptyNonCanonical
-        }
     }
 }
 
@@ -483,7 +380,7 @@ extension AppModel {
     /// title is load-bearing, not decoration: `session.resume` falls back to an
     /// exact title lookup when the id misses (methods_session.py:349-352 →
     /// hermes_state.py:8468), so this is how a phone finds a forever chat
-    /// minted on the laptop when the pin never reached it — and why it can
+    /// minted on the laptop — and why it can
     /// never mint a second one alongside it.
     static var canonicalChatTitle: String { canonicalBotChatTitle }
     static var canonicalKickoffPrompt: String { BotModeStrings.canonicalKickoffPrompt }
@@ -492,7 +389,7 @@ extension AppModel {
 
     /// Land in the bot's forever chat, whatever the chat was last bound to.
     /// An artifact/inbox/sessions-sheet jump leaves a scratch session behind;
-    /// desktop's roster row still opens the pin (plugin.js:2726-2738), so the
+    /// desktop's roster row still opens the title registry, so the
     /// primary tap re-resolves rather than resuming whatever is bound.
     func enterCanonicalChat(botID: String) async {
         guard mode == .live,
@@ -514,7 +411,6 @@ extension AppModel {
             if let pending = LiveRuntime.shared.attachTasks[botID] { _ = try? await pending.value }
 
             let chat = self.chat(for: botID)
-            let canonical = CanonicalChatRuntime.shared.pins[botID]
             if let lease = self.ambiguousCanonicalKickoffOwning(botID: botID, chat: chat) {
                 // `ensureSession` intentionally trusts an existing runtime SID,
                 // but an ambiguous kickoff needs stronger evidence: resume the
@@ -539,18 +435,14 @@ extension AppModel {
                 self.scheduleRetainedMutationReconciliation(botID: botID)
                 return
             }
-            // Already there with a live binding — nothing to resolve.
-            if self.canonicalTapCanFastReturn(botID: botID, chat: chat,
-                                              canonical: canonical) { return }
-            if self.canonicalTapShouldUnbind(botID: botID, chat: chat,
-                                             canonical: canonical) {
-                // Drop the scratch binding: the resolver honors an explicit
-                // binding, and this tap is explicitly asking for the forever
-                // chat instead.
-                self.unbindChat(botID: botID)
-            }
             do {
-                _ = try await self.ensureSession(botID: botID, hydrate: true)
+                guard let route = self.gatewayRoute(for: botID) else {
+                    throw GatewayRouteError.noRoute
+                }
+                let client = try await self.routedClient(for: route)
+                _ = try await self.attachCanonicalSession(
+                    botID: botID, route: route, client: client,
+                    hydrate: true, honorsExplicitBinding: false)
                 await self.refreshContext(botID: botID)
             } catch is CancellationError {
                 // Superseded by another attach; that one owns the outcome.
@@ -567,12 +459,6 @@ extension AppModel {
         await task.value
     }
 
-    func canonicalTapCanFastReturn(botID: String, chat: ChatState,
-                                   canonical: String?) -> Bool {
-        chat.storedSessionID == canonical && chat.sessionID != nil
-            && CanonicalChatRuntime.shared.ambiguousKickoffs[botID] == nil
-    }
-
     func ambiguousCanonicalKickoffOwning(botID: String,
                                          chat: ChatState) -> CanonicalKickoffLease? {
         guard let lease = CanonicalChatRuntime.shared.ambiguousKickoffs[botID],
@@ -583,28 +469,18 @@ extension AppModel {
         return lease
     }
 
-    func canonicalTapShouldUnbind(botID: String, chat: ChatState,
-                                  canonical: String?) -> Bool {
-        guard chat.storedSessionID != nil, chat.storedSessionID != canonical else { return false }
-        guard let lease = CanonicalChatRuntime.shared.ambiguousKickoffs[botID] else { return true }
-        let ownsBinding = ObjectIdentifier(chat) == lease.chatID
-            && chat.sessionID == lease.sessionID
-            && (lease.storedID.isEmpty || chat.storedSessionID == lease.storedID)
-        return !ownsBinding
-    }
-
     /// Resolve and attach the session a send/open should land in, in desktop's
-    /// order: the explicit binding, the pin, the canonical title, the
-    /// previewed session, then birth. Returns the live runtime sid.
+    /// order: an explicit scratch binding when appropriate, then the exact
+    /// canonical registry row, then a rechecked birth. Returns the runtime sid.
     ///
     /// `ensureSession` funnels every create/resume through here, so a message
     /// typed before the chat finished opening lands in the forever chat rather
     /// than forking a fresh session — the failure this phase exists to fix.
     func attachCanonicalSession(botID: String, route: GatewayBotRoute,
-                                client: GatewayClient, hydrate: Bool) async throws -> String {
+                                client: GatewayClient, hydrate: Bool,
+                                honorsExplicitBinding: Bool = true) async throws -> String {
         try Task.checkCancellation()
         let chat = chat(for: botID)
-        let runtime = CanonicalChatRuntime.shared
         let profile = route.profile
         guard let lifecycleToken = profileLifecycleGenerationToken(for: botID),
               profileLifecycleAccepts(lifecycleToken) else {
@@ -618,7 +494,7 @@ extension AppModel {
 
         // An explicit binding wins: the user named this conversation (sessions
         // sheet, artifact jump, inbox jump), or a reconnect is re-attaching it.
-        if let bound = chat.storedSessionID, !bound.isEmpty {
+        if honorsExplicitBinding, let bound = chat.storedSessionID, !bound.isEmpty {
             switch await attach(bound, botID: botID, route: route,
                                 hydrate: hydrate, client: client,
                                 lifecycleToken: lifecycleToken,
@@ -629,109 +505,47 @@ extension AppModel {
             }
         }
 
-        // (a) The pin. Verify through the owning gateway's precise preferred
-        //     resolver before resume. A history-bearing session survives title
-        //     drift; an EMPTY non-Bot-Chat target is a stray draft and is
-        //     cleared before the exact-title adoption rung runs. A transient
-        //     lookup failure (or old gateway omitting preferred_session) keeps
-        //     the pin innocent and tries it as-is.
-        if let pin = runtime.pins[botID], !pin.isEmpty, pin != chat.storedSessionID {
-            let policy: CanonicalPinnedSessionPolicy
-            do {
-                let profiles = try await client.listProfiles(
-                    includeSessions: true,
-                    preferredSessionIDs: [profile: pin])
-                try Task.checkCancellation()
-                guard acceptsSnapshot() else { throw CancellationError() }
-                if let row = profiles.first(where: { $0.name == profile }) {
-                    policy = CanonicalPinnedSessionPolicy.classify(
-                        row.preferredSession, requestedPin: pin)
-                } else {
-                    policy = .inconclusive
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                policy = .inconclusive
-            }
-
-            switch policy {
-            case .emptyNonCanonical, .gone:
-                // Clearing is source-qualified and guarded against a
-                // replacement pin. `create` below first resumes exact title
-                // "Bot Chat", so this cannot fork beside an existing chat.
-                forget(pin, botID: botID)
-                await clearPersistedCanonicalPinIfUnreplaced(
-                    storedID: pin, botID: botID, route: route, client: client)
-                guard acceptsSnapshot() else { throw CancellationError() }
-            case .canonical, .historyBearingTitleDrift, .inconclusive:
-                switch await attach(pin, botID: botID, route: route,
-                                    hydrate: hydrate, client: client,
-                                    lifecycleToken: lifecycleToken,
-                                    gatewayGeneration: gatewayGeneration) {
-                case .attached(let sid, _): return sid
-                case .missing: break        // definitively gone → recover below
-                case .failed(let error): throw error
-                }
-            }
-        }
-
-        // (b) The canonical title. Only Bot Mode names a session "Bot Chat",
-        //     so an exact title hit IS this bot's forever chat — the plugin's
-        //     own recovery rule, "re-pin the newest session carrying the
-        //     canonical title" (plugin.js:2735-2737). Ahead of the previewed
-        //     session deliberately: adopting whatever ran last would let a
-        //     cron delivery become the forever chat, which is the hijack the
-        //     pin exists to prevent.
-        switch await attach(Self.canonicalChatTitle, botID: botID, route: route,
-                            hydrate: hydrate, client: client,
-                            lifecycleToken: lifecycleToken,
-                            gatewayGeneration: gatewayGeneration) {
-        case .attached(let sid, let stored):
-            guard acceptsSnapshot() else {
-                throw CancellationError()
-            }
-            await pinCanonicalChat(stored, botID: botID)
-            return sid
-        case .missing: break
-        case .failed(let error): throw error
-        }
-
-        // (c) Grandfather. A profile that predates Bot Mode gets one adoption
-        // opportunity: the exact conversation summary from the roster answer
-        // that described this row. That is continuity, not a recency search.
-        //
-        // Do NOT reach for `session.list.first` here. Its newest row can be a
-        // cron delivery, CLI scratch session, or room worker; adopting it would
-        // silently turn an arbitrary session into the one conversation a roster
-        // tap opens forever. `grandfatherCandidates` is populated only for a
-        // no-pin, preferred-session-absent row, so an explicit preferred null
-        // also cannot fall through to an unrelated newest session.
-        if let candidate = runtime.grandfatherCandidates[botID], !candidate.isEmpty {
-            switch await attach(candidate, botID: botID, route: route,
+        // Current Hermes' registry is the sole canonical authority. A failed
+        // lookup is not an empty lookup: propagate it so an outage can never
+        // mint a sibling forever-chat.
+        if let row = try await client.canonicalBotChat(profile: profile) {
+            guard acceptsSnapshot() else { throw CancellationError() }
+            LiveRuntime.shared.canonicalSessionByBot[botID] = CanonicalSessionIdentity(
+                id: row.id, resolvedID: row.resolvedID)
+            switch await attach(row.resumeID, botID: botID, route: route,
                                 hydrate: hydrate, client: client,
                                 lifecycleToken: lifecycleToken,
-                                gatewayGeneration: gatewayGeneration) {
-            case .attached(let sid, let stored):
-                guard acceptsSnapshot() else {
-                    throw CancellationError()
-                }
-                await pinCanonicalChat(stored, botID: botID)
-                return sid
+                                gatewayGeneration: gatewayGeneration,
+                                durableID: row.id) {
+            case .attached(let sid, _): return sid
             case .missing:
-                // The roster summary was exact but disappeared before the tap.
-                // It is no longer adoption evidence; birth below is the only
-                // remaining safe outcome.
-                runtime.grandfatherCandidates[botID] = nil
-            case .failed(let error):
-                // A failed exact resume is not proof that a different session
-                // should become canonical. Keep the candidate for a later tap.
-                throw error
+                // The exact row disappeared between lookup and resume. Recheck
+                // before birth; only a successful empty answer authorizes it.
+                LiveRuntime.shared.canonicalSessionByBot[botID] = nil
+                break
+            case .failed(let error): throw error
             }
         }
 
-        // (d) Birth. A brand-new bot: mint the chat under the canonical title
-        //     and pin it immediately (plugin.js:2751-2766), then submit the
+        if let row = try await client.canonicalBotChat(profile: profile) {
+            guard acceptsSnapshot() else { throw CancellationError() }
+            LiveRuntime.shared.canonicalSessionByBot[botID] = CanonicalSessionIdentity(
+                id: row.id, resolvedID: row.resolvedID)
+            switch await attach(row.resumeID, botID: botID, route: route,
+                                hydrate: hydrate, client: client,
+                                lifecycleToken: lifecycleToken,
+                                gatewayGeneration: gatewayGeneration,
+                                durableID: row.id) {
+            case .attached(let sid, _): return sid
+            case .missing: throw GatewayError(code: GatewayError.storedSessionGone,
+                                              message: "Canonical session changed during open")
+            case .failed(let error): throw error
+            }
+        }
+        LiveRuntime.shared.canonicalSessionByBot[botID] = nil
+
+        // Birth. A brand-new bot: mint the chat under the canonical title,
+        // then submit the
         //     same kickoff desktop uses (plugin.js:2343-2390). The gateway
         //     prunes zero-message sessions, so the forever-chat is born with
         //     the bot introducing itself — a local roster-preview bubble is
@@ -751,7 +565,54 @@ extension AppModel {
         guard !live.sessionID.isEmpty else {
             throw GatewayError(code: -8, message: "session.create returned no id")
         }
+        // Current Hermes accepts eager title at create and still exposes the
+        // explicit title RPC. Keep the second write for gateways that defer or
+        // ignore the create title; method-not-found alone is compatibility.
+        do {
+            let receipt = try await client.titleSession(
+                runtimeID: live.sessionID, title: Self.canonicalChatTitle)
+            if !CanonicalTitleOwnership.isAuthoritative(receipt) {
+                // A pending/mismatched title is not ownership. UNIQUE title
+                // materialization may have selected another row; re-read the
+                // registry and adopt only its winner, never submit kickoff to
+                // this unproven create.
+                guard let winner = try await client.canonicalBotChat(profile: profile) else {
+                    throw GatewayError(
+                        code: GatewayClient.exactTitleLookupIndeterminate,
+                        message: "Canonical Bot Chat title is not authoritative yet")
+                }
+                guard acceptsSnapshot() else { throw CancellationError() }
+                LiveRuntime.shared.canonicalSessionByBot[botID] = CanonicalSessionIdentity(
+                    id: winner.id, resolvedID: winner.resolvedID)
+                switch await attach(
+                    winner.resumeID, botID: botID, route: route,
+                    hydrate: hydrate, client: client,
+                    lifecycleToken: lifecycleToken,
+                    gatewayGeneration: gatewayGeneration,
+                    durableID: winner.id) {
+                case .attached(let sid, _): return sid
+                case .missing:
+                    throw GatewayError(
+                        code: GatewayClient.exactTitleLookupIndeterminate,
+                        message: "Canonical Bot Chat changed during title recovery")
+                case .failed(let error): throw error
+                }
+            }
+        } catch let error as GatewayError where error.code == -32_601 {
+            // Older gateway: create(title:) is the compatibility path.
+        }
+        // The row is now authoritative (or an older gateway accepted the eager
+        // create title). Only here may a roster-row open leave its explicit
+        // scratch binding; every earlier lookup/create/title failure preserves
+        // transcript, queue, and visible ownership for retry.
+        if !honorsExplicitBinding {
+            applyCanonicalScratchRelease(
+                botID: botID, decision: .authoritativeBirthReady)
+        }
         let stored = live.storedSessionID
+        if !stored.isEmpty {
+            LiveRuntime.shared.canonicalSessionByBot[botID] = CanonicalSessionIdentity(id: stored)
+        }
         var lease = claimCanonicalKickoff(sessionID: live.sessionID, storedID: stored,
                                           botID: botID, route: route)
         do {
@@ -768,12 +629,6 @@ extension AppModel {
                 // the newly-authoritative runtime address.
                 lease = migrated
             }
-            if !stored.isEmpty {
-                guard acceptsSnapshot() else {
-                    throw CancellationError()
-                }
-                await pinCanonicalChat(stored, botID: botID)
-            }
             try Task.checkCancellation()
             let shouldSubmitKickoff = beginCanonicalKickoff(&lease)
             if shouldSubmitKickoff {
@@ -786,13 +641,7 @@ extension AppModel {
                 CanonicalChatRuntime.shared.ambiguousKickoffs[botID] = lease
                 await reconcileAmbiguousCanonicalKickoff(
                     lease, route: route, client: client)
-            } else {
-                if rollbackCanonicalKickoffIfOwned(lease) {
-                    await clearPersistedCanonicalPinIfUnreplaced(
-                        storedID: lease.storedID, botID: lease.botID,
-                        route: route, client: client)
-                }
-            }
+            } else { _ = rollbackCanonicalKickoffIfOwned(lease) }
             throw kickoffError
         }
         return live.sessionID
@@ -868,13 +717,12 @@ extension AppModel {
 
     /// Roll back only the birth state this exact operation still owns. This is
     /// intentionally identity-heavy: every await above permits a replacement
-    /// attach, pin, transcript, or session to become authoritative.
+    /// attach, transcript, or session to become authoritative.
     @discardableResult
     func rollbackCanonicalKickoffIfOwned(_ lease: CanonicalKickoffLease) -> Bool {
         let runtime = CanonicalChatRuntime.shared
         guard runtime.kickoffs[lease.botID] == lease.id,
               let chat = chats[lease.botID], ObjectIdentifier(chat) == lease.chatID,
-              runtime.pins[lease.botID] == nil || runtime.pins[lease.botID] == lease.storedID,
               lease.rowID == nil || chat.messages.contains(where: { $0.id == lease.rowID }) else { return false }
         let ownsBinding = chat.sessionID == lease.sessionID
             && (lease.storedID.isEmpty || chat.storedSessionID == lease.storedID)
@@ -886,13 +734,6 @@ extension AppModel {
             chat.isRunning = false
             chat.isTyping = false
         }
-        if runtime.pins[lease.botID] == lease.storedID { runtime.pins[lease.botID] = nil }
-        if runtime.grandfatherCandidates[lease.botID] == lease.storedID {
-            runtime.grandfatherCandidates[lease.botID] = nil
-        }
-        if LiveRuntime.shared.lastSessionByBot[lease.botID] == lease.storedID {
-            LiveRuntime.shared.lastSessionByBot[lease.botID] = nil
-        }
         if ownsBinding, let route = gatewayRoute(for: lease.botID) {
             if route.gatewayID == LiveRuntime.shared.gatewayID {
                 LiveRuntime.shared.sessionToBot.removeValue(forKey: lease.sessionID)
@@ -901,46 +742,13 @@ extension AppModel {
                     gatewayID: route.gatewayID, sessionID: lease.sessionID))
             }
         }
-        if ownsBinding {
-            chat.sessionID = nil
-            if chat.storedSessionID == lease.storedID { chat.storedSessionID = nil }
-        }
+        // A definite kickoff failure removes only its optimistic row/running
+        // state. The named hidden session remains bound and discoverable, so
+        // the next tap reopens it instead of minting another chat.
         runtime.kickoffs[lease.botID] = nil
         runtime.kickoffLeases[lease.botID] = nil
         runtime.ambiguousKickoffs[lease.botID] = nil
         return true
-    }
-
-    private func clearPersistedCanonicalPinIfUnreplaced(
-        storedID: String, botID: String, route: GatewayBotRoute, client: GatewayClient
-    ) async {
-        guard !storedID.isEmpty, CanonicalChatRuntime.shared.pins[botID] == nil else { return }
-        let generation = LiveRuntime.shared.generation
-        CanonicalChatRuntime.shared.dirtyPins.insert(botID)
-        CanonicalChatRuntime.shared.writeCount[botID, default: 0] &+= 1
-        CanonicalChatRuntime.shared.noteWrite(botID)
-        _ = try? await withBotModeMetaMutation(route: route) {
-            let runtime = CanonicalChatRuntime.shared
-            runtime.writing.insert(botID)
-            defer {
-                runtime.writing.remove(botID)
-                runtime.noteWrite(botID)
-            }
-            let profiles = try await client.listProfiles(includeSessions: false)
-            guard LiveRuntime.shared.generation == generation,
-                  runtime.pins[botID] == nil,
-                  let row = profiles.first(where: { $0.name == route.profile }) else { return }
-            var block = row.uiMeta?["hermes-bots"]?.objectValue ?? [:]
-            guard block["chat"]?.stringValue == storedID else { return }
-            block["chat"] = nil
-            _ = try await client.applyProfileEdit(
-                name: route.profile,
-                ProfileEdit(uiMeta: .object(["hermes-bots": .object(block)])))
-            // Do not clear dirty on the mutation receipt. A profiles.list
-            // issued while this configure was in flight may still return the
-            // old block after the receipt. Only applyRosterAnswer observing an
-            // authoritative matching server echo releases local authority.
-        }
     }
 
     func reconcileAmbiguousCanonicalKickoff(
@@ -1068,7 +876,8 @@ extension AppModel {
     private func attach(_ target: String, botID: String, route: GatewayBotRoute, hydrate: Bool,
                         client: GatewayClient,
                         lifecycleToken: ProfileLifecycleGenerationToken,
-                        gatewayGeneration: Int) async -> CanonicalAttach {
+                        gatewayGeneration: Int,
+                        durableID: String? = nil) async -> CanonicalAttach {
         let chat = chat(for: botID)
         let rebinding = chat.storedSessionID != target
         do {
@@ -1089,7 +898,7 @@ extension AppModel {
                 return .failed(GatewayError(code: -8, message: "session.resume returned no id"))
             }
             // `target` may have been the TITLE; the ack carries the real key.
-            let stored = live.storedSessionID.isEmpty ? target : live.storedSessionID
+            let stored = durableID ?? (live.storedSessionID.isEmpty ? target : live.storedSessionID)
             adopt(live, storedID: stored, botID: botID,
                   sourceGatewayID: route.gatewayID)
             // Seed the resume snapshot before REST yields. Any message.delta
@@ -1275,23 +1084,44 @@ extension AppModel {
         chat.messages = []
     }
 
+    /// A roster tap may discard a scratch binding only after two successful
+    /// empty registry reads and authoritative title ownership. Keeping this as
+    /// a stateful seam makes lookup-error preservation regression-testable:
+    /// errors and indeterminate answers select `.preserve` and touch nothing.
+    func applyCanonicalScratchRelease(
+        botID: String, decision: CanonicalScratchReleaseDecision
+    ) {
+        guard decision == .authoritativeBirthReady else { return }
+        unbindChat(botID: botID)
+    }
+
     /// A durable key the gateway just declared gone (4007) must not be handed
     /// back by any of the fallbacks below it.
     private func forget(_ storedID: String, botID: String) {
         ChatRuntime.shared.clearPendingStopIfStored(storedID, botID: botID)
-        let runtime = CanonicalChatRuntime.shared
-        if runtime.pins[botID] == storedID { runtime.pins[botID] = nil }
-        if runtime.grandfatherCandidates[botID] == storedID {
-            runtime.grandfatherCandidates[botID] = nil
-        }
         if LiveRuntime.shared.lastSessionByBot[botID] == storedID {
             LiveRuntime.shared.lastSessionByBot[botID] = nil
         }
+        if LiveRuntime.shared.canonicalSessionByBot[botID]?.id == storedID {
+            LiveRuntime.shared.canonicalSessionByBot[botID] = nil
+        }
         let chat = chat(for: botID)
         if chat.storedSessionID == storedID { chat.storedSessionID = nil }
-        // The server pin is left as-is on purpose: the recovery path below
-        // re-pins the session it settles on, so one write carries the final
-        // value instead of a null followed by a replacement.
+    }
+
+    /// Durable and resolved identities from the latest authoritative roster
+    /// projection. This is a read-only summary, never an open pointer.
+    func canonicalSessionIDs(botID: String) -> Set<String> {
+        guard let summary = LiveRuntime.shared.canonicalSessionByBot[botID] else { return [] }
+        return Set([summary.id, summary.resolvedID].compactMap {
+            guard let value = $0, !value.isEmpty else { return nil }
+            return value
+        })
+    }
+
+    func isCurrentCanonicalSession(botID: String, sessionID: String?) -> Bool {
+        guard let sessionID, !sessionID.isEmpty else { return false }
+        return canonicalSessionIDs(botID: botID).contains(sessionID)
     }
 
     // MARK: Hydration
@@ -1436,75 +1266,6 @@ extension AppModel {
         }
     }
 
-    // MARK: The pin
-
-    /// Write the canonical pin back so desktop opens the same chat
-    /// (ROADMAP decision #3 — phone edits are visible to desktop).
-    ///
-    /// Desktop's `saveBotMeta` sends the WHOLE ui_meta["hermes-bots"] block
-    /// (plugin.js:246) because `profiles.configure` merges only TOP-LEVEL
-    /// ui_meta keys and replaces a nested block wholesale
-    /// (methods_profiles.py:714-724): writing `{chat: …}` on its own would
-    /// erase the bot's title, shape and color. So read the live block, merge
-    /// one key, write it back. Sibling top-level blocks — Talaria's own
-    /// ui_meta["talaria"] included — are untouched by that merge.
-    func pinCanonicalChat(_ storedID: String, botID: String) async {
-        guard !storedID.isEmpty else { return }
-        guard let lifecycleToken = profileLifecycleGenerationToken(for: botID),
-              profileLifecycleAccepts(lifecycleToken) else { return }
-        let runtime = CanonicalChatRuntime.shared
-        let previous = runtime.pins[botID]
-        // Local first, unconditionally: the pin has to hold even when the
-        // gateway cannot store it (older gateway, read-only profile), which is
-        // exactly what desktop's plugin-local store buys (plugin.js:205-212).
-        runtime.pins[botID] = storedID
-        runtime.grandfatherCandidates[botID] = nil
-        if previous != storedID { runtime.dirtyPins.insert(botID) }
-        // Counted before the early return too: a local-only pin (offline, or a
-        // gateway that cannot store ui_meta) still has to outrank the stale
-        // roster answer that a poll already in flight is about to deliver.
-        runtime.writeCount[botID, default: 0] += 1
-        runtime.noteWrite(botID)
-        guard mode == .live,
-              let route = gatewayRoute(for: botID) else { return }
-        let gatewayGeneration = LiveRuntime.shared.generation
-        guard let client = try? await routedClient(for: route) else { return }
-        guard profileLifecycleAcceptsGatewaySnapshot(
-            route: route, client: client, generation: gatewayGeneration) else { return }
-
-        _ = try? await withBotModeMetaMutation(route: route) {
-            guard self.profileLifecycleAcceptsGatewaySnapshot(
-                route: route, client: client, generation: gatewayGeneration) else { return }
-            runtime.writing.insert(botID)
-            defer {
-                runtime.writing.remove(botID)
-                runtime.noteWrite(botID)
-            }
-            do {
-                // Fresh read: ui_meta rides every profiles.list, and desktop may
-                // have rewritten the block since the last roster poll. Sessions are
-                // not needed here and cost a per-profile db scan.
-                let profiles = try await client.listProfiles(includeSessions: false)
-                guard self.profileLifecycleAcceptsGatewaySnapshot(
-                    route: route, client: client, generation: gatewayGeneration) else { return }
-                guard let row = profiles.first(where: { $0.name == route.profile }) else { return }
-                var block = row.uiMeta?["hermes-bots"]?.objectValue ?? [:]
-                block["chat"] = .string(storedID)
-                _ = try await client.applyProfileEdit(
-                    name: route.profile,
-                    ProfileEdit(uiMeta: .object(["hermes-bots": .object(block)])))
-            } catch {
-                // Desktop's three-valued outcome (plugin.js:250-270) exists so an
-                // older gateway that does not speak the contract produces no toast
-                // at all. Neither outcome is actionable here: the chat is already
-                // open and the pin holds locally, so nothing is surfaced.
-            }
-        }
-        // A successful configure receipt is not a roster snapshot. Keep the
-        // pin dirty until applyRosterAnswer sees the matching server block;
-        // that closes the issue-before-write / answer-after-write race.
-    }
-
     // MARK: Failure
 
     /// One themed line in the transcript, in the voice every session failure
@@ -1575,8 +1336,8 @@ extension AppModel {
             grouped[gatewayID, default: []].insert(sid)
         }
         let fallback = LiveRuntime.shared.gatewayID
-        for (botID, pin) in CanonicalChatRuntime.shared.pins {
-            add(gatewayRoute(for: botID)?.gatewayID ?? fallback, pin)
+        for (botID, summary) in LiveRuntime.shared.canonicalSessionByBot {
+            add(gatewayRoute(for: botID)?.gatewayID ?? fallback, summary.id)
         }
         for room in rooms {
             for (memberID, sessionID) in room.memberSessions {

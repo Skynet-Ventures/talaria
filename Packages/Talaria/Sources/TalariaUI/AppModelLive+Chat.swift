@@ -1262,8 +1262,8 @@ extension AppModel {
                 // instead (plugin.js:8215-8241). Scratch sessions keep the
                 // commands unchanged, and an unresolved pin is deliberately
                 // not guessed at.
-                let pin = CanonicalChatRuntime.shared.pins[botID]
-                let canonical = pin != nil && chat.storedSessionID == pin
+                let canonical = isCurrentCanonicalSession(
+                    botID: botID, sessionID: chat.storedSessionID)
                 let guarded: String
                 switch ForeverChatGuard.resolve(trimmed, isCanonicalChat: canonical) {
                 case .run(let text):

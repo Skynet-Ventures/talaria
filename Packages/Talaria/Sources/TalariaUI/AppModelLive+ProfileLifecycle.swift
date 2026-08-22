@@ -47,10 +47,8 @@ private final class ProfileLifecycleRuntime {
     /// outside ChatRuntime so disconnectGateway's source scrub cannot erase it
     /// before a committed rename re-keys it (or a refusal restores it).
     var pendingStopParking: [GatewayBotRoute: ProfileLifecyclePendingStopParking] = [:]
-    /// Canonical pins are portable profile metadata, but in-flight kickoff
-    /// bookkeeping is route-owned and must not cross a profile directory
-    /// mutation. Keep only the pin while the source is fenced so a committed
-    /// rename can re-key it; kickoffs are retired synchronously.
+    /// Lifecycle fence marker for canonical work. The registry itself is
+    /// server-owned; only route-owned in-flight operations are retired.
     var pendingCanonicalPinParking: [GatewayBotRoute: ProfileLifecyclePendingCanonicalPinParking] = [:]
 
     func beginLifecycle(gatewayID: String) -> Bool {
@@ -225,8 +223,7 @@ private struct ProfileLifecyclePendingStopParking: Equatable {
 }
 
 private struct ProfileLifecyclePendingCanonicalPinParking: Equatable {
-    var values: [String: String]
-    var dirty: Set<String>
+    var sourceIDs: Set<String>
 }
 
 /// Exact pre-accept projection captured before lifecycle teardown scrubs
@@ -270,7 +267,7 @@ extension AppModel {
     }
 
     /// A route token alone cannot reject a stale primary client after a
-    /// reconnect. Canonical attach/pin and roster cosmetics also retain the
+    /// reconnect. Canonical attach and roster cosmetics also retain the
     /// client identity and primary generation across their awaits.
     internal func profileLifecycleAcceptsGatewaySnapshot(
         route: GatewayBotRoute, client: GatewayClient, generation: Int
@@ -776,19 +773,14 @@ extension AppModel {
     }
 
     /// Remove canonical route bookkeeping before the profile directory is
-    /// touched. A pin is portable and is parked for a committed rename; an
-    /// in-flight kickoff is not portable because Hermes tears down its old
+    /// touched. The server registry is not portable client state; an in-flight
+    /// kickoff is route-owned because Hermes tears down its old
     /// session/backend as part of the rename and must therefore be retired.
     internal func parkProfileLifecycleCanonicalState(_ target: ProfileLifecycleTarget) {
         let runtime = CanonicalChatRuntime.shared
         let sourceIDs = profileLifecycleSourceIDs(target)
-        var pins: [String: String] = [:]
-        var dirty: Set<String> = []
         for source in sourceIDs {
-            if let pin = runtime.pins.removeValue(forKey: source) { pins[source] = pin }
-            if runtime.dirtyPins.remove(source) != nil { dirty.insert(source) }
-            runtime.writing.remove(source)
-            runtime.writeCount.removeValue(forKey: source)
+            LiveRuntime.shared.canonicalSessionByBot.removeValue(forKey: source)
             runtime.opens.removeValue(forKey: source)?.cancel()
             let retired: Bool
             if let lease = runtime.kickoffLeases[source]
@@ -805,45 +797,25 @@ extension AppModel {
             guard retired else { continue }
         }
         ProfileLifecycleRuntime.shared.pendingCanonicalPinParking[target.route] =
-            ProfileLifecyclePendingCanonicalPinParking(values: pins, dirty: dirty)
+            ProfileLifecyclePendingCanonicalPinParking(sourceIDs: sourceIDs)
     }
 
-    /// Put a parked canonical pin back under the source key immediately
-    /// before the normal postcondition reconciliation re-keys it. This keeps
-    /// the destination unwritable until the REST mutation has committed.
+    /// Release the canonical lifecycle fence before normal reconciliation.
     private func restoreParkedProfileLifecycleCanonicalState(
         _ target: ProfileLifecycleTarget, destinationID: String?
     ) {
-        guard let parked = ProfileLifecycleRuntime.shared.pendingCanonicalPinParking
-            .removeValue(forKey: target.route) else { return }
-        let sourceID = destinationID.map {
-            GatewayBotRoute(qualifiedID: $0) == nil
-                ? target.route.profile : target.route.qualifiedID
-        }
-        guard let sourceID else { return }
-        let runtime = CanonicalChatRuntime.shared
-        // The parked dictionary is keyed by the exact source id. Falling
-        // back to an arbitrary value would let a sibling/qualified profile
-        // inherit this pin during a refused primary rename.
-        guard let pin = parked.values[sourceID] else { return }
-        runtime.pins[sourceID] = pin
-        if parked.dirty.contains(sourceID) { runtime.dirtyPins.insert(sourceID) }
-        runtime.writeCount[sourceID, default: 0] &+= 1
+        _ = destinationID
+        ProfileLifecycleRuntime.shared.pendingCanonicalPinParking
+            .removeValue(forKey: target.route)
     }
 
-    /// A refused or definitively failed mutation returns the parked pin only
-    /// when the captured source still owns the exact primary/qualified key.
+    /// A refused mutation releases only the captured route's canonical fence.
     internal func restoreParkedProfileLifecycleCanonicalStateIfNeeded(
         _ target: ProfileLifecycleTarget, preferPrimary: Bool
     ) {
-        guard let parked = ProfileLifecycleRuntime.shared.pendingCanonicalPinParking
-            .removeValue(forKey: target.route) else { return }
-        let runtime = CanonicalChatRuntime.shared
-        let sourceID = preferPrimary ? target.route.profile : target.route.qualifiedID
-        guard let pin = parked.values[sourceID] else { return }
-        runtime.pins[sourceID] = pin
-        if parked.dirty.contains(sourceID) { runtime.dirtyPins.insert(sourceID) }
-        runtime.writeCount[sourceID, default: 0] &+= 1
+        _ = preferPrimary
+        ProfileLifecycleRuntime.shared.pendingCanonicalPinParking
+            .removeValue(forKey: target.route)
     }
 
     /// Before the first suspension, move a primary profile's portable state
@@ -857,15 +829,8 @@ extension AppModel {
         let destination = target.route.qualifiedID
         guard source != destination else { return }
 
-        let canonical = CanonicalChatRuntime.shared
-        if let pin = canonical.pins.removeValue(forKey: source) {
-            canonical.pins[destination] = pin
-        }
-        if canonical.dirtyPins.remove(source) != nil {
-            canonical.dirtyPins.insert(destination)
-        }
-        if let count = canonical.writeCount.removeValue(forKey: source) {
-            canonical.writeCount[destination] = count
+        if let summary = LiveRuntime.shared.canonicalSessionByBot.removeValue(forKey: source) {
+            LiveRuntime.shared.canonicalSessionByBot[destination] = summary
         }
 
         // `disconnectGateway` intentionally clears every pending stop for the
@@ -1598,7 +1563,7 @@ extension AppModel {
             ChatRuntime.shared.retireProfileRouteState(
                 route: target.route, botIDs: retainedSourceIDs)
         }
-        // Re-introduce only the parked canonical pin under the source key that
+        // Release only the parked canonical fence under the source key that
         // still belongs to this route. The destination remains untouched until
         // this point, after Hermes has authoritatively committed the rename or
         // deletion.
@@ -1849,18 +1814,17 @@ extension AppModel {
     private func reconcileCanonicalAndSessionCaches(sourceIDs: Set<String>,
                                                      destinationID: String?) {
         let canonical = CanonicalChatRuntime.shared
-        var sourcePin: String?
+        var sourceSummary: CanonicalSessionIdentity?
         for source in sourceIDs {
-            if let pin = canonical.pins.removeValue(forKey: source), sourcePin == nil {
-                sourcePin = pin
-            }
-            canonical.writing.remove(source)
-            canonical.writeCount.removeValue(forKey: source)
+            if let summary = LiveRuntime.shared.canonicalSessionByBot.removeValue(forKey: source),
+               sourceSummary == nil { sourceSummary = summary }
             canonical.opens.removeValue(forKey: source)?.cancel()
         }
         if let destinationID {
-            canonical.pins.removeValue(forKey: destinationID)
-            if let sourcePin { canonical.pins[destinationID] = sourcePin }
+            LiveRuntime.shared.canonicalSessionByBot.removeValue(forKey: destinationID)
+            if let sourceSummary {
+                LiveRuntime.shared.canonicalSessionByBot[destinationID] = sourceSummary
+            }
         }
 
         let sessions = SessionsRuntime.shared

@@ -59,7 +59,7 @@ public struct SecondaryProfile: Codable, Sendable, Equatable, Identifiable {
     public var job: String
     public var shape: AvatarShape?
     public var hue: AvatarHue?
-    /// Preview of the resolved preferred/canonical session when available,
+    /// Preview of the resolved canonical session when available,
     /// otherwise raw last_session. This matches the identity a row opens.
     public var preview: String
     /// Preview from the session that supplied `lastActive`. Optional for
@@ -67,31 +67,25 @@ public struct SecondaryProfile: Codable, Sendable, Equatable, Identifiable {
     public var activityPreview: String?
     /// Freshest conversation activity, unix seconds.
     public var lastActive: Double?
-    /// Durable server pin from ui_meta["hermes-bots"].chat.
-    public var pinnedChat: String?
-    /// Precise preferred-session id returned by this secondary gateway. Kept
-    /// separately because older/partial metadata may resolve a locally known
-    /// pin even when the ui_meta block is unavailable.
-    public var preferredSessionID: String?
+    public var canonicalSessionID: String?
+    public var canonicalResolvedID: String?
 
     public var canonicalChatID: String? {
-        let pin = pinnedChat?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let pin, !pin.isEmpty { return pin }
-        let preferred = preferredSessionID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return preferred?.isEmpty == false ? preferred : nil
+        canonicalSessionID
     }
 
     public init(name: String, title: String? = nil, rawDisplayName: String? = nil, job: String = "",
                 shape: AvatarShape? = nil, hue: AvatarHue? = nil,
                 preview: String = "", activityPreview: String? = nil,
                 lastActive: Double? = nil,
-                pinnedChat: String? = nil, preferredSessionID: String? = nil) {
+                canonicalSessionID: String? = nil, canonicalResolvedID: String? = nil) {
         self.name = name; self.title = title; self.job = job
         self.rawDisplayName = rawDisplayName
         self.shape = shape; self.hue = hue
         self.preview = preview; self.activityPreview = activityPreview
         self.lastActive = lastActive
-        self.pinnedChat = pinnedChat; self.preferredSessionID = preferredSessionID
+        self.canonicalSessionID = canonicalSessionID
+        self.canonicalResolvedID = canonicalResolvedID
     }
 }
 
@@ -158,13 +152,10 @@ public struct ForeignRosterEntry: Sendable, Equatable, Identifiable {
     public var preview: String
     public var activityPreview: String?
     public var lastActive: Double?
-    public var pinnedChat: String?
-    public var preferredSessionID: String?
+    public var canonicalSessionID: String?
+    public var canonicalResolvedID: String?
     public var canonicalChatID: String? {
-        let pin = pinnedChat?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let pin, !pin.isEmpty { return pin }
-        let preferred = preferredSessionID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return preferred?.isEmpty == false ? preferred : nil
+        canonicalSessionID
     }
     /// When this row's gateway was last successfully listed — the age of the
     /// picture, as distinct from when the bot itself last spoke.
@@ -179,8 +170,8 @@ public struct ForeignRosterEntry: Sendable, Equatable, Identifiable {
                 rawDisplayName: String? = nil, job: String = "",
                 shape: AvatarShape? = nil, hue: AvatarHue? = nil, preview: String = "",
                 activityPreview: String? = nil, lastActive: Double? = nil,
-                pinnedChat: String? = nil,
-                preferredSessionID: String? = nil, fetchedAt: Date = Date(),
+                canonicalSessionID: String? = nil,
+                canonicalResolvedID: String? = nil, fetchedAt: Date = Date(),
                 isStale: Bool = false, needsSignIn: Bool = false) {
         self.gatewayID = gatewayID; self.connectionLabel = connectionLabel
         self.connectionKind = connectionKind; self.profile = profile; self.handle = handle
@@ -188,7 +179,8 @@ public struct ForeignRosterEntry: Sendable, Equatable, Identifiable {
         self.job = job; self.shape = shape; self.hue = hue
         self.preview = preview; self.activityPreview = activityPreview
         self.lastActive = lastActive; self.fetchedAt = fetchedAt
-        self.pinnedChat = pinnedChat; self.preferredSessionID = preferredSessionID
+        self.canonicalSessionID = canonicalSessionID
+        self.canonicalResolvedID = canonicalResolvedID
         self.isStale = isStale; self.needsSignIn = needsSignIn
     }
 }
@@ -598,29 +590,7 @@ public final class ConnectionRegistry {
                 // round trip (methods_profiles.py:22-31); a foreign row is only
                 // worth painting if it can say when that machine last spoke.
                 await capture.record(connection)
-                var profiles = try await connection.client.listProfiles(includeSessions: true)
-                // A new pooled client does not know the far gateway's pins
-                // until this first answer exposes ui_meta. Resolve them once
-                // on the SAME captured secondary client before publishing;
-                // otherwise the foreign row previews last_session and a cold
-                // tap has no canonical id, so it can mint a fork on the wrong
-                // side of the pool. Older gateways omit preferred_session;
-                // their rows remain useful for cosmetics/activity but publish
-                // stale, without pretending last_session is the pinned chat.
-                let pins = Self.secondaryPreferredSessionPins(in: profiles)
-                let precisionPins = Self.secondaryPrecisionRetryPins(
-                    in: profiles, harvestedPins: pins)
-                if !precisionPins.isEmpty {
-                    do {
-                        profiles = try await connection.client.listProfiles(
-                            includeSessions: true, preferredSessionIDs: precisionPins)
-                    } catch is CancellationError {
-                        throw CancellationError()
-                    } catch {
-                        // The authenticated first answer is still useful. A
-                        // transient precision retry must not blank the source.
-                    }
-                }
+                let profiles = try await connection.client.listProfiles(includeSessions: true)
                 return SecondaryRosterFetch(profiles: profiles, connection: connection)
             }
             // A replacement/adoption may have won while profiles.list was
@@ -753,32 +723,29 @@ public final class ConnectionRegistry {
         let desk = BotModeMeta(uiMeta: profile.uiMeta)
         let shape = BotCosmetics.storedShape(for: profile)
         let hue = BotCosmetics.storedHue(for: profile)
-        let canonicalProjectionIsExact = secondaryCanonicalProjectionIsExact(profile)
+        let canonical = profile.canonicalSession.session
         return SecondaryProfile(name: profile.name,
                                 title: desk?.title,
                                 rawDisplayName: profile.displayName,
                                 job: profile.description ?? "",
                                 shape: shape,
                                 hue: hue,
-                                // Never label authoritative pin B with session
-                                // A's words. The independently freshest activity
-                                // remains useful below, but canonical evidence is
-                                // publishable only when the response agrees with
-                                // its own current ui_meta pin.
-                                preview: canonicalProjectionIsExact
-                                    ? profile.previewSession?.preview ?? "" : "",
+                                // Canonical preview comes only from the
+                                // authoritative registry projection; activity
+                                // remains independently freshest below.
+                                preview: profile.canonicalSession.isMalformed
+                                    ? ""
+                                    : canonical?.preview ?? profile.rawLastSession?.preview ?? "",
                                 activityPreview:
                                     profile.freshestConversationSession?.preview ?? "",
                                 lastActive: profile.freshestConversationSession?.lastActive,
-                                pinnedChat: desk?.pinnedChat,
-                                preferredSessionID: canonicalProjectionIsExact
-                                    ? profile.preferredSession.session?.id : nil)
+                                canonicalSessionID: canonical?.id,
+                                canonicalResolvedID: canonical?.resolvedID)
     }
 
     /// Convert a final profiles.list answer into publishable secondary rows.
-    /// This seam is deliberately transport-free: both a failed retry (where
-    /// the first mismatched answer remains) and a pin changed during the retry
-    /// are the same safety decision at publication time.
+    /// This seam is deliberately transport-free so omission of the current
+    /// registry projection remains a stale, compatibility-only answer.
     nonisolated static func secondaryRosterProjection(
         from profiles: [HermesProfile]
     ) -> SecondaryRosterProjection {
@@ -786,68 +753,16 @@ public final class ConnectionRegistry {
         return SecondaryRosterProjection(
             profiles: candidates.map(Self.secondaryProfile(from:)),
             isCanonicalProjectionComplete:
-                candidates.allSatisfy(Self.secondaryCanonicalProjectionIsExact))
+                candidates.allSatisfy {
+                    !$0.canonicalSession.isOmitted && !$0.canonicalSession.isMalformed
+                })
     }
 
-    /// Whether the preferred-session evidence exactly describes the current
-    /// authoritative ui_meta pin. Both ids identify the same returned lineage:
-    /// `id` is its durable root and `resolvedID` is its live compression tip.
-    /// No pin and no preferred row is also self-consistent legacy state.
+    /// Whether this gateway supplied the current canonical-session contract.
     nonisolated static func secondaryCanonicalProjectionIsExact(
         _ profile: HermesProfile
     ) -> Bool {
-        let pin = BotModeMeta(uiMeta: profile.uiMeta)?.pinnedChat?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let canonicalPin = pin?.isEmpty == false ? pin : nil
-        guard let canonicalPin else {
-            return profile.preferredSession.session == nil
-        }
-        return secondaryPreferredSession(in: profile, exactlyDescribes: canonicalPin)
-    }
-
-    nonisolated static func secondaryPreferredSession(
-        in profile: HermesProfile, exactlyDescribes canonicalPin: String
-    ) -> Bool {
-        guard case .resolved(let preferred) = profile.preferredSession else {
-            return false
-        }
-        return preferred.id == canonicalPin || preferred.resolvedID == canonicalPin
-    }
-
-    /// Pins learned from this exact profiles.list answer. Kept as a pure seam
-    /// so source-qualified cold-start behavior can be pinned without opening a
-    /// socket in tests; callers send the result only to the client that
-    /// produced `profiles`.
-    nonisolated static func secondaryPreferredSessionPins(
-        in profiles: [HermesProfile]
-    ) -> [String: String] {
-        var pins: [String: String] = [:]
-        for profile in profiles {
-            guard !profile.name.isEmpty,
-                  let pin = BotModeMeta(uiMeta: profile.uiMeta)?.pinnedChat?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !pin.isEmpty else { continue }
-            pins[profile.name] = pin
-        }
-        return pins
-    }
-
-    /// A pooled secondary client can begin a roster call with stale pin A and
-    /// learn pin B from that same answer's authoritative ui_meta. Retry B not
-    /// only when `preferred_session` was omitted, but whenever the returned
-    /// preferred identity does not describe B exactly.
-    nonisolated static func secondaryPrecisionRetryPins(
-        in profiles: [HermesProfile], harvestedPins: [String: String]
-    ) -> [String: String] {
-        var retry: [String: String] = [:]
-        for profile in profiles {
-            guard let pin = harvestedPins[profile.name], !pin.isEmpty else { continue }
-            guard secondaryPreferredSession(in: profile, exactlyDescribes: pin) else {
-                retry[profile.name] = pin
-                continue
-            }
-        }
-        return retry
+        !profile.canonicalSession.isOmitted && !profile.canonicalSession.isMalformed
     }
 
     /// Bound an await that has no deadline of its own. `GatewayClient.connect`
@@ -910,8 +825,8 @@ public final class ConnectionRegistry {
                     preview: profile.preview,
                     activityPreview: profile.activityPreview,
                     lastActive: profile.lastActive,
-                    pinnedChat: profile.pinnedChat,
-                    preferredSessionID: profile.preferredSessionID,
+                    canonicalSessionID: profile.canonicalSessionID,
+                    canonicalResolvedID: profile.canonicalResolvedID,
                     fetchedAt: roster.fetchedAt,
                     isStale: stale,
                     needsSignIn: needsSignIn))
@@ -1041,8 +956,8 @@ public final class ConnectionRegistry {
                 // Canonical ids are runtime routing state. Rehydrate them from
                 // their authenticated owner instead of persisting another
                 // gateway's conversation pointer in UserDefaults.
-                stripped.pinnedChat = nil
-                stripped.preferredSessionID = nil
+                stripped.canonicalSessionID = nil
+                stripped.canonicalResolvedID = nil
                 return stripped
             }
             return row

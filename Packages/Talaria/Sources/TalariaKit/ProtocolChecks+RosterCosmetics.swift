@@ -6,11 +6,10 @@ import Foundation
 // real device: the roster painted correctly on a cold launch and then, about
 // eight seconds later, changed identity — bots swapping shape and colour, one
 // swapping colour alone, two keeping both. Nothing about the gateway's answer
-// had changed. Verified 2026-08-18 against the maintainer's live gateway
-// (0.20.3, `/api/ws`): `profiles.list` returns byte-identical `ui_meta` and
-// `has_avatar` on the connect-time call and on the 10 s poll, with and without
-// `preferred_session_ids`. The rows below are that answer, trimmed to the keys
-// this file is about.
+// had changed. Current Hermes a4f16e3f returns cosmetics in `ui_meta` alongside
+// independent `last_session` activity and `canonical_session` identity. The
+// rows below retain those current fields while varying everything that must
+// not affect a face.
 //
 // The cause was two code paths where there should have been one. A roster map
 // owned cosmetics; a separate signals ingest owned `has_avatar`, recency and
@@ -51,27 +50,29 @@ extension ProtocolChecks {
                      "preview":"Message sent to **@ez-qa** with the full GitHub migration brief.",
                      "started_at":1786818646.81803,"last_active":1787078093.2499032,
                      "message_count":132},
+     "canonical_session":{"id":"canonical-root","resolved_id":"canonical-tip",
+                          "root_title":"Bot Chat","title":"Bot Chat",
+                          "last_active":1787078000,"message_count":12},
      "ui_meta":{"hermes-bots":{"shape":"squircle","color":"#8b5cf6","imageKind":"shape",
-                               "title":"Skynet","custom":true,
-                               "chat":"20260815_133046_e88359"}},
+                               "title":"Skynet","custom":true}},
      "has_avatar":true}
     """
 
     /// The SAME profile as it comes back on the ten-second poll: `has_avatar`
-    /// has flipped, the session moved on, a `preferred_session` the connect-time
-    /// call did not ask for is present. Every field the second code path used to
-    /// arrive carrying — and not one of them an input to a face.
+    /// has flipped, newest activity moved on, and the canonical registry tip
+    /// advanced. Every field the second code path used to arrive carrying —
+    /// and not one of them an input to a face.
     private static let refreshedRow = """
     {"name":"default","path":"/Users/administrator/.hermes","is_default":true,
      "model":"gpt-5.6-sol","provider":"openai-codex","description":"","skill_count":125,
      "last_session":{"id":"20260815_133046_e88359","title":"Find new bot option in Hermes",
                      "preview":"Pushed the branch.","started_at":1786818646.81803,
                      "last_active":1787078514.9901221,"message_count":134},
-     "preferred_session":{"id":"20260815_133046_e88359","resolved_id":"20260815_133046_e88359",
-                          "message_count":134},
+     "canonical_session":{"id":"canonical-root","resolved_id":"canonical-tip-2",
+                          "root_title":"Bot Chat","title":"Bot Chat (continued)",
+                          "last_active":1787078510,"message_count":14},
      "ui_meta":{"hermes-bots":{"shape":"squircle","color":"#8b5cf6","imageKind":"shape",
-                               "title":"Skynet","custom":true,
-                               "chat":"20260815_133046_e88359"}},
+                               "title":"Skynet","custom":true}},
      "has_avatar":false}
     """
 
@@ -84,13 +85,14 @@ extension ProtocolChecks {
      "skill_count":125,"has_avatar":true}
     """
 
-    /// The real `code-review` row: a `hermes-bots` block that carries only the
-    /// canonical-chat pin. No shape, no colour — the profile genuinely has no
-    /// stored cosmetics, so the hash is the honest answer for it.
-    private static let pinOnlyRow = """
+    /// A current `hermes-bots` block that carries no cosmetics. Canonical chat
+    /// identity lives outside metadata, so the name hash is the honest answer.
+    private static let emptyBlockRow = """
     {"name":"code-review","path":"/Users/administrator/.hermes/profiles/code-review",
      "is_default":false,"skill_count":104,"last_session":null,
-     "ui_meta":{"hermes-bots":{"chat":"20260812_231043_5987e7"}},
+     "canonical_session":{"id":"review-root","resolved_id":"review-tip",
+                          "root_title":"Bot Chat","title":"Bot Chat"},
+     "ui_meta":{"hermes-bots":{}},
      "has_avatar":true}
     """
 
@@ -124,20 +126,19 @@ extension ProtocolChecks {
         try rosterRefresh()
 
         // 3. A block that exists but carries no cosmetics is not cosmetics.
-        //    `code-review` stores only its canonical-chat pin, so the hash is
-        //    the honest answer — and it, too, has to be stable across refreshes.
-        let pinOnly = try rosterRow(pinOnlyRow)
-        try expect(BotCosmetics.storedShape(for: pinOnly) == nil
-                    && BotCosmetics.storedHue(for: pinOnly) == nil,
-                   "a hermes-bots block with only `chat` stores no cosmetics")
-        try expect(BotCosmetics.shape(for: pinOnly) == BotCosmetics.derivedShape(forName: "code-review")
-                    && BotCosmetics.hue(for: pinOnly) == BotCosmetics.derivedHue(forName: "code-review"),
+        //    Canonical session identity is a sibling wire field, so the hash
+        //    is honest — and it, too, has to be stable across refreshes.
+        let emptyBlock = try rosterRow(emptyBlockRow)
+        try expect(BotCosmetics.storedShape(for: emptyBlock) == nil
+                    && BotCosmetics.storedHue(for: emptyBlock) == nil,
+                   "an empty hermes-bots block stores no cosmetics")
+        try expect(BotCosmetics.shape(for: emptyBlock) == BotCosmetics.derivedShape(forName: "code-review")
+                    && BotCosmetics.hue(for: emptyBlock) == BotCosmetics.derivedHue(forName: "code-review"),
                    "with nothing stored, the name hash is the last resort")
-        // The block is still PRESENT, which is what makes an omitted title or
-        // pin authoritative (plugin.js:441-470). Nil would mean "no gateway
-        // ui_meta at all" and would let a stale local pin survive a deletion.
-        try expect(BotModeMeta(uiMeta: pinOnly.uiMeta) != nil,
-                   "a present block parses even when it claims only `chat`")
+        // The block is still PRESENT. Nil means "no gateway ui_meta at all";
+        // an empty current block remains an authoritative absence of cosmetics.
+        try expect(BotModeMeta(uiMeta: emptyBlock.uiMeta) != nil,
+                   "a present empty current block remains distinguishable from no block")
         try expect(BotModeMeta(uiMeta: nil) == nil, "no ui_meta means no block")
 
         // Roster hide is its own explicit, cross-device boolean. An omitted
@@ -202,10 +203,10 @@ extension ProtocolChecks {
     /// this fixture can actually detect. Only then is the moved-on answer
     /// required to match the ui_meta-bearing one rather than the stripped one.
     private static func rosterRefresh() throws {
-        let coldStart = [try rosterRow(customisedRow), try rosterRow(pinOnlyRow)]
+        let coldStart = [try rosterRow(customisedRow), try rosterRow(emptyBlockRow)]
         // Reordered on purpose: `faces` is keyed by name, so a resolution that
         // ever reached for an index would come back with the pairs swapped.
-        let refreshed = [try rosterRow(pinOnlyRow), try rosterRow(refreshedRow)]
+        let refreshed = [try rosterRow(emptyBlockRow), try rosterRow(refreshedRow)]
         let stripped = try rosterRow(strippedRow)
 
         try expect(BotCosmetics.shape(for: stripped) != BotCosmetics.shape(for: coldStart[0])

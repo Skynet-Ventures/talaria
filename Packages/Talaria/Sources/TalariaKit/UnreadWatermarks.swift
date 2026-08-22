@@ -33,12 +33,14 @@ import Foundation
 //   case: nothing happened) is silence, not news.
 // * A bot with no `last_session` at all reads `ts = 0` and can never badge.
 //
-// ── Verified against the live gateway, 2026-08-18 (hermes-agent 0.20.3) ─────
+// ── Wire source, current Hermes a4f16e3f ────────────────────────────────────
 //
-// `profiles.list {include_sessions: true}` over `/api/ws`, 12 polls at 20 s.
-// `preferred_session` is absent from every row even when `preferred_session_ids`
-// names a real pin, so `last_session.last_active` is the stamp this reads.
-// Observed:
+// `profiles.list {include_sessions: true}` reports `last_session` (newest
+// conversation activity) independently from `canonical_session` (the exact
+// Bot Chat registry identity). Talaria keeps preview/click identity canonical
+// while folding the freshest retained conversation stamp into this policy; it
+// never sends a client-carried session pointer. The captured activity sequence
+// that originally established the phone policy was:
 //
 //   default     1787085050.329278  "[Cron delivery: markets-close-wrap] …"
 //   code-review null                (no last_session on any of the 12 polls)

@@ -1218,26 +1218,7 @@ public extension AppModel {
     /// bots, so failures render in that bot's chat instead of erasing the
     /// current world.
     func openForeignBot(_ entry: ForeignRosterEntry) async {
-        hydrateForeignCanonicalPin(entry)
-        if let pin = entry.canonicalChatID,
-           let owner = try? await routedClient(gatewayID: entry.gatewayID) {
-            // Prime only the client that enumerated/owns this profile. Sending
-            // a qualified id or a foreign profile name to the primary is a
-            // fork-by-collision bug, not a harmless cache miss.
-            await owner.notePreferredSessions([entry.profile: pin])
-        }
         openChat(botID: entry.id)
-    }
-
-    /// Bring the authenticated secondary roster's canonical identity into the
-    /// source-qualified runtime before `openChat` starts resolution. A local
-    /// pin still waiting for its server echo remains newer authority.
-    func hydrateForeignCanonicalPin(_ entry: ForeignRosterEntry) {
-        guard let pin = entry.canonicalChatID, !pin.isEmpty else { return }
-        let runtime = CanonicalChatRuntime.shared
-        guard !runtime.dirtyPins.contains(entry.id) else { return }
-        runtime.pins[entry.id] = pin
-        runtime.grandfatherCandidates[entry.id] = nil
     }
 
     /// Become a saved gateway, from a roster row rather than the Connections

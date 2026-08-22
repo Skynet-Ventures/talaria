@@ -696,7 +696,7 @@ struct ProfileLifecycleTests {
     }
 
     @Test @MainActor
-    func refusedPrimaryLifecycleRestoresCanonicalPinUnderBareOwner() throws {
+    func profileLifecycleParkingRetiresCanonicalOpenWorkWithoutPointerState() throws {
         let model = AppModel()
         let gatewayID = "pin-refused-(UUID().uuidString)"
         let profile = "worker"
@@ -705,26 +705,16 @@ struct ProfileLifecycleTests {
         chat.storedSessionID = "stored-canonical"
         model.chats[profile] = chat
         LiveRuntime.shared.gatewayID = gatewayID
-        CanonicalChatRuntime.shared.pins[profile] = chat.storedSessionID
         defer {
-            CanonicalChatRuntime.shared.pins.removeAll()
-            CanonicalChatRuntime.shared.writeCount.removeAll()
             model.chats.removeAll()
             LiveRuntime.shared.gatewayID = nil
         }
 
         model.parkProfileLifecycleCanonicalState(
             ProfileLifecycleTarget(rosterID: profile, route: route))
-        #expect(CanonicalChatRuntime.shared.pins[profile] == nil)
-
-        // A refused primary rename restores the original bare owner. A
-        // qualified fallback would strand the canonical chat under a key the
-        // next primary roster can never resolve.
         model.restoreParkedProfileLifecycleCanonicalStateIfNeeded(
             ProfileLifecycleTarget(rosterID: profile, route: route), preferPrimary: true)
-
-        #expect(CanonicalChatRuntime.shared.pins[profile] == "stored-canonical")
-        #expect(CanonicalChatRuntime.shared.pins[route.qualifiedID] == nil)
+        #expect(CanonicalChatRuntime.shared.opens[profile] == nil)
     }
 
     @Test @MainActor

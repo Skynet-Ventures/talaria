@@ -2043,14 +2043,6 @@ public extension AppModel {
         return out
     }
 
-    /// Compatibility boundary for the original one-recipient feed action.
-    /// Exact source resolution and all wire work live in `deliverHandoff`;
-    /// keeping a second primary-client implementation here would let an old
-    /// caller silently send a qualified remote id to the wrong gateway.
-    func sendHandoff(from: String, to: String, text: String) async throws {
-        _ = try await deliverHandoff(from: from, to: [to], text: text)
-    }
-
     /// Inbox row tap → the owning bot's inbox session.
     func openInboxMessage(_ message: A2AMessage) {
         guard mode == .live, let ref = FeedsRuntime.shared.inboxSessions[message.id] else {

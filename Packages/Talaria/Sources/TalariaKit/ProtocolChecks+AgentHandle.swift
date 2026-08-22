@@ -251,12 +251,10 @@ extension ProtocolChecks {
         try expect(live.first?.matchesRosterSearch("hermes") == true,
                    "…and still returns the near one, by the name its row reads")
 
-        // The middleware resolves both halves. AppModel converts every row to
-        // a GatewayBotRoute and desktop's Connections delivery is mirrored by
-        // Talaria's retained client pool.
+        // The middleware identifies both halves without dispatching either.
         let near = MentionMiddleware.route("@default-macbook ship it", roster: union,
                                            speaking: "ops")
-        try expect(near.recipients.map(\.id) == ["default"], "a live row is a recipient")
+        try expect(near.recipients.map(\.id) == ["default"], "a live row is identified")
         try expect(near.unreachable.isEmpty, "…with nothing left over")
         try expect(near.text.contains("@default-macbook"),
                    "the note names it by the handle that was typed")
@@ -264,22 +262,22 @@ extension ProtocolChecks {
         let farOnly = MentionMiddleware.route("@default-home-lab ship it", roster: union,
                                               speaking: "ops")
         try expect(farOnly.recipients.map(\.id) == ["home-lab::default"],
-                   "a row on another gateway is a routable recipient")
+                   "a row on another gateway keeps its exact identity")
         try expect(farOnly.unreachable.isEmpty, "…with nothing stranded")
-        try expect(farOnly.text.hasSuffix("that agent.]"),
-                   "and the dispatch note is appended")
+        try expect(farOnly.text.hasSuffix("say so.]"),
+                   "and the identification-only note is appended")
 
         let both = MentionMiddleware.route("@default-macbook and @default-home-lab go",
                                            roster: union, speaking: "ops")
         try expect(both.recipients.map(\.id) == ["default", "home-lab::default"],
-                   "both gateway routes remain recipients")
+                   "both source-qualified identities remain resolved")
         try expect(both.unreachable.isEmpty, "and neither is stranded")
-        try expect(both.text.hasSuffix("that agent.]"), "the note is still appended, unmangled")
+        try expect(both.text.hasSuffix("say so.]"), "the note is still appended, unmangled")
 
-        // Both exact handles are named because both exact routes are dispatched.
+        // Both exact handles are named as inert roster metadata.
         let note = both.text.dropFirst("@default-macbook and @default-home-lab go".count)
-        try expect(note.contains("@default-home-lab"), "the remote recipient is named")
-        try expect(note.contains("@default-macbook"), "…and the primary recipient is named")
+        try expect(note.contains("@default-home-lab"), "the remote identity is named")
+        try expect(note.contains("@default-macbook"), "…and the primary identity is named")
     }
 
     // MARK: displayName rule 1 — a foreign `default` is named by its machine

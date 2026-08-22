@@ -21,10 +21,16 @@ public struct HermesProfile: Sendable, Identifiable {
     public var lastSession: ProfileSessionRef?
     /// `last_session` exactly as the gateway sent it, before any preview fold.
     public var rawLastSession: ProfileSessionRef?
-    /// `preferred_session` — the gateway's precise answer about the ONE
-    /// session this client asked about (its canonical-chat pin), as opposed to
-    /// `last_session`'s "whatever is newest".
-    public var preferredSession: PreferredSession
+    /// Current Hermes' `canonical_session` registry answer. The gateway
+    /// resolves the exact `Bot Chat` title in this profile's own database,
+    /// including hidden rows and compression tips. Older gateways may instead
+    /// answer the removed `preferred_session` contract as a decode fallback.
+    public var canonicalSession: CanonicalSession
+
+    /// Source-compatible projection for callers migrating from the removed
+    /// `preferred_session` contract. Current identity never comes from a
+    /// client-carried ui_meta chat pointer.
+    public var preferredSession: PreferredSession { canonicalSession }
     /// The worker's live turn, deliberately separate from conversation
     /// activity. A fresh worker can animate an already-visible row, but it
     /// must never advance unread watermarks or reorder the roster.
@@ -49,10 +55,9 @@ public struct HermesProfile: Sendable, Identifiable {
     public struct ProfileSessionRef: Sendable {
         public var id: String
         /// `resolved_id` — the live compression tip for `id`, equal to `id`
-        /// when the lineage was never compressed. Only `preferred_session`
-        /// carries it (methods_profiles.py:104-112); `last_session` leaves it
-        /// nil. `id` stays the caller's durable pin, which is why a compaction
-        /// on the laptop does not orphan a phone's pin.
+        /// when the lineage was never compressed. Current `canonical_session`
+        /// and exact-title `session.list` carry it; `last_session` leaves it
+        /// nil. `id` remains the durable title-registry row.
         public var resolvedID: String?
         /// The lineage root's title. A compressed tip can have its own title,
         /// so canonical-session checks use this when it is present rather than
@@ -84,7 +89,7 @@ public struct HermesProfile: Sendable, Identifiable {
         }
 
         init?(_ v: JSONValue?) {
-            guard let id = v?["id"]?.stringValue else { return nil }
+            guard let id = v?["id"]?.stringValue, !id.isEmpty else { return nil }
             self.id = id
             resolvedID = v?["resolved_id"]?.stringValue
             rootTitle = v?["root_title"]?.stringValue
@@ -127,29 +132,22 @@ public struct HermesProfile: Sendable, Identifiable {
         }
     }
 
-    /// The three answers `profiles.list` can give about a pin, and the reason
-    /// the difference is load-bearing rather than pedantic
-    /// (methods_profiles.py:63-130, plugin.js:2857-2880):
+    /// The four answers `profiles.list` can give about the canonical Bot Chat
+    /// registry row. The absent/null distinction is load-bearing:
     ///
-    /// - **absent** — this client sent no pin for the profile, *or* the
-    ///   gateway predates `preferred_session_ids` and ignored the parameter.
-    ///   Verified against a live 0.20.3 gateway on 2026-08-18: the row keys
-    ///   come back `name, path, is_default, model, provider, description,
-    ///   skill_count, last_session, ui_meta, has_avatar` — no
-    ///   `preferred_session` at all. The pin is innocent.
-    /// - **null** — a gateway that *does* speak the contract saying the row is
-    ///   definitively gone (missing, archived, or a denied internal source).
-    ///   Modelled, but deliberately not wired to canonical-chat recovery:
-    ///   `attachCanonicalSession` re-anchors off `session.resume`'s 4007
-    ///   instead, which is definitive for the exact operation the tap is about
-    ///   to perform and costs no extra round trip. Kept distinct from *absent*
-    ///   so the distinction survives in the model — collapsing the two is what
-    ///   would let an old gateway's silence read as "the pin is dead".
-    /// - **a summary** — the pin resolved, hidden sessions included and
+    /// - **absent** — `include_sessions` was false or the gateway predates both
+    ///   registry contracts. Inconclusive and eligible for legacy fallback.
+    /// - **null** — current Hermes authoritatively found no eligible exact
+    ///   `Bot Chat` registry row (missing, archived, or internal source).
+    /// - **invalid** — the key was present but malformed. It is quarantined:
+    ///   never publication/identity evidence and never permission to fall back
+    ///   to an unrelated `last_session` preview.
+    /// - **a summary** — the registry row resolved, hidden rows included and
     ///   compression lineages followed to their live tip.
-    public enum PreferredSession: Sendable {
+    public enum CanonicalSession: Sendable {
         case notRequested
         case gone
+        case invalid
         case resolved(ProfileSessionRef)
 
         public var session: ProfileSessionRef? {
@@ -158,22 +156,27 @@ public struct HermesProfile: Sendable, Identifiable {
         }
 
         /// The gateway omitted the key entirely. This is an inconclusive
-        /// compatibility answer, never permission to clear or replace a
-        /// durable pin. `notRequested` remains the source-compatible case
-        /// spelling; this property names its wire meaning directly.
+        /// compatibility answer, never permission to clear or replace an
+        /// identity. `notRequested` remains the source-compatible case
+        /// spelling during the migration.
         public var isOmitted: Bool {
             if case .notRequested = self { return true }
             return false
         }
 
-        /// True only when a gateway that speaks the contract said so. An older
-        /// gateway can never produce this, which is what keeps a pin alive
-        /// across a downgrade.
+        /// True only when a gateway that speaks a registry contract said so.
         public var isDefinitivelyGone: Bool {
             if case .gone = self { return true }
             return false
         }
+
+        public var isMalformed: Bool {
+            if case .invalid = self { return true }
+            return false
+        }
     }
+
+    public typealias PreferredSession = CanonicalSession
 
     init(_ v: JSONValue) {
         name = v["name"]?.stringValue ?? ""
@@ -185,12 +188,7 @@ public struct HermesProfile: Sendable, Identifiable {
         skillCount = v["skill_count"]?.intValue ?? 0
         lastSession = ProfileSessionRef(v["last_session"])
         rawLastSession = lastSession
-        switch v["preferred_session"] {
-        case .none: preferredSession = .notRequested
-        case .some(.null): preferredSession = .gone
-        case .some(let node): preferredSession = ProfileSessionRef(node).map(
-            PreferredSession.resolved) ?? .notRequested
-        }
+        canonicalSession = Self.decodeCanonicalSession(v)
         workerSession = WorkerSessionRef(v["worker_session"])
         displayName = v["display_name"]?.stringValue
         uiMeta = v["ui_meta"]
@@ -198,6 +196,28 @@ public struct HermesProfile: Sendable, Identifiable {
         uiMetaRevisions = revisionField.revisions
         hasValidUIMetaRevisionsWire = revisionField.isValid
         hasAvatar = v["has_avatar"]?.boolValue ?? false
+    }
+
+    /// A present current field is authoritative, including null or malformed.
+    /// Only complete absence permits the removed preferred-session fallback.
+    private static func decodeCanonicalSession(_ v: JSONValue) -> CanonicalSession {
+        if let canonical = v["canonical_session"] {
+            if canonical == .null { return .gone }
+            guard let session = ProfileSessionRef(canonical), session.isCanonicalBotChat else {
+                return .invalid
+            }
+            return .resolved(session)
+        }
+        // Older preferred_session described a client-requested durable pin,
+        // not the current exact-title registry result. Preserve that legacy
+        // compatibility policy separately; only presence of canonical_session
+        // invokes the strict Bot Chat lineage proof above.
+        if let preferred = v["preferred_session"] {
+            if preferred == .null { return .gone }
+            return ProfileSessionRef(preferred).map(CanonicalSession.resolved)
+                ?? .invalid
+        }
+        return .notRequested
     }
 
     /// Hermes accepts only real, nonnegative integers here. `JSONValue` keeps
@@ -221,12 +241,12 @@ public struct HermesProfile: Sendable, Identifiable {
         return (revisions, true)
     }
 
-    /// The session whose text a roster row previews. The preferred session is
-    /// the click identity and therefore wins even when an unrelated visible
-    /// scratch conversation is newer. Older gateways simply omit it and fall
-    /// back to `last_session`.
+    /// The session whose text a roster row previews. The canonical title
+    /// registry is the click identity and wins over unrelated recent activity.
+    /// Older gateways fall back through legacy preferred and last_session.
     public var previewSession: ProfileSessionRef? {
-        preferredSession.session ?? rawLastSession ?? lastSession
+        if canonicalSession.isMalformed { return nil }
+        return canonicalSession.session ?? rawLastSession ?? lastSession
     }
 
     /// The conversation activity source for unread, recency, liveness, and
@@ -239,7 +259,7 @@ public struct HermesProfile: Sendable, Identifiable {
     /// `foldingCanonicalPreview()`.
     public var freshestConversationSession: ProfileSessionRef? {
         let last = rawLastSession ?? lastSession
-        let preferred = preferredSession.session
+        let preferred = canonicalSession.session
         switch (preferred, last) {
         case (nil, nil): return nil
         case (let session?, nil): return session
@@ -268,20 +288,41 @@ public struct HermesProfile: Sendable, Identifiable {
 
 public struct StoredSession: Sendable, Identifiable {
     public var id: String
+    /// Live compression tip returned by exact-title lookup. The durable `id`
+    /// remains the root registry row used for future title lookups.
+    public var resolvedID: String?
+    public var rootTitle: String?
     public var title: String
     public var preview: String?
     public var startedAt: Double?
+    public var lastActive: Double?
     public var messageCount: Int
     public var source: String?
 
     init(_ v: JSONValue) {
         id = v["id"]?.stringValue ?? ""
+        let resolved = v["resolved_id"]?.stringValue
+        resolvedID = resolved?.isEmpty == false ? resolved : nil
+        rootTitle = v["root_title"]?.stringValue
         title = v["title"]?.stringValue ?? ""
         preview = v["preview"]?.stringValue
         startedAt = v["started_at"]?.doubleValue
+        lastActive = v["last_active"]?.doubleValue
         messageCount = v["message_count"]?.intValue ?? 0
         source = v["source"]?.stringValue
     }
+
+    public var resumeID: String { resolvedID ?? id }
+
+    func matchesExactTitle(_ expected: String) -> Bool {
+        if let rootTitle, !rootTitle.isEmpty { return rootTitle == expected }
+        return title == expected
+    }
+}
+
+public struct SessionTitleReceipt: Sendable, Equatable {
+    public var title: String
+    public var pending: Bool
 }
 
 public struct LiveSession: Sendable {
@@ -537,6 +578,11 @@ public actor GatewayClient {
     /// Local fail-closed rejection before any WebSocket or HTTP request can
     /// reach a gateway whose profile namespace is being mutated.
     public static let trafficFenced = -32_900
+    /// A peer answered an exact-title request with an ordinary nonmatching
+    /// listing, proving it ignored the current registry parameter. Callers
+    /// must not reinterpret that indeterminate compatibility answer as an
+    /// authoritative empty registry and mint a duplicate named session.
+    public static let exactTitleLookupIndeterminate = -32_902
     /// A successful managed-files response that failed the captured
     /// root/canonical-path authority contract.
     public static let managedFileAuthorityUnproven = -32_901
@@ -699,46 +745,24 @@ public actor GatewayClient {
 
     // MARK: - Profiles (the bot roster)
 
-    /// The roster, with each row's canonical-chat pin resolved precisely.
-    ///
-    /// `preferred_session_ids` — `{profile: stored_session_id}` — is the
-    /// enabling call for the whole roster region: it lets the *gateway* answer
-    /// "what about THIS conversation" per row (hidden sessions included,
-    /// compression lineages followed) instead of the client inferring the
-    /// canonical chat from `last_session` and previewing a conversation the
-    /// tap will not open (hermes-agent#88200). Deliberately not `session.list`
-    /// — a paginated, hidden-excluding window once misjudged live hidden pins
-    /// as gone.
-    ///
-    /// Server side: `methods_profiles.py` `_preferred_session_row` +
-    /// `profiles.list` (`preferred_ids = params.get("preferred_session_ids")`,
-    /// resolved only when `include_sessions` is on). Client side this mirrors
-    /// `preferredSessionIds(allMeta)` (plugin.js:2208-2231).
-    ///
-    /// Pins default to the ones harvested from the previous answer's own
-    /// `ui_meta["hermes-bots"].chat` — the same store desktop reads them from
-    /// — so every existing caller gets the round trip without threading pins
-    /// through. A gateway that predates the parameter ignores it and simply
-    /// omits `preferred_session`; verified live 2026-08-18 against 0.20.3,
-    /// where the roster came back identical with and without the field.
+    /// Current Hermes resolves each profile's exact-title `Bot Chat` registry
+    /// row server-side as `canonical_session`. No client session pointer is
+    /// sent. The deprecated argument remains source-compatible while UI code
+    /// migrates, but is intentionally ignored.
     public func listProfiles(includeSessions: Bool = true,
                              preferredSessionIDs: [String: String]? = nil) async throws -> [HermesProfile] {
-        var params: JSONValue = ["include_sessions": .bool(includeSessions)]
-        let pins = preferredSessionIDs ?? preferredSessionPins
-        // Sending an empty map would be a no-op the gateway still has to
-        // parse; desktop omits the key entirely for the same reason.
-        if includeSessions, !pins.isEmpty,
-           case .object(var fields) = params {
-            fields["preferred_session_ids"] = .object(pins.mapValues(JSONValue.string))
-            params = .object(fields)
-        }
+        _ = preferredSessionIDs
+        let params = Self.profileListParams(includeSessions: includeSessions)
         let result = try await rpc("profiles.list", params)
         guard let rawRows = result["profiles"]?.arrayValue else {
             throw GatewayError(code: -8, message: "profiles.list malformed response")
         }
         let rows = try Self.decodeProfileRows(rawRows)
-        if !rows.isEmpty { rememberPins(from: rows) }
         return rows.map { $0.foldingCanonicalPreview() }
+    }
+
+    static func profileListParams(includeSessions: Bool) -> JSONValue {
+        ["include_sessions": .bool(includeSessions)]
     }
 
     /// Strict profiles.list row decoding kept separate from transport so the
@@ -755,34 +779,10 @@ public actor GatewayClient {
         return rows
     }
 
-    /// Canonical-chat pins to resolve on the NEXT roster call. Self-priming
-    /// from the block every answer already carries, which is where desktop's
-    /// `$botMeta` gets them too.
-    private var preferredSessionPins: [String: String] = [:]
-
-    private func rememberPins(from rows: [HermesProfile]) {
-        var harvested: [String: String] = [:]
-        for row in rows {
-            if let pin = row.uiMeta?["hermes-bots"]?["chat"]?.stringValue, !pin.isEmpty {
-                harvested[row.name] = pin
-            } else if row.uiMeta?["hermes-bots"]?.objectValue == nil,
-                      let kept = preferredSessionPins[row.name] {
-                // No server block at all — an older gateway, or one that
-                // cannot persist ui_meta. Desktop's rule (plugin.js:441-470)
-                // is that only an EXISTING block is authoritative, so a pin
-                // this client learned locally survives; a block that exists
-                // and omits `chat` really is a deletion and drops through.
-                harvested[row.name] = kept
-            }
-        }
-        preferredSessionPins = harvested
-    }
-
-    /// Tell the client about a pin before the gateway can: a canonical chat
-    /// minted seconds ago is not in `ui_meta` until its write lands, and the
-    /// poll in between would otherwise preview the wrong session once.
+    /// Deprecated compatibility hook. Current canonical identity is the
+    /// server-side exact title registry, so client-carried pins are inert.
     public func notePreferredSessions(_ pins: [String: String]) {
-        for (name, id) in pins where !id.isEmpty { preferredSessionPins[name] = id }
+        _ = pins
     }
 
     public func describeProfile(_ name: String) async throws -> JSONValue {
@@ -837,19 +837,84 @@ public actor GatewayClient {
     /// (methods_session.py:180-186). An older gateway ignores the unknown
     /// param and simply keeps hidden rows out.
     public func listSessions(limit: Int = 200, profile: String? = nil,
+                             title: String? = nil,
                              includeHidden: Bool = false) async throws -> [StoredSession] {
-        var params: [String: JSONValue] = ["limit": .number(Double(limit))]
-        if let profile { params["profile"] = .string(profile) }
-        if includeHidden { params["include_hidden"] = .bool(true) }
-        let result = try await rpc("session.list", .object(params))
+        let admittedLimit = min(max(limit, 1), 200)
+        let params = Self.sessionListParams(
+            limit: admittedLimit, profile: profile, title: title, includeHidden: includeHidden)
+        let result = try await rpc("session.list", params)
         guard let rawRows = result["sessions"]?.arrayValue else {
             throw GatewayError(code: -8, message: "session.list malformed response")
         }
-        let rows = rawRows.map(StoredSession.init)
+        return try Self.decodeStoredSessionRows(rawRows, limit: admittedLimit, title: title)
+    }
+
+    static func decodeStoredSessionRows(_ rawRows: [JSONValue], limit: Int,
+                                        title: String?) throws -> [StoredSession] {
+        let admittedLimit = min(max(limit, 1), 200)
+        // The old-gateway compatibility scan is deliberately no larger than
+        // the legacy server's own default window. Bound before model creation
+        // so a malformed peer cannot turn a one-row registry lookup into
+        // unbounded client work.
+        let rows = rawRows.prefix(title == nil ? admittedLimit : 200).map(StoredSession.init)
         guard rows.allSatisfy({ !$0.id.isEmpty }) else {
             throw GatewayError(code: -8, message: "session.list contained malformed session")
         }
+        // Current Hermes performs an O(1) exact-title registry lookup. Older
+        // gateways ignore `title` and return a normal window, so enforce the
+        // same exact title/root rule locally instead of trusting the first row.
+        if let title {
+            let exact = Array(rows.filter { $0.matchesExactTitle(title) }.prefix(1))
+            if exact.isEmpty, !rows.isEmpty {
+                throw GatewayError(
+                    code: exactTitleLookupIndeterminate,
+                    message: "session.list did not honor exact title lookup")
+            }
+            return exact
+        }
         return rows
+    }
+
+    static func exactSessionListParams(profile: String, title: String) -> JSONValue {
+        sessionListParams(limit: 200, profile: profile, title: title, includeHidden: true)
+    }
+
+    private static func sessionListParams(limit: Int, profile: String?, title: String?,
+                                          includeHidden: Bool) -> JSONValue {
+        var params: [String: JSONValue] = [:]
+        if title == nil { params["limit"] = .number(Double(min(max(limit, 1), 200))) }
+        if let profile { params["profile"] = .string(profile) }
+        if let title { params["title"] = .string(title) }
+        if includeHidden { params["include_hidden"] = .bool(true) }
+        return .object(params)
+    }
+
+    /// Exact current-Hermes registry lookup for one profile's canonical chat.
+    /// `nil` is an authoritative miss on current gateways; older gateways are
+    /// safely narrowed by the local exact-title filter above.
+    public func canonicalBotChat(profile: String) async throws -> StoredSession? {
+        try await listSessions(profile: profile, title: "Bot Chat", includeHidden: true).first
+    }
+
+    /// Name a live runtime session. Gateway errors, including an older
+    /// gateway's method-not-found response, remain typed `GatewayError`s so UI
+    /// compatibility policy can distinguish unsupported from a failed write.
+    public func titleSession(runtimeID: String, title: String) async throws -> SessionTitleReceipt {
+        let result = try await rpc(
+            "session.title", Self.sessionTitleParams(runtimeID: runtimeID, title: title))
+        return try Self.decodeSessionTitleReceipt(result)
+    }
+
+    static func decodeSessionTitleReceipt(_ result: JSONValue) throws -> SessionTitleReceipt {
+        guard let title = result["title"]?.stringValue, !title.isEmpty,
+              let pending = result["pending"]?.boolValue else {
+            throw GatewayError(code: -8, message: "session.title malformed response")
+        }
+        return SessionTitleReceipt(title: title, pending: pending)
+    }
+
+    static func sessionTitleParams(runtimeID: String, title: String) -> JSONValue {
+        ["session_id": .string(runtimeID), "title": .string(title)]
     }
 
     /// `hidden` marks a session plugin-owned: it stays out of shared lists

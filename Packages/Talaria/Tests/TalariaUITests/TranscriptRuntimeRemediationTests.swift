@@ -261,7 +261,7 @@ final class TranscriptRuntimeRemediationTests: XCTestCase {
     }
 
     @MainActor
-    func testCanonicalKickoffRollbackRequiresExactOwnerAndCannotEraseRepin() {
+    func testCanonicalKickoffRollbackKeepsNamedSessionBoundForRetry() {
         let model = AppModel()
         let botID = "bot"
         let chat = ChatState()
@@ -276,21 +276,11 @@ final class TranscriptRuntimeRemediationTests: XCTestCase {
             id: UUID(), botID: botID, sessionID: "runtime-a", storedID: "stored-a",
             rowID: row.id, chatID: ObjectIdentifier(chat))
         CanonicalChatRuntime.shared.kickoffs[botID] = lease.id
-        CanonicalChatRuntime.shared.pins[botID] = "stored-b"
-
         model.rollbackCanonicalKickoffIfOwned(lease)
         XCTAssertEqual(chat.sessionID, "runtime-a")
-        XCTAssertTrue(chat.isRunning)
-        XCTAssertEqual(chat.messages.map(\.id), [row.id])
-        XCTAssertEqual(CanonicalChatRuntime.shared.pins[botID], "stored-b")
-
-        CanonicalChatRuntime.shared.pins[botID] = "stored-a"
-        model.rollbackCanonicalKickoffIfOwned(lease)
-        XCTAssertNil(chat.sessionID)
-        XCTAssertNil(chat.storedSessionID)
+        XCTAssertEqual(chat.storedSessionID, "stored-a")
         XCTAssertFalse(chat.isRunning)
         XCTAssertTrue(chat.messages.isEmpty)
-        XCTAssertNil(CanonicalChatRuntime.shared.pins[botID])
         XCTAssertNil(CanonicalChatRuntime.shared.kickoffs[botID])
     }
 
@@ -432,7 +422,7 @@ final class TranscriptRuntimeRemediationTests: XCTestCase {
     }
 
     @MainActor
-    func testDeliberatePrimaryResetRetiresAmbiguousKickoffButReconnectRetainsPin() {
+    func testDeliberatePrimaryResetRetiresAmbiguousKickoff() {
         let botID = "worker-reset-(UUID().uuidString)"
         let chat = ChatState()
         chat.storedSessionID = "stored"
@@ -443,20 +433,16 @@ final class TranscriptRuntimeRemediationTests: XCTestCase {
         runtime.kickoffs[botID] = lease.id
         runtime.kickoffLeases[botID] = lease
         runtime.ambiguousKickoffs[botID] = lease
-        runtime.pins[botID] = "stored"
         defer {
             runtime.kickoffs[botID] = nil
             runtime.kickoffLeases[botID] = nil
             runtime.ambiguousKickoffs[botID] = nil
-            runtime.pins[botID] = nil
-            runtime.writeCount[botID] = nil
         }
 
         runtime.resetPrimaryScope()
         XCTAssertNil(runtime.ambiguousKickoffs[botID])
-        runtime.pins[botID] = "stored"
         runtime.resetPrimaryScope(retainAmbiguousForReconnect: true, retainLocalPins: true)
-        XCTAssertEqual(runtime.pins[botID], "stored")
+        XCTAssertNil(runtime.ambiguousKickoffs[botID])
     }
 
     @MainActor
@@ -632,27 +618,17 @@ final class TranscriptRuntimeRemediationTests: XCTestCase {
     }
 
     @MainActor
-    func testCanonicalTapCannotFastReturnWhileKickoffAcceptanceIsAmbiguous() async {
+    func testCanonicalTapReconcilesKickoffAcceptanceByExactOwner() async {
         let model = AppModel()
         let botID = "bot"
         let chat = model.chat(for: botID)
         chat.sessionID = "runtime"
         chat.storedSessionID = "stored"
-        CanonicalChatRuntime.shared.pins[botID] = "stored"
-        XCTAssertTrue(model.canonicalTapCanFastReturn(
-            botID: botID, chat: chat, canonical: "stored"))
-
         let lease = CanonicalKickoffLease(
             id: UUID(), botID: botID, sessionID: "runtime", storedID: "stored",
             rowID: nil, chatID: ObjectIdentifier(chat), submitStarted: true)
         CanonicalChatRuntime.shared.kickoffs[botID] = lease.id
         CanonicalChatRuntime.shared.ambiguousKickoffs[botID] = lease
-        XCTAssertFalse(model.canonicalTapCanFastReturn(
-            botID: botID, chat: chat, canonical: "stored"),
-            "the tap must continue through authoritative resume/hydration")
-        XCTAssertFalse(model.canonicalTapShouldUnbind(
-            botID: botID, chat: chat, canonical: nil),
-            "a missing local pin must not detach the ambiguous session before resume")
         XCTAssertEqual(model.ambiguousCanonicalKickoffOwning(botID: botID, chat: chat), lease)
 
         var didResume = false
@@ -680,7 +656,6 @@ final class TranscriptRuntimeRemediationTests: XCTestCase {
         XCTAssertEqual(chat.messages, [authoritativeKickoff, authoritative])
         XCTAssertNil(CanonicalChatRuntime.shared.kickoffs[botID])
         XCTAssertNil(CanonicalChatRuntime.shared.ambiguousKickoffs[botID])
-        CanonicalChatRuntime.shared.pins[botID] = nil
     }
 
     @MainActor

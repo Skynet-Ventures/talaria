@@ -1,168 +1,184 @@
 import Foundation
 
-// The `preferred_session` tri-state plus the conversation/worker activity
-// split, pinned to observed wire shapes.
-//
-// This check exists because the distinction it guards cannot be exercised
-// against the gateway the app actually talks to today. Verified 2026-08-18
-// against the maintainer's live gateway (0.20.3, `/api/ws`): `profiles.list`
-// returns rows keyed exactly `name, path, is_default, model, provider,
-// description, skill_count, last_session, ui_meta, has_avatar` — byte-identical
-// with and without `preferred_session_ids`, and identical again when the pin
-// sent is a session id that does not exist. That backend simply has no
-// `preferred_session` handler (`grep -c preferred_session
-// tui_gateway/methods_profiles.py` → 0), so only the *absent* branch is
-// reachable live, and absent is the branch that must never be read as "the pin
-// is dead".
-//
-// The other two branches are pinned here from the real shapes upstream's
-// `_preferred_session_row` (tui_gateway/methods_profiles.py:63-130) produces,
-// captured by running that function's own body against the maintainer's real
-// per-profile `state.db` on the same date:
-//
-//   default      / 20260815_133046_e88359 → a full row, resolved_id == id
-//   code-review  / 20260812_231043_5987e7 → a full row for a profile whose
-//                                           `last_session` comes back **null**
-//   default      / 00000000_000000_deadbe → None, i.e. JSON `null`
-//
-// The `code-review` case is the one that justifies the whole round trip: that
-// profile's roster row carries no `last_session` at all, so without the pin it
-// previews nothing while the pinned conversation it opens has 36 messages.
-
+// Dual-generation canonical Bot Chat registry checks pinned to Hermes
+// a4f16e3f. Current profiles.list returns canonical_session on every row when
+// include_sessions is true. Older gateways may return preferred_session or
+// omit both. A present current field always wins, including null/malformed.
 extension ProtocolChecks {
 
-    static func preferredSessionParsing() throws {
-        // 1. Absent — today's live answer. The pin is innocent.
-        let older = """
-        {"name":"default","path":"/Users/administrator/.hermes","is_default":true,
-         "model":"gpt-5.6-sol","provider":"openai-codex","description":"",
-         "skill_count":125,
-         "last_session":{"id":"20260815_133046_e88359","title":"Find new bot option in Hermes",
-                         "preview":"Message sent to **@ez-qa** with the full GitHub migration brief.",
-                         "started_at":1786818646.81803,"last_active":1787078093.2499032,
-                         "message_count":132},
-         "ui_meta":{"hermes-bots":{"chat":"20260815_133046_e88359"}},
-         "has_avatar":true}
-        """
-        let absent = HermesProfile(try JSONDecoder().decode(JSONValue.self, from: Data(older.utf8)))
-        if case .notRequested = absent.preferredSession {} else {
-            throw CheckFailure(description: "FAILED: a missing preferred_session must read as notRequested")
+    static func canonicalSessionParsing() throws {
+        let current = HermesProfile(try decodeCanonicalJSON("""
+        {"name":"default",
+         "last_session":{"id":"scratch","title":"Scratch","preview":"newer activity",
+                         "last_active":200,"message_count":2},
+         "canonical_session":{"id":"root","resolved_id":"tip","root_title":"Bot Chat",
+                              "title":"Bot Chat (continued)","preview":"canonical preview",
+                              "last_active":190,"message_count":12},
+         "preferred_session":{"id":"legacy-wrong","title":"Bot Chat","message_count":1}}
+        """))
+        guard case .resolved(let canonical) = current.canonicalSession else {
+            throw CheckFailure(description: "FAILED: canonical_session must resolve")
         }
-        try expect(absent.preferredSession.isOmitted,
-                   "a missing preferred_session retains its explicit omitted state")
-        try expect(!absent.preferredSession.isDefinitivelyGone,
-                   "a gateway that ignores preferred_session_ids never declares a pin gone")
-        // Nothing to fold: the row keeps last_session's own preview.
-        try expect(absent.foldingCanonicalPreview().lastSession?.preview?.hasPrefix("Message sent") == true,
-                   "absent preferred_session leaves the row untouched")
+        try expect(canonical.id == "root" && canonical.resolvedID == "tip",
+                   "canonical registry root and compression tip are retained")
+        try expect(current.preferredSession.session?.id == "root",
+                   "compatibility projection exposes canonical, not conflicting preferred")
+        try expect(current.previewSession?.preview == "canonical preview",
+                   "canonical identity owns preview over unrelated recent activity")
+        try expect(current.freshestConversationSession?.id == "scratch",
+                   "conversation activity remains independent from canonical preview")
 
-        // 2. Resolved — the shape `_preferred_session_row` really returns.
-        let resolvedRow = """
-        {"name":"default","path":"/Users/administrator/.hermes","is_default":true,
-         "skill_count":125,
-         "last_session":{"id":"20260815_133046_e88359","title":"Find new bot option in Hermes",
-                         "preview":"a scratch session's newest line","started_at":1786818646.81803,
-                         "last_active":1787078093.2499032,"message_count":132},
-         "preferred_session":{"id":"20260815_133046_e88359",
-                              "resolved_id":"20260815_133046_e88359",
-                              "root_title":"Bot Chat",
-                              "title":"Find new bot option in Hermes",
-                              "preview":"Message sent to **@ez-qa** with the full GitHub migration brief. I’ll relay its ...",
-                              "started_at":1786818646.81803,"last_active":1787078075.3138812,
-                              "message_count":132},
-         "worker_session":{"last_active":1787078120.0},
-         "display_name":"Hermes Prime","has_avatar":true}
-        """
-        let resolved = HermesProfile(try JSONDecoder().decode(JSONValue.self,
-                                                              from: Data(resolvedRow.utf8)))
-        guard case .resolved(let pinned) = resolved.preferredSession else {
-            throw CheckFailure(description: "FAILED: a preferred_session summary must read as resolved")
+        let absent = HermesProfile(try decodeCanonicalJSON("""
+        {"name":"old","last_session":{"id":"last","title":"Last","message_count":1}}
+        """))
+        try expect(absent.canonicalSession.isOmitted,
+                   "missing canonical and preferred fields remain inconclusive")
+        try expect(absent.previewSession?.id == "last", "absent registry falls back to last_session")
+
+        let legacy = HermesProfile(try decodeCanonicalJSON("""
+        {"name":"legacy","preferred_session":{"id":"old-root","resolved_id":"old-tip",
+          "title":"Drifted historical title","message_count":4}}
+        """))
+        try expect(legacy.canonicalSession.session?.id == "old-root"
+                    && legacy.canonicalSession.session?.resolvedID == "old-tip",
+                   "older requested-pin preferred_session retains its separate compatibility policy")
+
+        let currentNull = HermesProfile(try decodeCanonicalJSON("""
+        {"name":"gone","canonical_session":null,
+         "preferred_session":{"id":"must-not-win","title":"Bot Chat","message_count":9}}
+        """))
+        try expect(currentNull.canonicalSession.isDefinitivelyGone,
+                   "current explicit null overrides a legacy resolved pointer")
+
+        let malformedCurrent = HermesProfile(try decodeCanonicalJSON("""
+        {"name":"malformed","canonical_session":{"title":"Bot Chat"},
+         "preferred_session":{"id":"must-not-win","title":"Bot Chat","message_count":9}}
+        """))
+        try expect(malformedCurrent.canonicalSession.isMalformed
+                    && !malformedCurrent.canonicalSession.isOmitted
+                    && malformedCurrent.canonicalSession.session == nil,
+                   "malformed present canonical is quarantined and never falls back")
+        try expect(malformedCurrent.previewSession == nil,
+                   "malformed canonical cannot borrow unrelated last_session preview")
+
+        let emptyID = HermesProfile(try decodeCanonicalJSON("""
+        {"name":"empty","last_session":{"id":"scratch","title":"Scratch"},
+         "canonical_session":{"id":"","title":"Bot Chat"},
+         "preferred_session":{"id":"must-not-win","title":"Bot Chat"}}
+        """))
+        try expect(emptyID.canonicalSession.isMalformed
+                    && emptyID.canonicalSession.session == nil
+                    && emptyID.previewSession == nil,
+                   "empty canonical id is invalid and current presence still blocks legacy fallback")
+
+        for malformedEvidence in [
+            """
+            {"name":"wrong-root","last_session":{"id":"scratch","title":"Scratch"},
+             "canonical_session":{"id":"candidate","root_title":"Other","title":"Bot Chat"}}
+            """,
+            """
+            {"name":"wrong-leaf","last_session":{"id":"scratch","title":"Scratch"},
+             "canonical_session":{"id":"candidate","title":"Other"}}
+            """,
+        ] {
+            let profile = HermesProfile(try decodeCanonicalJSON(malformedEvidence))
+            try expect(profile.canonicalSession.isMalformed
+                        && profile.canonicalSession.session == nil
+                        && profile.previewSession == nil,
+                       "current canonical rows require exact Bot Chat lineage evidence")
         }
-        try expect(pinned.resolvedID == "20260815_133046_e88359", "resolved_id parses")
-        try expect(pinned.rootTitle == "Bot Chat", "root_title parses for compressed canonical checks")
-        try expect(resolved.displayName == "Hermes Prime", "raw core display_name parses separately")
-        try expect(resolved.workerSession?.id == nil
-                    && resolved.workerSession?.lastActive == 1787078120.0,
-                   "worker_session preserves a timestamp even when the gateway omits its id")
-        try expect(resolved.workerSession?.isLive(at: 1787078270.0) == true
-                    && resolved.workerSession?.isLive(at: 1787078270.1) == false,
-                   "worker liveness uses the exact 150-second policy window")
-        let folded = resolved.foldingCanonicalPreview()
-        try expect(folded.lastSession?.preview?.hasPrefix("Message sent") == true,
-                   "preferred_session owns preview identity even when scratch activity is newer")
-        // Activity remains separate: the newer visible scratch row advances
-        // unread/recency without replacing the click identity's preview.
-        try expect(folded.lastSession?.id == "20260815_133046_e88359"
-                    && resolved.freshestConversationSession?.lastActive == 1787078093.2499032,
-                   "preview identity and freshest activity remain independently coherent")
-        try expect(resolved.rawLastSession?.preview == "a scratch session's newest line",
-                   "rawLastSession keeps the untouched wire value")
 
-        // 2b. Preferred can be newer than last_session. It then becomes the
-        // coherent conversation source for unread/recency/relative age, not
-        // merely a replacement preview string.
-        let preferredFreshRow = """
-        {"name":"research","skill_count":1,
-         "last_session":{"id":"last","title":"Scratch","preview":"old scratch",
-                         "last_active":100.0,"message_count":9},
-         "preferred_session":{"id":"pin","resolved_id":"tip","root_title":"Bot Chat",
-                              "title":"Bot Chat continuation","preview":"new canonical",
-                              "last_active":101.0,"message_count":10},
-         "worker_session":{"id":"worker","last_active":849.0}}
-        """
-        let preferredFresh = HermesProfile(try JSONDecoder().decode(JSONValue.self,
-                                                                      from: Data(preferredFreshRow.utf8)))
-        try expect(preferredFresh.freshestConversationSession?.id == "pin"
-                    && preferredFresh.freshestConversationSession?.lastActive == 101.0,
-                   "a fresher preferred session wins conversation activity")
-        try expect(preferredFresh.foldingCanonicalPreview().lastSession?.preview == "new canonical",
-                   "the compatibility projection keeps a fresh preferred row coherent")
-        try expect(preferredFresh.workerSession?.isLive(at: 1_000) == false,
-                   "a stale worker never becomes live merely because it exists")
+        guard case .object(let profileParams) = GatewayClient.profileListParams(
+            includeSessions: true) else {
+            throw CheckFailure(description: "FAILED: profiles.list params must be an object")
+        }
+        try expect(profileParams == ["include_sessions": .bool(true)],
+                   "current profiles.list emits no preferred_session_ids")
 
-        // 3. Resolved onto a row with no `last_session` — the real
-        //    `code-review` case, where the pin is the only conversation the row
-        //    knows about.
-        let onlyPin = """
-        {"name":"code-review","path":"/Users/administrator/.hermes/profiles/code-review",
-         "is_default":false,"skill_count":104,"last_session":null,
-         "preferred_session":{"id":"20260812_231043_5987e7",
-                              "resolved_id":"20260812_231043_5987e7",
-                              "title":"Audit Zcash dev stack security #2",
-                              "preview":"Report written and verified at: /tmp/sol-node-stack-review.md REJECT",
-                              "started_at":1786594244.09798,"last_active":1786594731.573319,
-                              "message_count":36},
-         "ui_meta":{"hermes-bots":{"chat":"20260812_231043_5987e7"}},"has_avatar":true}
-        """
-        let adopted = HermesProfile(try JSONDecoder().decode(JSONValue.self,
-                                                             from: Data(onlyPin.utf8)))
-            .foldingCanonicalPreview()
-        try expect(adopted.lastSession?.id == "20260812_231043_5987e7",
-                   "a row with no last_session previews the pin rather than nothing")
-        try expect(adopted.lastSession?.messageCount == 36, "and takes its stamps with it")
+        guard case .object(let exactParams) = GatewayClient.exactSessionListParams(
+            profile: "research", title: "Bot Chat") else {
+            throw CheckFailure(description: "FAILED: exact session.list params must be an object")
+        }
+        try expect(exactParams == [
+            "profile": .string("research"), "title": .string("Bot Chat"),
+            "include_hidden": .bool(true),
+        ], "exact title lookup is profile-scoped and includes owned hidden rows")
+        try expect(GatewayClient.sessionTitleParams(
+            runtimeID: "runtime-1", title: "Bot Chat") == [
+                "session_id": .string("runtime-1"), "title": .string("Bot Chat"),
+            ], "session.title uses the live runtime id and exact canonical title")
+        let titleReceipt = try GatewayClient.decodeSessionTitleReceipt([
+            "title": .string("Bot Chat"), "pending": .bool(false),
+        ])
+        try expect(titleReceipt == SessionTitleReceipt(title: "Bot Chat", pending: false),
+                   "session.title receipt retains exact title ownership fields")
+        for malformed: JSONValue in [
+            .object([:]),
+            .null,
+            ["title": .number(1), "pending": .bool(false)],
+            ["title": .string("Bot Chat"), "pending": .string("false")],
+        ] {
+            do {
+                _ = try GatewayClient.decodeSessionTitleReceipt(malformed)
+                throw CheckFailure(description:
+                    "FAILED: malformed session.title receipt must fail closed")
+            } catch let error as GatewayError {
+                try expect(error.code == -8,
+                           "malformed session.title receipt remains a typed protocol failure")
+            }
+        }
 
-        // 4. Null — the ONLY answer allowed to re-anchor a canonical chat.
-        let goneRow = """
-        {"name":"default","path":"/Users/administrator/.hermes","is_default":true,
-         "skill_count":125,"last_session":null,"preferred_session":null,"has_avatar":false}
-        """
-        let gone = HermesProfile(try JSONDecoder().decode(JSONValue.self, from: Data(goneRow.utf8)))
-        try expect(gone.preferredSession.isDefinitivelyGone,
-                   "an explicit null is the definitive 'that pin is gone'")
-        try expect(gone.foldingCanonicalPreview().lastSession == nil,
-                   "a gone pin invents no preview")
+        let exact = StoredSession(try decodeCanonicalJSON("""
+        {"id":"root","resolved_id":"tip","root_title":"Bot Chat",
+         "title":"Bot Chat (continued)","last_active":123,"message_count":7}
+        """))
+        try expect(exact.resumeID == "tip" && exact.rootTitle == "Bot Chat"
+                    && exact.lastActive == 123,
+                   "exact session rows retain root, tip, and activity fields")
+        try expect(exact.matchesExactTitle("Bot Chat")
+                    && !exact.matchesExactTitle("Bot"),
+                   "old-gateway fallback filtering is exact on title/root")
+        let noncanonicalLeaf = StoredSession(try decodeCanonicalJSON("""
+        {"id":"other-root","resolved_id":"tip","root_title":"Other",
+         "title":"Bot Chat","message_count":1}
+        """))
+        try expect(!noncanonicalLeaf.matchesExactTitle("Bot Chat"),
+                   "a compressed noncanonical lineage cannot borrow Bot Chat from its leaf")
+        let legacyLeaf = StoredSession(try decodeCanonicalJSON("""
+        {"id":"legacy","title":"Bot Chat","message_count":1}
+        """))
+        try expect(legacyLeaf.matchesExactTitle("Bot Chat"),
+                   "an older row without root_title still falls back to its exact leaf title")
 
-        // 5. A malformed present object is inconclusive. Only literal JSON
-        //    null proves a pin is gone; a partial/newer gateway shape must not
-        //    authorize clearing or replacing a durable identity.
-        let malformed = """
-        {"name":"default","skill_count":0,"preferred_session":{"title":"no id here"}}
-        """
-        let broken = HermesProfile(try JSONDecoder().decode(JSONValue.self,
-                                                            from: Data(malformed.utf8)))
-        try expect(broken.preferredSession.session == nil
-                    && broken.preferredSession.isOmitted
-                    && !broken.preferredSession.isDefinitivelyGone,
-                   "a malformed present summary remains inconclusive, never gone")
+        let oversizedRows = (0..<240).map { index in
+            JSONValue.object([
+                "id": .string("row-\(index)"),
+                "title": .string(index == 220 ? "Bot Chat" : "Other"),
+            ])
+        }
+        do {
+            _ = try GatewayClient.decodeStoredSessionRows(
+                oversizedRows, limit: 200, title: "Bot Chat")
+            throw CheckFailure(description:
+                "FAILED: ignored exact-title request must stay indeterminate")
+        } catch let error as GatewayError {
+            try expect(error.code == GatewayClient.exactTitleLookupIndeterminate,
+                       "nonmatching compatibility window cannot authorize canonical birth")
+        }
+        try expect(try GatewayClient.decodeStoredSessionRows(
+            [], limit: 200, title: "Bot Chat").isEmpty,
+                   "an authoritative empty exact lookup remains a safe registry miss")
+
+        let legacyMeta: JSONValue = ["hermes-bots": [
+            "chat": "legacy-pointer", "groups": ["Ops"],
+        ]]
+        try expect(BotModeMeta(uiMeta: legacyMeta)?.legacyPinnedChat == "legacy-pointer",
+                   "legacy chat metadata remains safely decodable")
+        try expect(BotModeMeta.membershipProjection(["Ops"])["chat"] == nil,
+                   "current metadata projections never write the removed chat pointer")
+    }
+
+    private static func decodeCanonicalJSON(_ source: String) throws -> JSONValue {
+        try JSONDecoder().decode(JSONValue.self, from: Data(source.utf8))
     }
 }

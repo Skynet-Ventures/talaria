@@ -16,7 +16,7 @@ final class ProtocolXCTests: XCTestCase {
     func testDemoDataIntegrity() throws { try ProtocolChecks.demoDataIntegrity() }
     func testLiveSessionParsing() throws { try ProtocolChecks.liveSessionParsing() }
     func testGatewayBotRouting() throws { try ProtocolChecks.gatewayBotRouting() }
-    func testPreferredSessionParsing() throws { try ProtocolChecks.preferredSessionParsing() }
+    func testCanonicalSessionParsing() throws { try ProtocolChecks.canonicalSessionParsing() }
     func testRosterSearchSemantics() throws { try ProtocolChecks.rosterSearchSemantics() }
     func testMentionRouting() throws { try ProtocolChecks.mentionRouting() }
     func testAgentHandleRules() throws { try ProtocolChecks.agentHandleRules() }

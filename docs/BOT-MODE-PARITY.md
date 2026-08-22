@@ -6,6 +6,18 @@
 > [`PARITY-BASELINE.md`](PARITY-BASELINE.md). Do not quote the percentages below
 > as current coverage until this ledger is regenerated.
 
+> [!IMPORTANT]
+> **Current canonical-session correction (Hermes `a4f16e3f`).** Every row below
+> that describes `ui_meta["hermes-bots"].chat`, `preferred_session_ids`,
+> `preferred_session`, grandfathering, or a client-maintained canonical pin is
+> retained only as superseded historical audit evidence. Current Hermes owns a
+> unique `(profile, root_title: "Bot Chat")` registry and returns
+> `canonical_session`; bot-row opens independently exact-list
+> `{profile,title:"Bot Chat",include_hidden:true}`. Talaria never uses the
+> legacy metadata pointer, recency, or the last visible session as canonical
+> identity. The maintained contract and tests are documented in
+> [`CURRENT-HERMES-CANONICAL-SESSION.md`](CURRENT-HERMES-CANONICAL-SESSION.md).
+
 **Talaria's primary reference is Hermes Desktop's Bot Mode**, the in-tree plugin at
 `hermes-agent-upstream/apps/desktop/src/plugins/hermes-bots/plugin.js` (8,323 lines).
 
@@ -47,7 +59,7 @@ Two things landed in Talaria on the audit day and are verified present in the tr
   (`TalariaKit/Models.swift:145,179,207`) are verbatim ports of `displayName()` (plugin.js:2935)
   and `botHandle()` (plugin.js:2406), including the `default` → **Hermes** / `@hermes` rule.
 - **The cosmetics bridge, read half.** `TalariaKit/BotModeMeta.swift` parses the server-side
-  `ui_meta["hermes-bots"]` block (title, shape, color, `chat` pin) and maps desktop's shape and
+  `ui_meta["hermes-bots"]` block (title, shape, color, groups) and maps desktop's shape and
   color vocabulary onto Talaria's, so a bot renamed or recolored on the laptop reads the same
   on the phone.
 
@@ -108,29 +120,25 @@ fixed friendly violet squircle instead of a hash-derived near-black square (plug
 
 ### The canonical forever-chat — and why there is no session UI
 
-**Each bot has exactly one chat, forever.** Its stored-session id is pinned in the profile's
-server-side `ui_meta["hermes-bots"].chat` (plugin.js:2726-2738). Opening a bot always lands
-there. It is *never* re-derived from recency, and the source says why: recency drifts the moment
-the profile is touched from the CLI, from Sessions mode, or by a cronjob, and the user's
-relationship with the bot would silently move into a scratch conversation they never opened.
+**Each bot has exactly one chat, forever.** Current Hermes identifies it by a
+server-owned unique title registry row: `(profile, root_title: "Bot Chat")`.
+`profiles.list {include_sessions:true}` returns that row as `canonical_session`,
+including its durable root id and resolved compression tip. Opening a bot does
+not trust a cached pointer: every bot-row tap independently calls
+`session.list {profile,title:"Bot Chat",include_hidden:true}`, exact-filters the
+root/legacy leaf title, resumes the resolved tip, and retains the durable root
+for identity and `/new` protection. A failed or indeterminate lookup propagates;
+it never authorizes creation.
 
-The pin changes through exactly three adoptions:
-
-1. **Grandfather** — first open of a bot that already has history: adopt the session the row was
-   already previewing and pin it (plugin.js:2822-2836).
-2. **Birth** — a new bot: `session.create {profile, title:'Bot Chat', hidden:true}`, pin
-   `stored_session_id` immediately, mount the view, wait 400 ms, then send the kickoff
-   `"Hey, tell me about yourself!"` so the chat is born with the bot introducing itself
-   (plugin.js:2748-2790). It cannot be pre-created at enable time — the gateway prunes
-   zero-message sessions.
-3. **Recovery** — the pinned id is *definitively* gone (`preferred_session === null` from a
-   gateway that speaks the contract): re-anchor on the previewed session, else clear and create
-   (plugin.js:2873-2880).
-
-Everything else keeps the pin. A lookup failure, an older gateway, a sleeping laptop — the pin is
-innocent until proven guilty (plugin.js:2857-2880). Verification goes through
-`profiles.list {preferred_session_ids}`, deliberately *not* `session.list`, because a paginated,
-hidden-excluding list window once misjudged live hidden pins as gone (hermes-agent#88200).
+Birth is single-flighted per source-qualified profile. It rechecks the exact
+registry, creates a hidden session, applies the exact title before local
+adoption, and only then submits `"Hey, tell me about yourself!"`. A definite
+kickoff failure preserves the named row for the next open; ambiguous acceptance
+retains exact route/session ownership for read-back reconciliation. Ordinary
+`last_session` recency, CLI/cron activity, and legacy `ui_meta.chat` never become
+adoption evidence. Older gateways may omit `canonical_session`; omission and
+malformed current data are inconclusive and preserve the last authoritative
+guard identity, while explicit `null` alone clears it.
 
 Two corollaries fall out of this:
 

@@ -954,12 +954,10 @@ public extension AppModel {
         SessionVerbStore.shared.isPinned(sessionID, botID: botID)
     }
 
-    /// Is this row the bot's canonical forever-chat? The pin lives in
-    /// `ui_meta["hermes-bots"].chat` and is mirrored into the canonical-chat
-    /// runtime on every roster poll, so this is the same answer `openChat`
-    /// resolves against.
+    /// Is this row the bot's canonical forever-chat? Match either durable root
+    /// or resolved tip from the authoritative roster projection.
     func isCanonicalChat(_ sessionID: String, botID: String) -> Bool {
-        !sessionID.isEmpty && CanonicalChatRuntime.shared.pins[botID] == sessionID
+        isCurrentCanonicalSession(botID: botID, sessionID: sessionID)
     }
 
     func archivedSessions(botID: String) -> [ArchivedSessionRecord] {
