@@ -53,7 +53,7 @@ struct AdvancedTerminalView: View {
             }
             Spacer()
             if showsConnectionActivity { ProgressView().controlSize(.small) }
-            Button("New session") { coordinator.startNewSession() }
+            Button("New session") { coordinator.startNewSession(&sourceBinding) }
                 .buttonStyle(.bordered)
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
@@ -74,7 +74,7 @@ struct AdvancedTerminalView: View {
             Text(coordinator.message)
         } actions: {
             Button("Try previous session") { coordinator.reattachAfterExpiry() }
-            Button("Start new session") { coordinator.startNewSession() }
+            Button("Start new session") { coordinator.startNewSession(&sourceBinding) }
                 .buttonStyle(.borderedProminent)
         }
         .padding()
