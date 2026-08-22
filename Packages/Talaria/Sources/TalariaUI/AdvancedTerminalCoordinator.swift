@@ -78,6 +78,27 @@ struct AdvancedTerminalSourceBinding: Equatable {
             resume: nil
         )
     }
+
+    /// New session is a fresh PTY on the source the binding would authorize
+    /// right now. Leftover workspace identity is not a substitute: if the
+    /// requested source is not yet authoritative, this returns nil so the
+    /// coordinator can stay on the wait path instead of dialing leftover.
+    mutating func freshSessionRequest(
+        workspaceGatewayID: String?,
+        workspaceProfile: String?,
+        knownProfiles: [String]
+    ) -> AdvancedTerminalLaunchRequest? {
+        guard let request = request(
+            workspaceGatewayID: workspaceGatewayID,
+            workspaceProfile: workspaceProfile,
+            knownProfiles: knownProfiles
+        ) else { return nil }
+        return AdvancedTerminalLaunchRequest(
+            gatewayID: request.gatewayID,
+            profile: request.profile,
+            resume: nil
+        )
+    }
 }
 
 private extension String {
@@ -157,20 +178,6 @@ final class AdvancedTerminalCoordinator {
     @ObservationIgnored private var renderWaiter: (UUID, CheckedContinuation<Void, Never>)?
 
     var acceptsInput: Bool { state == .open && !requiresResumeDecision }
-
-    func startFromWorkspace(resume: String? = nil, fresh: Bool = false) {
-        let workspace = WorkspaceRuntime.shared
-        guard let gatewayID = workspace.gatewayID,
-              let rawProfile = workspace.profile else {
-            stop()
-            message = "Choose a signed-in gateway and an available profile before opening Advanced Terminal."
-            return
-        }
-        startFromWorkspace(
-            AdvancedTerminalLaunchRequest(gatewayID: gatewayID, profile: rawProfile, resume: resume),
-            fresh: fresh
-        )
-    }
 
     func startFromWorkspace(_ request: AdvancedTerminalLaunchRequest, fresh: Bool = false) {
         let workspace = WorkspaceRuntime.shared
@@ -302,7 +309,18 @@ final class AdvancedTerminalCoordinator {
         runtime?.setForeground(true)
     }
 
-    func startNewSession() { startFromWorkspace(fresh: true) }
+    func startNewSession(_ binding: inout AdvancedTerminalSourceBinding) {
+        let workspace = WorkspaceRuntime.shared
+        guard let request = binding.freshSessionRequest(
+            workspaceGatewayID: workspace.gatewayID,
+            workspaceProfile: workspace.profile,
+            knownProfiles: workspace.profiles.map(\.profile)
+        ) else {
+            waitForRequestedSource()
+            return
+        }
+        startFromWorkspace(request, fresh: true)
+    }
 
     func waitForRequestedSource() {
         stop(clearTranscript: true)
