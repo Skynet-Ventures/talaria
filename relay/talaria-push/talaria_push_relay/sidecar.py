@@ -30,10 +30,9 @@ sidecar POLLS read-only RPCs — coarser, but safe and side-effect free:
 * ``long_task`` — tracks idle→streaming→idle transitions per session_key
   in ``session.active_list``; pushes when a streaming stretch exceeded
   the threshold. (Resolution = poll interval; good enough for >10 min.)
-* ``routine`` — on ``cron.changed`` broadcast (plus a slow backstop
-  poll), diffs ``GET /api/cron/jobs?profile=all`` and pushes when a
-  job's last-run fingerprint changes to a terminal state. Carries the
-  job/routine *name*, which hook mode cannot see.
+* ``routine`` — deliberately unavailable until Hermes exposes immutable
+  creator/delivery provenance for completed jobs. Names and mutable delivery
+  fields cannot safely distinguish Talaria work from Slack-owned cron jobs.
 * ``gateway`` — ``GET /api/health`` heartbeat; N consecutive failures ⇒
   "gateway offline", first success afterwards ⇒ "gateway recovered".
 * ``mention`` — NOT available here: messaging-gateway inbound traffic
@@ -75,7 +74,6 @@ _TOKEN_RE = re.compile(r"__HERMES_SESSION_TOKEN__\s*=\s*[\"']([^\"']+)[\"']")
 
 POLL_INTERVAL_S = 2.0
 ACTIVE_LIST_TIMEOUT_S = 20.0
-CRON_BACKSTOP_S = 300.0
 
 
 class GatewayWS:
@@ -177,9 +175,6 @@ class Sidecar:
         self._session_titles: Dict[str, str] = {}
         # approvals already pushed, by request_id
         self._seen_approvals: Dict[str, float] = {}
-        # cron job fingerprints: job key -> fingerprint
-        self._cron_fp: Dict[str, str] = {}
-        self._cron_baselined = False
         self._offline = False
         self._health_failures = 0
         self._stop = asyncio.Event()
@@ -349,67 +344,6 @@ class Sidecar:
                 pattern_key=str(entry.get("pattern_key") or ""),
             ))
 
-    # -- cron / routines ----------------------------------------------------
-
-    @staticmethod
-    def _job_fingerprint(job: dict) -> str:
-        parts = []
-        for field in (
-            "last_run_at", "last_run", "last_finished_at", "updated_at",
-            "last_status", "status", "run_count", "runs",
-        ):
-            if field in job:
-                parts.append(f"{field}={job[field]!r}")
-        return "|".join(parts)
-
-    async def scan_cron(self) -> None:
-        if not self.token:
-            return
-        try:
-            async with self._http() as client:
-                resp = await client.get("/api/cron/jobs", params={"profile": "all"})
-                if resp.status_code != 200:
-                    logger.debug("cron jobs poll: HTTP %s", resp.status_code)
-                    return
-                data = resp.json()
-        except Exception as exc:
-            logger.debug("cron jobs poll failed: %s", exc)
-            return
-
-        jobs: List[dict] = []
-        if isinstance(data, list):
-            jobs = [j for j in data if isinstance(j, dict)]
-        elif isinstance(data, dict):
-            raw = data.get("jobs") or data.get("items") or []
-            jobs = [j for j in raw if isinstance(j, dict)]
-
-        for job in jobs:
-            job_id = str(job.get("id") or job.get("job_id") or job.get("name") or "")
-            if not job_id:
-                continue
-            name = str(job.get("name") or job.get("title") or job_id)
-            fp = self._job_fingerprint(job)
-            prev = self._cron_fp.get(job_id)
-            self._cron_fp[job_id] = fp
-            if not self._cron_baselined or prev is None or prev == fp:
-                continue
-            status = str(job.get("last_status") or job.get("status") or "").lower()
-            if status in {"running", "scheduled", "queued", "pending", "paused"}:
-                continue
-            ok = status not in {"failed", "error", "unknown"}
-            # Routines created by the Talaria app are namespaced
-            # "[bot:<name>] <routine>" (see design/HANDOFF.md).
-            bot = self._bot_name()
-            routine = name
-            match = re.match(r"^\[bot:([^\]]+)\]\s*(.*)$", name)
-            if match:
-                bot, routine = match.group(1), match.group(2) or name
-            self.dispatcher.notify(push_mod.routine_event(
-                bot=bot, routine=routine, ok=ok,
-                detail="" if ok else f"last status: {status or 'failed'}",
-            ))
-        self._cron_baselined = True
-
     # -- main loops ---------------------------------------------------------
 
     def _bot_name(self) -> str:
@@ -417,7 +351,6 @@ class Sidecar:
 
     async def ws_loop(self) -> None:
         backoff = 1.0
-        last_cron_scan = 0.0
         while not self._stop.is_set():
             if not await self.resolve_token():
                 await asyncio.sleep(min(backoff, 30.0))
@@ -429,8 +362,6 @@ class Sidecar:
                 await ws.connect()
                 logger.info("connected to %s", self.settings.ws_url)
                 backoff = 1.0
-                await self.scan_cron()
-                last_cron_scan = time.time()
                 next_poll = 0.0
                 while not self._stop.is_set():
                     now = time.time()
@@ -443,18 +374,8 @@ class Sidecar:
                     )
                     if params:
                         etype = str(params.get("type") or "")
-                        if etype == "cron.changed":
-                            if (
-                                time.time() - last_cron_scan
-                                >= self.settings.cron_poll_min_interval_s
-                            ):
-                                await self.scan_cron()
-                                last_cron_scan = time.time()
-                        elif etype == "sessions.changed":
+                        if etype == "sessions.changed":
                             next_poll = 0.0  # rescan promptly
-                    if time.time() - last_cron_scan >= CRON_BACKSTOP_S:
-                        await self.scan_cron()
-                        last_cron_scan = time.time()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

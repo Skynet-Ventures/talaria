@@ -185,8 +185,9 @@ The pinned Hermes source also has a `post_llm_call` observer: it fires once when
 a non-interrupted turn has any non-empty final response (including a
 fallback/error summary) and includes `assistant_response`; it is not the
 session-bound WebSocket `message.complete` event. The current relay registers
-that hook and emits a source-qualified `response` push; cron turns remain
-`routine` notifications, and the legacy duration-only `long_task` push is
+that hook and emits a source-qualified `response` push; cron turns are
+fail-closed because Hermes does not expose immutable creator/delivery
+provenance, and the legacy duration-only `long_task` push is
 suppressed while `response` is enabled. The current plugin should therefore
 log six hook registrations per process. A sidecar has no response producer and
 must explicitly disable `response` if it needs polling-based long-task
@@ -197,8 +198,8 @@ Debug and TestFlight are separate APNs environments (`dev`/sandbox versus
 own inherited environment. On 2026-08-20, real approval and final-response
 notifications were observed on the paired Debug device, but no retained
 repository/PR report yet records every field required by `TESTING.md` section
-5. Treat certification as pending. Mention/routine delivery, interrupted and
-profile-filter negative cases, exact-session cold-launch tap routing, honest
+5. Treat certification as pending. Mention delivery, cron fail-closed
+negatives, interrupted and profile-filter negative cases, exact-session cold-launch tap routing, honest
 sidecar limitations, and the full TestFlight production matrix remain open.
 Follow [TESTING.md §5](../TESTING.md#5-live-gateway-and-push-certification)
 and the [relay certification procedure](../relay/README.md#live-gatewaydevice-certification)

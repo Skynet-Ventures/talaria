@@ -33,15 +33,17 @@ relay/
 |---|---|---|
 | Runs | inside every hermes process that loads plugins (`hermes serve`, `hermes gateway`, CLI, cron) | separate process; connects to `ws://host:9119/api/ws` + REST like the served SPA (auth-flows.md §2) |
 | Sees | plugin lifecycle hooks (`VALID_HOOKS`) | `session.active_list` / `approval.pending` RPC polling, global WS broadcasts, `/api/cron/jobs`, `/api/health` |
-| Best at | approvals at the instant they block, final responses, @mentions, per-turn timing | approval **request ids**, routine **names**, gateway offline/recovered |
+| Best at | approvals at the instant they block, final responses, @mentions, per-turn timing | approval **request ids**, gateway offline/recovered |
 
 Run either alone, or both together with `TALARIA_PUSH_EVENTS` split so no
 event kind is enabled in both processes (otherwise the phone buzzes twice).
 `.env.example` shows the recommended split.
 
-`TALARIA_PUSH_EVENTS` is a **process-wide allow-list**. If it is omitted (or
-left commented in `.env.example`), all six kinds are enabled in that process:
-`approval`, `long_task`, `response`, `mention`, `routine`, and `gateway`. The
+`TALARIA_PUSH_EVENTS` is a **process-wide allow-list**. If it is omitted, the
+safe live kinds are enabled in that process: `approval`, `long_task`,
+`response`, `mention`, and `gateway`. `routine` remains a recognized synthetic
+display kind but has no live producer: current Hermes completion data cannot
+distinguish Slack-owned cron from a Talaria-created routine. The
 setting is checked before an event enters the APNs queue; it is not a per-device
 or per-profile preference. A normal hook-mode turn emits `response` only when
 its Hermes `platform` is exactly `talaria` (Talaria GatewayClient) or `desktop`
@@ -65,7 +67,7 @@ Sources verified against the upstream checkout (paths relative to
 | **Approval request** | ✅ `pre_approval_request` hook (`tools/approval.py`) fires in the process running the blocked agent, before the notify callback. **But the hook kwargs carry no `request_id`** — pushes send `approval_request_id: ""`; the iOS client fetches the concrete id via the `approval.pending` RPC, or answers FIFO (`approval.respond` without `request_id` resolves the oldest, ws-protocol.md §8). | ✅ Polls `approval.pending` per active session (~2 s) — full fidelity incl. `request_id`, at polling latency. | Upstream ask: add `request_id` to the `pre_approval_request` kwargs (one-line change at the fire sites; `approval_data` already holds it). Then hook mode is exact and the sidecar's approval poller can be retired. |
 | **Final response** | ✅ `post_llm_call` fires once when a non-interrupted turn has any non-empty final response (including fallback/error summaries); emits a source-qualified `response` push only for `platform="talaria"` or `platform="desktop"`. Standalone TUI, Slack, webhook, Telegram, other messaging adapters, CLI, server/tool, subagent, relay, cron, missing, and unknown platforms fail closed. | ❌ A fresh sidecar WS connection does not receive session-bound `message.complete` / response events. | The hook payload is the pinned Hermes contract (`session_id`, `task_id`, `turn_id`, `user_message`, `assistant_response`, `conversation_history`, `model`, `platform`). Talaria GatewayClient hardcodes `talaria`, the Desktop chat panel hardcodes `desktop`, and standalone Hermes TUI resolves to `tui`. |
 | **Long task done (>10 min)** | ✅ `pre_llm_call` + `on_session_end` remain the fallback when `response` is disabled. With the default response event enabled, the duration-only push is suppressed. | ⚠️ Approximated from idle↔streaming transitions in `session.active_list`; set `TALARIA_PUSH_EVENTS` without `response` if this is the sidecar's completion signal (resolution = 2 s poll; can't tell success from in-turn error). | The response event supersedes the legacy duration-only notification for normal hook turns. |
-| **Routine (cron) finished** | ✅ `on_session_end` with `platform == "cron"` (cron jobs run their agent with `platform="cron"`, `cron/scheduler.py`). **The hook cannot see the job name** — push says "routine finished" generically. | ✅ Diffs `GET /api/cron/jobs?profile=all` on `cron.changed` broadcasts (+5 min backstop) — has the job name, parses the Talaria `[bot:<name>] <routine>` namespace. | Upstream ask: a `cron_job_completed` hook (mirroring the existing `kanban_task_*` observer family) carrying `job_id`, `job_name`, `status`. |
+| **Routine (cron) finished** | ❌ Fail-closed: `on_session_end(platform="cron")` lacks job id/name, creator surface, origin, and resolved delivery audience. | ❌ Fail-closed: mutable `[bot:…]` names and delivery fields cannot prove creator provenance. | Upstream ask: a structured `cron_job_completed` event carrying job id/name, profile, immutable creator surface, and resolved delivery targets. Only exact Talaria/Desktop provenance may be admitted; Slack/missing/unknown must reject. |
 | **@mention in A2A / gateway messages** | ✅ `pre_gateway_dispatch` observer sees every user-originated inbound `MessageEvent` in the messaging gateway — all platforms including `a2a` — and scans for `@<handle>` (`TALARIA_PUSH_MENTION_HANDLES`, default = profile name). Always returns `None` (never alters dispatch). | ❌ Messaging-gateway inbound traffic never crosses the `/api/ws` surface. | None — hook mode covers it. Caveat: fires per *gateway process*, so mentions of bot B are seen by B's gateway; install/enable the plugin for each bot profile that should push. |
 | **Gateway offline / recovered** | ❌ Structurally impossible — a dead process can't self-report, and there is no shipped shutdown hook that survives SIGKILL/power loss. | ✅ `/api/health` heartbeat; N consecutive failures ⇒ "offline", first success after ⇒ "recovered". **Only meaningful if the sidecar outlives the gateway** — run it under systemd/launchd, ideally on a different machine over Tailscale. A sidecar on the same host that dies with the host detects nothing; that residual gap needs an off-host watchdog and is out of scope here. | Inherent; no hook can fix this. |
 
@@ -92,14 +94,15 @@ The current `talaria-push` 0.1 plugin registers `post_llm_call` and emits a
 source-qualified `response` push from it only when `platform` is exactly
 `talaria` or `desktop`. Standalone TUI, messaging adapters (`slack`, `webhook`,
 `telegram`, and peers), CLI, API server/web UI, tool, subagent, relay, cron,
-missing, and unknown platforms fail closed; cron continues to emit `routine`.
+missing, and unknown platforms fail closed; cron never emits a live `routine`
+push without immutable creator and delivery provenance.
 `post_approval_response` only clears approval dedupe state. This distinction
 matters when reading logs:
 `events.py` registers six hooks and should emit one line like this **per
 Hermes process that loads the plugin** after restart:
 
 ```text
-talaria-push: registered 6 hooks (bot=ops-bot, events=approval,response,mention,routine)
+talaria-push: registered 6 hooks (bot=ops-bot, events=approval,response,mention)
 ```
 
 The exact bot and enabled-event list vary. Six is the registration count, not

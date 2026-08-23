@@ -943,19 +943,20 @@ def mention_event(
 
 def routine_event(
     *, bot: str, routine: str = "", session_id: str = "",
-    ok: bool = True, detail: str = "",
+    ok: bool = True, detail: str = "", display_name: str = "",
 ) -> PushEvent:
     name = routine or "routine"
     verdict = "finished" if ok else "failed"
+    title = response_display_name(bot, display_name)
     return PushEvent(
         kind="routine",
         bot=bot,
-        title=f"{bot}: {name} {verdict}",
+        title=title,
         body=detail or f"The scheduled routine {verdict}.",
         session_id=session_id,
         collapse_id=f"routine-{stable_hash(bot, name)}",
         dedupe_key=f"routine:{stable_hash(bot, name, session_id, verdict)}",
-        extra={"routine": name},
+        extra={"routine": name, BOT_DISPLAY_NAME_KEY: title},
     )
 
 

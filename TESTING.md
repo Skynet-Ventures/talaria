@@ -154,15 +154,17 @@ with the test report.
    authenticated gateway) shows the expected `environment`, `gateway_id`, and
    `profile_filter`. Send the test push once. This is only the APNs baseline,
    not proof that a real profile event will fan out.
-5. Trigger each real event in turn: a gateway approval and actual Approve/Later
-   response; a final-response-ready turn (including a fallback/error summary);
-   an inbound @mention; and a cron routine. Confirm the notification category,
+5. Trigger each supported real event in turn: a gateway approval and actual
+   Approve/Later response; a final-response-ready turn (including a
+   fallback/error summary); and an inbound @mention. Confirm the notification category,
    source deep-link, bot identity, and body. Verify that an interrupted turn
    emits no response push while a non-interrupted fallback/error summary does.
    To exercise the legacy long-task path, explicitly remove `response` from
    `TALARIA_PUSH_EVENTS`, lower
    `TALARIA_PUSH_LONG_TASK_MIN_S` in the disposable unit, and restore the
-   normal values afterwards.
+   normal values afterwards. Also complete a Slack-owned and a local cron job
+   and confirm both remain silent: routine push is fail-closed until Hermes
+   exposes immutable job creator/delivery provenance.
 
 ### Profile filtering and sidecar pass
 
@@ -177,7 +179,7 @@ close the filter test.
 If sidecar mode is part of the deployment, run it under a supervisor that can
 outlive the gateway (ideally on another host). Split `TALARIA_PUSH_EVENTS` so
 hook and sidecar producers do not overlap. Exercise its approval/long-task
-polling and cron discovery, then stop the gateway for three health intervals
+polling, confirm cron remains silent, then stop the gateway for three health intervals
 and restart it; record both offline and recovered alerts. The sidecar cannot
 see messaging-gateway @mentions, receives no session-bound `message.complete`
 event, approximates long-task completion from polling, and currently uses one
