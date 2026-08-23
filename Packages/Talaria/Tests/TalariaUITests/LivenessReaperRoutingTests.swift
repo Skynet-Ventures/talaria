@@ -116,6 +116,7 @@ final class LivenessReaperRoutingTests: XCTestCase {
         live.approvalTargets = oldApprovals
         live.reconnectParkedSessionIDs[remoteBotID] = nil
         live.reconnectParkedSessionIDs[primaryBotID] = nil
+        live.canonicalSessionByBot[remoteBotID] = nil
         await registry.clientPool.disconnect(gatewayID: remote.id)
         await registry.clientPool.disconnect(gatewayID: primary.id)
         registry.remove(id: remote.id)
@@ -251,6 +252,31 @@ final class LivenessReaperRoutingTests: XCTestCase {
             XCTAssertEqual(remoteChat.messages.map(\.text), remoteMessages.map(\.text))
             XCTAssertEqual(LiveRuntime.shared.sessionToBot[collidingSID],
                            fixture.primaryBotID)
+        }
+    }
+
+    func testCanonicalBotModeIdentityKeepsSidlessWorkingTurnVerifiable() async throws {
+        try await withDualGatewayFixture { fixture in
+            let remoteChat = fixture.model.chat(for: fixture.remoteBotID)
+            remoteChat.sessionID = nil
+            remoteChat.storedSessionID = nil
+            remoteChat.isRunning = true
+            LiveRuntime.shared.canonicalSessionByBot[fixture.remoteBotID] =
+                CanonicalSessionIdentity(id: "canonical-stored")
+            LivenessRuntime.shared.unverifiableSince[fixture.remoteBotID] =
+                ContinuousClock.now - .seconds(60)
+            LivenessRuntime.shared.activeSessionsForTesting = { _, gatewayID in
+                gatewayID == fixture.remote.id
+                    ? [self.liveRow(id: "fresh-runtime", key: "canonical-stored",
+                                    status: "working")]
+                    : []
+            }
+
+            await fixture.model.reconcileLiveness(trigger: .reaper)
+
+            XCTAssertTrue(LiveRuntime.shared.workingBotIDs.contains(fixture.remoteBotID))
+            XCTAssertTrue(remoteChat.isRunning)
+            XCTAssertNil(LivenessRuntime.shared.unverifiableSince[fixture.remoteBotID])
         }
     }
 

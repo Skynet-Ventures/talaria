@@ -23,7 +23,7 @@ public enum ProtocolChecks {
         try demoDataIntegrity()
         try liveSessionParsing()
         try gatewayBotRouting()
-        try preferredSessionParsing()
+        try canonicalSessionParsing()
         try rosterSearchSemantics()
         try mentionRouting()
         try agentHandleRules()

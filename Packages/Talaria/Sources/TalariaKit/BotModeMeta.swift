@@ -1,7 +1,7 @@
 import Foundation
 
 /// Desktop Bot Mode stores per-bot cosmetics server-side in the profile's
-/// `ui_meta["hermes-bots"]` block (title, shape, color, pinned chat, rooms), synced
+/// `ui_meta["hermes-bots"]` block (title, shape, color, rooms), synced
 /// through `profiles.configure` so they follow the profile between machines.
 ///
 /// This type is the PARSE of that block, not the precedence over it: which of
@@ -25,8 +25,11 @@ public struct BotModeMeta: Sendable, Equatable {
     public var shape: String?
     /// Desktop stores a literal hex from AVATAR_COLORS.
     public var colorHex: String?
-    /// Stored-session id of the bot's canonical "forever chat".
-    public var pinnedChat: String?
+    /// Legacy pre-a4f16e3 client pointer. Current Hermes defines canonical
+    /// identity only by the exact `Bot Chat` title registry and drops `chat`
+    /// from metadata merges. Decode remains for downgrade compatibility, but
+    /// this value is never part of current whole-block writes or identity.
+    public var legacyPinnedChat: String?
     /// What the profile's stored avatar asset actually IS: `"photo"` for a
     /// picture a human chose, `"shape"` for a machine-made 160 px raster of
     /// the live vector face. Desktop's roster consults it before refusing a
@@ -48,11 +51,11 @@ public struct BotModeMeta: Sendable, Equatable {
     public var groups: [String]
 
     public init(title: String? = nil, shape: String? = nil,
-                colorHex: String? = nil, pinnedChat: String? = nil,
+                colorHex: String? = nil,
                 imageKind: String? = nil, created: Double? = nil,
                 pinned: Bool = false, hidden: Bool = false, groups: [String] = []) {
         self.title = title; self.shape = shape
-        self.colorHex = colorHex; self.pinnedChat = pinnedChat
+        self.colorHex = colorHex; self.legacyPinnedChat = nil
         self.imageKind = imageKind; self.created = created; self.pinned = pinned; self.hidden = hidden
         self.groups = Self.normalizedGroups(groups)
     }
@@ -71,7 +74,7 @@ public struct BotModeMeta: Sendable, Equatable {
         title = block["title"]?.stringValue
         shape = block["shape"]?.stringValue
         colorHex = block["color"]?.stringValue
-        pinnedChat = block["chat"]?.stringValue
+        legacyPinnedChat = block["chat"]?.stringValue
         imageKind = block["imageKind"]?.stringValue
         created = block["created"]?.doubleValue
         pinned = block["pinned"]?.boolValue == true

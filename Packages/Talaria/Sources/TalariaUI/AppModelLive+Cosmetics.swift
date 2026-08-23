@@ -84,7 +84,7 @@ public final class RosterSignals {
     static let activeWindow: TimeInterval = 90
 
     /// Unix seconds of each bot's freshest *conversation* activity. This is
-    /// the newer of preferred and last session, never worker activity.
+    /// the newer of canonical and last session, never worker activity.
     private(set) var lastActive: [String: Double] = [:]
     /// Unix seconds from the optional worker-session projection. Hermes keeps
     /// it on its own 150-second live window; it is intentionally absent from
@@ -94,11 +94,11 @@ public final class RosterSignals {
     /// the future-skew bound; reducing this to a timestamp alone would let a
     /// wildly future `last_active` hold a row in the rail forever.
     private(set) var workerSessions: [String: HermesProfile.WorkerSessionRef] = [:]
-    /// Raw preview for the preferred/click identity. This stays aligned with
+    /// Raw preview for the canonical/click identity. This stays aligned with
     /// the roster row even when a different session is the freshest activity.
     private(set) var previews: [String: String] = [:]
     /// Raw preview belonging to `lastActive`'s freshest conversation. Activity
-    /// notifications must quote this session, never the older preferred row.
+    /// notifications must quote this session, never the older canonical row.
     private(set) var activityPreviews: [String: String] = [:]
     /// `ui_meta["hermes-bots"].created`, ms epoch (plugin.js:5400).
     private(set) var created: [String: Double] = [:]
@@ -225,9 +225,9 @@ public final class RosterSignals {
                 }
             }
 
-            // Preview follows click identity: a resolved preferred Bot Chat
+            // Preview follows click identity: a resolved canonical Bot Chat
             // always supplies the row text. Activity/unread independently use
-            // the fresher of preferred and visible last_session, so a newer
+            // the fresher of canonical and visible last_session, so a newer
             // scratch/cron delivery still advances recency without replacing
             // the forever-chat preview with unrelated text.
             lastActive[profile.name] = profile.freshestConversationSession?.lastActive ?? 0
@@ -376,15 +376,8 @@ extension AppModel {
         // Sampled before the await for the same reason `refreshRoster` samples
         // it: a pin written while this call was in flight must not be read back
         // out of a staler answer.
-        let snapshotIssuedAt = Date().timeIntervalSinceReferenceDate
-        let pinWrites = CanonicalChatRuntime.shared.writeCount
-        let requestedPins = CanonicalChatRuntime.shared.pins.filter {
-            GatewayBotRoute(qualifiedID: $0.key) == nil && !$0.value.isEmpty
-        }
-        await client.notePreferredSessions(requestedPins)
         guard let profiles = try? await client.listProfiles() else { return }
-        applyRosterAnswer(profiles, pinWrites: pinWrites, requestedPins: requestedPins,
-                          snapshotIssuedAt: snapshotIssuedAt)
+        applyRosterAnswer(profiles)
     }
 
     // The unread half of the roster answer lives in AppModelLive+Unread.swift:
@@ -595,10 +588,6 @@ extension AppModel {
                 signals.writing.insert(botID)
                 defer { signals.writing.remove(botID) }
 
-                // Sampled BEFORE the read's await, so the answer in hand can be dated
-                // against this app's own pin writes — the same primitive `refreshRoster`
-                // uses to decide whether a roster answer may overwrite a pin.
-                let pinWrites = CanonicalChatRuntime.shared.writeCount
                 var block: [String: JSONValue] = [:]
                 do {
                     let profiles = try await context.client.listProfiles(includeSessions: false)
@@ -610,20 +599,9 @@ extension AppModel {
                     return .failed
                 }
 
-                // The canonical-chat pin is the one key that must never be lost here,
-                // and it is lost two different ways. A block with no `chat` at all is
-                // the obvious one — desktop reads an omitted key as a deletion, so a
-                // pin held locally is re-asserted rather than dropped. The other is a
-                // block whose `chat` is STALE: opening a bot pins its forever-chat, and
-                // a look saved in the same breath can read the profile before that pin
-                // lands and then write the old session id back over it, silently
-                // moving the conversation the roster tap opens. So whenever this app
-                // pinned during (or across) the read, the local pin wins.
-                let localPin = CanonicalChatRuntime.shared.pins[botID]
-                let pinnedSinceRead = CanonicalChatRuntime.shared.hasLocalPinWrite(botID, since: pinWrites)
-                if let localPin, block["chat"] == nil || pinnedSinceRead {
-                    block["chat"] = .string(localPin)
-                }
+                // Legacy `chat` pointers are deliberately ignored and never
+                // reasserted. Current Hermes resolves `(profile, "Bot Chat")`.
+                block.removeValue(forKey: "chat")
                 for (key, value) in patch {
                     if let value { block[key] = value } else { block.removeValue(forKey: key) }
                 }

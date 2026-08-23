@@ -1462,7 +1462,7 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         XCTAssertEqual(result.bots.map(\.id), ["default"])
     }
 
-    func testForeignMentionBecomesExactRoutableEndpoint() {
+    func testForeignMentionIdentifiesExactSourceWithoutClientDelivery() {
         let model = AppModel()
         LiveRuntime.shared.gatewayID = "primary"
         let remote = Bot(id: "homelab::researcher", job: "", shape: .circle, hue: .teal,
@@ -1473,8 +1473,38 @@ final class SourceQualifiedRoutingTests: XCTestCase {
 
         XCTAssertEqual(draft.recipients.map(\.id), ["homelab::researcher"])
         XCTAssertTrue(draft.unreachable.isEmpty)
+        XCTAssertTrue(draft.text.contains(
+            "identity{handle=@researcher;profile=researcher}"))
+        XCTAssertFalse(draft.text.contains("Homelab"),
+                       "free-form device labels never enter model input")
+        XCTAssertTrue(draft.text.contains("message_agent"))
+        XCTAssertFalse(draft.text.contains("Talaria is delivering"))
+        XCTAssertFalse(draft.text.contains("hermes -p"))
+        XCTAssertFalse(draft.text.contains("prompt.submit"))
         XCTAssertEqual(model.a2aEndpoint(for: remote)?.route,
                        GatewayBotRoute(gatewayID: "homelab", profile: "researcher"))
+    }
+
+    func testAgentInboxHeaderControlsUsePhoneMinimumHitTarget() {
+        XCTAssertEqual(AgentInboxLayoutPolicy.minimumControlSize, 44)
+    }
+
+    func testA2AProductionSourceHasNoRecipientPromptTransport() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/TalariaUI/AppModelLive+A2A.swift"),
+            encoding: .utf8)
+        for forbidden in [
+            "deliverHandoff", "dispatchHandoff", "submitHandoff",
+            "rpc(\"prompt.submit\"", "static func attributed(",
+        ] {
+            XCTAssertFalse(source.contains(forbidden),
+                           "A2A production source restored recipient transport: \(forbidden)")
+        }
     }
 
     func testRemoteDefaultEndpointKeepsRouteHandleAndBareAttributionHandleDistinct() {
@@ -1536,20 +1566,10 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         let remoteKey = AppModel.deliveryKey(route: remote, body: "same", attemptID: UUID())
         let primaryTask = Task<Void, Never> { try? await Task.sleep(for: .seconds(60)) }
         let remoteTask = Task<Void, Never> { try? await Task.sleep(for: .seconds(60)) }
-        let primaryOpen = Task<A2ACanonicalSession, Error> {
-            try await Task.sleep(for: .seconds(60))
-            return A2ACanonicalSession(runtime: "same", stored: "same")
-        }
-        let remoteOpen = Task<A2ACanonicalSession, Error> {
-            try await Task.sleep(for: .seconds(60))
-            return A2ACanonicalSession(runtime: "same", stored: "same")
-        }
         runtime.watchers[primaryKey] = primaryTask
         runtime.watchers[remoteKey] = remoteTask
         runtime.watcherScopes[primaryKey] = "primary"
         runtime.watcherScopes[remoteKey] = "homelab"
-        runtime.canonicalOpens[primary] = primaryOpen
-        runtime.canonicalOpens[remote] = remoteOpen
         runtime.deliveries[primaryKey] = A2ADelivery(
             to: "default", route: primary, queuedBehindRun: false,
             state: .waiting, at: Date())
@@ -1561,12 +1581,9 @@ final class SourceQualifiedRoutingTests: XCTestCase {
 
         XCTAssertFalse(primaryTask.isCancelled)
         XCTAssertTrue(remoteTask.isCancelled)
-        XCTAssertFalse(primaryOpen.isCancelled)
-        XCTAssertTrue(remoteOpen.isCancelled)
         XCTAssertNotNil(runtime.deliveries[primaryKey])
         XCTAssertNil(runtime.deliveries[remoteKey])
         primaryTask.cancel()
-        primaryOpen.cancel()
     }
 
     func testSecondaryProfileRenameMigratesA2ASenderRecipientAndWatchOwnership() {
@@ -1613,9 +1630,9 @@ final class SourceQualifiedRoutingTests: XCTestCase {
             bodyHash: AppModel.stableHash("sibling"), queuedBehindRun: false,
             state: .waiting, at: Date())
 
-        let incomingWatchGeneration = runtime.installWatcher(
+        let incomingWatchGeneration = installLegacyWatcher(runtime,
             key: incomingKey, target: sourceEndpoint, sender: primaryEndpoint)
-        let outgoingWatchGeneration = runtime.installWatcher(
+        let outgoingWatchGeneration = installLegacyWatcher(runtime,
             key: outgoingKey, target: siblingEndpoint, sender: sourceEndpoint)
         runtime.watchers[incomingKey] = Task { try? await Task.sleep(for: .seconds(60)) }
         runtime.watchers[outgoingKey] = Task { try? await Task.sleep(for: .seconds(60)) }
@@ -1623,10 +1640,10 @@ final class SourceQualifiedRoutingTests: XCTestCase {
 
         runtime.retireProfileRoute(source, sourceBotIDs: [source.qualifiedID],
                                    preserveForRename: true)
-        XCTAssertTrue(runtime.watcherIsPaused(key: incomingKey,
-                                               generation: incomingWatchGeneration))
-        XCTAssertTrue(runtime.watcherIsPaused(key: outgoingKey,
-                                               generation: outgoingWatchGeneration))
+        XCTAssertEqual(runtime.watcherGeneration[incomingKey], incomingWatchGeneration)
+        XCTAssertEqual(runtime.watcherRegistrations[incomingKey]?.paused, true)
+        XCTAssertEqual(runtime.watcherGeneration[outgoingKey], outgoingWatchGeneration)
+        XCTAssertEqual(runtime.watcherRegistrations[outgoingKey]?.paused, true)
         XCTAssertFalse(runtime.accepts(route: source, generation: oldGeneration))
 
         runtime.migrateProfileRoute(from: source, to: destination,
@@ -1640,12 +1657,10 @@ final class SourceQualifiedRoutingTests: XCTestCase {
                        destination.qualifiedID)
         XCTAssertEqual(runtime.deliveries[siblingKey]?.route, sibling)
         XCTAssertEqual(runtime.deliveries[siblingKey]?.senderRoute, primary)
-        let incomingOwner = runtime.watcherRegistration(
-            key: incomingKey, generation: incomingWatchGeneration)
+        let incomingOwner = runtime.watcherRegistrations[incomingKey]
         XCTAssertEqual(incomingOwner?.target.route, destination)
         XCTAssertEqual(incomingOwner?.target.rosterID, destination.qualifiedID)
-        let outgoingOwner = runtime.watcherRegistration(
-            key: outgoingKey, generation: outgoingWatchGeneration)
+        let outgoingOwner = runtime.watcherRegistrations[outgoingKey]
         XCTAssertEqual(outgoingOwner?.sender.route, destination)
         XCTAssertEqual(outgoingOwner?.sender.rosterID, destination.qualifiedID)
         XCTAssertFalse(runtime.accepts(
@@ -1688,21 +1703,15 @@ final class SourceQualifiedRoutingTests: XCTestCase {
             senderRosterID: "ops", attemptID: siblingID,
             bodyHash: AppModel.stableHash("keep"), queuedBehindRun: false,
             state: .waiting, at: Date())
-        let generation = runtime.installWatcher(
+        let generation = installLegacyWatcher(runtime,
             key: sourceKey, target: sourceEndpoint, sender: primaryEndpoint)
-        let siblingGeneration = runtime.installWatcher(
+        let siblingGeneration = installLegacyWatcher(runtime,
             key: siblingKey, target: siblingEndpoint, sender: primaryEndpoint)
         let sourceTask = Task<Void, Never> { try? await Task.sleep(for: .seconds(60)) }
         let siblingTask = Task<Void, Never> { try? await Task.sleep(for: .seconds(60)) }
         runtime.watchers[sourceKey] = sourceTask
         runtime.watchers[siblingKey] = siblingTask
-        runtime.canonicalOpens[source] = Task {
-            try await Task.sleep(for: .seconds(60))
-            return A2ACanonicalSession(runtime: "runtime", stored: "stored")
-        }
         let oldGeneration = runtime.routeGeneration(for: source)
-        let senderGeneration = runtime.routeGeneration(for: primary)
-
         runtime.retireProfileRoute(source, sourceBotIDs: [source.qualifiedID])
 
         XCTAssertTrue(sourceTask.isCancelled)
@@ -1711,37 +1720,14 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         XCTAssertNotNil(runtime.deliveries[siblingKey])
         XCTAssertNil(runtime.watcherRegistrations[sourceKey])
         XCTAssertNotNil(runtime.watcherRegistrations[siblingKey])
-        XCTAssertNil(runtime.canonicalOpens[source])
         XCTAssertFalse(runtime.accepts(route: source, generation: oldGeneration))
-        XCTAssertFalse(runtime.acceptsCompletion(
-            senderRoute: primary, senderGeneration: senderGeneration,
-            targetRoute: source, targetGeneration: oldGeneration))
         XCTAssertFalse(runtime.accepts(
             route: source, generation: runtime.routeGeneration(for: source)))
-        XCTAssertNotNil(runtime.watcherRegistration(key: siblingKey,
-                                                    generation: siblingGeneration))
+        XCTAssertNotNil(runtime.watcherRegistrations[siblingKey])
         XCTAssertEqual(runtime.watcherGeneration[siblingKey], siblingGeneration)
         runtime.watchers[siblingKey]?.cancel()
         XCTAssertEqual(runtime.watcherGeneration[sourceKey], nil)
         XCTAssertEqual(generation, 1)
-    }
-
-    func testA2ACanonicalOpenGenerationSurvivesRetireAndGatewayReset() {
-        let runtime = A2ARuntime.shared
-        runtime.reset()
-        defer { runtime.reset() }
-        let route = GatewayBotRoute(gatewayID: "homelab", profile: "worker")
-        runtime.canonicalOpenGenerations[route] = 41
-        runtime.canonicalOpens[route] = Task {
-            try await Task.sleep(for: .seconds(60))
-            return A2ACanonicalSession(runtime: "runtime", stored: "stored")
-        }
-
-        runtime.retireProfileRoute(route, sourceBotIDs: [route.qualifiedID],
-                                   preserveForRename: true)
-        XCTAssertEqual(runtime.canonicalOpenGenerations[route], 41)
-        runtime.reset(gatewayID: route.gatewayID)
-        XCTAssertEqual(runtime.canonicalOpenGenerations[route], 41)
     }
 
     func testA2APreservedPrimaryRouteSurvivesGatewayReset() {
@@ -1756,7 +1742,8 @@ final class SourceQualifiedRoutingTests: XCTestCase {
                                  displayTitle: "Default", handle: "default",
                                  attributionHandle: "default", connectionLabel: nil)
         let key = "preserved"
-        let watchGeneration = runtime.installWatcher(key: key, target: target, sender: sender)
+        let watchGeneration = installLegacyWatcher(
+            runtime, key: key, target: target, sender: sender)
         let task = Task<Void, Never> { try? await Task.sleep(for: .seconds(60)) }
         runtime.watchers[key] = task
         runtime.deliveries[key] = A2ADelivery(
@@ -1771,7 +1758,8 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         XCTAssertNotNil(runtime.deliveries[key])
         XCTAssertNotNil(runtime.watcherRegistrations[key])
         XCTAssertFalse(task.isCancelled)
-        XCTAssertTrue(runtime.watcherIsPaused(key: key, generation: watchGeneration))
+        XCTAssertEqual(runtime.watcherGeneration[key], watchGeneration)
+        XCTAssertEqual(runtime.watcherRegistrations[key]?.paused, true)
         task.cancel()
     }
 
@@ -1842,19 +1830,6 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         XCTAssertEqual(FeedsRuntime.shared.inboxSessions[remoteID]?.gatewayID, "homelab")
     }
 
-    func testAcceptedSubmitNeverBecomesFailureWhenScopeInvalidates() {
-        let retained = A2AAcceptedOutcome.afterSubmit(scopeIsCurrent: true)
-        let detached = A2AAcceptedOutcome.afterSubmit(scopeIsCurrent: false)
-
-        XCTAssertEqual(retained.state, .waiting)
-        XCTAssertTrue(retained.retainWatcher)
-        XCTAssertEqual(detached.state, .quiet)
-        XCTAssertFalse(detached.retainWatcher)
-        if case .failed = detached.state {
-            XCTFail("an accepted prompt cannot be reclassified as transport failure")
-        }
-    }
-
     func testFederatedInboxMergePreservesUnscannedRemoteAndReplacesAnchoredOptimistic() {
         let primaryID = UUID()
         let remoteAttempt = UUID()
@@ -1909,72 +1884,6 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         XCTAssertEqual(ref.rosterID(activeGatewayID: "homelab"), "default")
         XCTAssertNil(SessionRef(gatewayID: "", botID: "default", storedID: "same")
             .rosterID(activeGatewayID: "primary"))
-    }
-
-    func testFreshPinAuthorityHonorsRepinDeletionRaceAndReadFailure() {
-        XCTAssertEqual(A2APinAuthority.choose(
-            cached: "old", current: "old", sampledWrite: 2, currentWrite: 2,
-            serverReadSucceeded: true, serverPin: "desktop-new"), "desktop-new")
-        XCTAssertNil(A2APinAuthority.choose(
-            cached: "old", current: "old", sampledWrite: 2, currentWrite: 2,
-            serverReadSucceeded: true, serverPin: nil))
-        XCTAssertEqual(A2APinAuthority.choose(
-            cached: "old", current: "phone-new", sampledWrite: 2, currentWrite: 3,
-            serverReadSucceeded: true, serverPin: "stale-server"), "phone-new")
-        XCTAssertEqual(A2APinAuthority.choose(
-            cached: "old", current: "old", sampledWrite: 2, currentWrite: 2,
-            serverReadSucceeded: false, serverPin: nil), "old")
-    }
-
-    func testCanonicalLookupUsesDatabaseTitleAfterPinWithoutFortyRowWindow() {
-        // Forty-one newer sessions cannot hide Bot Chat because production
-        // sends this exact title to session.resume instead of searching a list.
-        let newerSessionCount = 41
-        XCTAssertGreaterThan(newerSessionCount, 40)
-        XCTAssertEqual(A2ASessionResolver.lookupTargets(pin: "pinned", title: "Bot Chat"),
-                       ["pinned", "Bot Chat"])
-        XCTAssertEqual(A2ASessionResolver.lookupTargets(pin: nil, title: "Bot Chat"),
-                       ["Bot Chat"])
-    }
-
-    func testReplyRequiresExactAttributedPromptAnchor() {
-        let attributed = "Message from 🤖 Ops (@ops): deploy"
-        let substringOnly: [JSONValue] = [
-            .object(["role": .string("user"),
-                     "content": .string("prefix \(attributed) suffix")]),
-            .object(["role": .string("assistant"), "content": .string("wrong")]),
-        ]
-        let exact: [JSONValue] = substringOnly + [
-            .object(["role": .string("user"), "content": .string(attributed)]),
-            .object(["role": .string("assistant"), "content": .string("right")]),
-        ]
-
-        XCTAssertNil(A2AReplyResolver.reply(to: attributed, in: substringOnly))
-        XCTAssertEqual(A2AReplyResolver.reply(to: attributed, in: exact), "right")
-    }
-
-    func testIdenticalHandoffBodiesRelayOnlyTheirOwnAttemptReply() {
-        let body = "deploy the same build"
-        let first = A2AWire.attributed(displayTitle: "Ops", handle: "ops", body: body,
-                                       attemptID: UUID(uuidString:
-                                        "00000000-0000-0000-0000-000000000001")!)
-        let second = A2AWire.attributed(displayTitle: "Ops", handle: "ops", body: body,
-                                        attemptID: UUID(uuidString:
-                                         "00000000-0000-0000-0000-000000000002")!)
-        let transcript: [JSONValue] = [
-            .object(["role": .string("user"), "content": .string(first)]),
-            .object(["role": .string("assistant"), "content": .string("first reply")]),
-            .object(["role": .string("user"), "content": .string(second)]),
-            .object(["role": .string("assistant"), "content": .string("second reply")]),
-        ]
-
-        XCTAssertNotEqual(first, second)
-        XCTAssertEqual(A2AReplyResolver.reply(to: first, in: transcript), "first reply")
-        XCTAssertEqual(A2AReplyResolver.reply(to: second, in: transcript), "second reply")
-        XCTAssertEqual(AppModel.strippedA2A(first), body,
-                       "the wire attempt UUID must not leak into the inbox preview")
-        XCTAssertEqual(AppModel.strippedA2A(second), body)
-        XCTAssertEqual(AppModel.a2aSender(in: first), "ops")
     }
 
     func testInboxParserClearsAttributionAfterOrdinaryUserTurn() {
@@ -2033,9 +1942,8 @@ final class SourceQualifiedRoutingTests: XCTestCase {
 
     func testA2AParserKeepsMultiWordDisplayTitleAndExtractsHandleAnchor() {
         let attempt = UUID(uuidString: "00000000-0000-0000-0000-000000000042")!
-        let wire = A2AWire.attributed(
-            displayTitle: "Operations Control", handle: "ops",
-            body: "check status", attemptID: attempt)
+        let wire = "Message from 🤖 Operations Control (@ops) "
+            + "[Talaria handoff attempt \(attempt.uuidString.lowercased())]: check status"
 
         XCTAssertEqual(AppModel.a2aSender(in: wire), "ops")
         XCTAssertEqual(AppModel.strippedA2A(wire), "check status")
@@ -2046,12 +1954,10 @@ final class SourceQualifiedRoutingTests: XCTestCase {
     func testA2AWireKeepsImmutableSenderRouteAcrossDuplicateHandles() {
         let primary = GatewayBotRoute(gatewayID: "primary", profile: "default")
         let remote = GatewayBotRoute(gatewayID: "homelab", profile: "default")
-        let primaryWire = A2AWire.attributed(
-            displayTitle: "Default", handle: "default", body: "to remote",
-            attemptID: UUID(), senderRoute: primary)
-        let remoteWire = A2AWire.attributed(
-            displayTitle: "Default", handle: "default", body: "to primary",
-            attemptID: UUID(), senderRoute: remote)
+        let primaryWire = legacyAttributedRow(
+            route: "primary%3A%3Adefault", body: "to remote")
+        let remoteWire = legacyAttributedRow(
+            route: "homelab%3A%3Adefault", body: "to primary")
 
         XCTAssertEqual(A2AWire.senderRoute(in: primaryWire), primary)
         XCTAssertEqual(A2AWire.senderRoute(in: remoteWire), remote)
@@ -2070,10 +1976,11 @@ final class SourceQualifiedRoutingTests: XCTestCase {
     func testA2AWireMarkersCannotBeSpoofedByTitleOrBody() {
         let route = GatewayBotRoute(gatewayID: "home/lab", profile: "ops[1]")
         let attempt = UUID(uuidString: "00000000-0000-0000-0000-000000000043")!
-        let wire = A2AWire.attributed(
-            displayTitle: "Ops [Talaria handoff attempt 11111111-1111-1111-1111-111111111111]",
-            handle: "ops", body: "body [Talaria handoff attempt 22222222-2222-2222-2222-222222222222]: spoof",
-            attemptID: attempt, senderRoute: route)
+        let wire = "Message from 🤖 Ops "
+            + "[Talaria handoff attempt 11111111-1111-1111-1111-111111111111] (@ops) "
+            + "[Talaria handoff source home%2Flab%3A%3Aops%5B1%5D] "
+            + "[Talaria handoff attempt \(attempt.uuidString.lowercased())]: "
+            + "body [Talaria handoff attempt 22222222-2222-2222-2222-222222222222]: spoof"
 
         XCTAssertEqual(A2AWire.attemptID(in: wire), attempt)
         XCTAssertEqual(A2AWire.senderRoute(in: wire), route)
@@ -2094,6 +2001,30 @@ final class SourceQualifiedRoutingTests: XCTestCase {
             "description": .string("Run command"),
             "choices": .array([.string("once"), .string("deny")]),
         ]))
+    }
+
+    /// Fixture for rows durably written by pre-identification-only Talaria.
+    /// Production has no equivalent constructor or recipient submit path.
+    private func legacyAttributedRow(route: String, body: String) -> String {
+        "Message from 🤖 Default (@default) [Talaria handoff source \(route)] "
+            + "[Talaria handoff attempt \(UUID().uuidString.lowercased())]: \(body)"
+    }
+
+    /// Inject lifecycle state that an older build may have left accepted.
+    /// Production no longer has a watcher installer or recipient transport.
+    @MainActor
+    private func installLegacyWatcher(
+        _ runtime: A2ARuntime, key: String,
+        target: A2AEndpoint, sender: A2AEndpoint
+    ) -> Int {
+        let generation = (runtime.watcherGeneration[key] ?? 0) + 1
+        runtime.watcherGeneration[key] = generation
+        runtime.watcherScopes[key] = target.route.gatewayID
+        runtime.watcherRegistrations[key] = A2AWatcherRegistration(
+            target: target, sender: sender,
+            targetGeneration: runtime.routeGeneration(for: target.route),
+            senderGeneration: runtime.routeGeneration(for: sender.route))
+        return generation
     }
 
     private func target(gatewayID: String, profile: String, sessionID: String,

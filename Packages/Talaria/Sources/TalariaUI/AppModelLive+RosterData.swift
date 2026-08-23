@@ -4,22 +4,15 @@ import TalariaTheme
 
 // ── Roster data: the canonical-chat round trip and the liveness set ──────────
 //
-// Two halves of BOT-PARITY-PLAN Phase B1, both derived from the SAME
+// Two halves of Bot Mode roster policy, both derived from the SAME
 // `profiles.list` answer the roster already polls — no second RPC, because
 // `include_sessions` costs a per-profile database scan gateway-side
 // (methods_profiles.py `_latest_profile_session_row`).
 //
-// **1. `preferred_session_ids`.** The enabling call for the whole region. The
-// roster previews one session and the tap opens another unless the gateway is
-// told which conversation the client actually cares about
-// (hermes-agent#88200): `profiles.list {preferred_session_ids: {profile: id}}`
-// answers "what about THIS conversation" per row — hidden sessions included,
-// compression lineages resolved to their live tip, no pagination window. The
-// wire work lives in `GatewayClient.listProfiles`, which harvests the pins out
-// of each answer's own `ui_meta["hermes-bots"].chat` exactly as desktop reads
-// them out of `$botMeta` (plugin.js:2208-2231). This file owns the app-side
-// half: pushing a pin the app minted before the gateway can echo it back, and
-// reading the tri-state answer.
+// **1. `canonical_session`.** Current Hermes resolves the profile's exact
+// hidden `Bot Chat` registry row server-side. It drives preview while activity
+// uses the fresher of canonical and visible `last_session`. No client pointer
+// is sent, persisted, grandfathered, or inferred from recency.
 //
 // **2. The active-now set.** Desktop's `activeBots` (plugin.js:3831-3839): the
 // bot the gateway is running a turn for, plus every bot whose conversation
@@ -29,70 +22,20 @@ import TalariaTheme
 // reason the upstream function is written as a filter over the roster rather
 // than a sort of its own.
 //
-// Re-verified against the live gateway 2026-08-18 (0.20.3): `profiles.list`
-// returns rows keyed `name, path, is_default, model, provider, description,
-// skill_count, last_session, ui_meta, has_avatar` and carries no
-// `preferred_session` key at all — byte-identical with pins, without pins, and
-// with a pin naming a session that does not exist. That build has no
-// `preferred_session` handler, so *absent* is the only branch reachable there
-// and it is precisely the branch that must never read as "the pin is dead".
-
-struct CanonicalPinBuckets: Equatable {
-    var primary: [String: String]
-    var routed: [String: [String: String]]
-}
-
-/// Canonical runtime keys are bare only for the primary source. Remote keys
-/// are `gateway::profile` and must never be sent verbatim to the primary
-/// client, where they could become a bogus profile name or resolve a colliding
-/// local row.
-enum CanonicalPinRouting {
-    static func partition(_ pins: [String: String]) -> CanonicalPinBuckets {
-        var primary: [String: String] = [:]
-        var routed: [String: [String: String]] = [:]
-        for (key, storedID) in pins where !storedID.isEmpty {
-            if let route = GatewayBotRoute(qualifiedID: key) {
-                routed[route.gatewayID, default: [:]][route.profile] = storedID
-            } else {
-                primary[key] = storedID
-            }
-        }
-        return CanonicalPinBuckets(primary: primary, routed: routed)
-    }
-}
+// Older gateways omit `canonical_session`; that compatibility omission is
+// inconclusive and never permission to infer identity from `last_session`.
 
 extension AppModel {
 
     // MARK: - The canonical-chat round trip
 
-    /// Hand the client the pins this app knows about but the gateway has not
-    /// echoed yet.
-    ///
-    /// `GatewayClient` primes itself from every answer's `ui_meta`, which
-    /// covers the steady state. It cannot cover the one case that matters
-    /// most: a canonical chat minted seconds ago is pinned locally *before*
-    /// `profiles.configure` lands, so the poll in between would resolve
-    /// nothing and preview the scratch session the birth kickoff just created.
-    /// Cheap enough to call on every roster appearance.
+    /// Source-compatible appearance hook. Canonical identity is now entirely
+    /// gateway-owned (`canonical_session` + exact-title lookup), so there is no
+    /// client pointer to synchronize.
     public func syncCanonicalPins() async {
-        guard mode == .live else { return }
-        let buckets = CanonicalPinRouting.partition(CanonicalChatRuntime.shared.pins)
-        if let client, !buckets.primary.isEmpty {
-            await client.notePreferredSessions(buckets.primary)
-        }
-        for (gatewayID, pins) in buckets.routed where !pins.isEmpty {
-            guard let owner = try? await routedClient(gatewayID: gatewayID) else { continue }
-            await owner.notePreferredSessions(pins)
-        }
+        // Intentionally empty. Kept until the view call site can be removed
+        // without coupling this canonical migration to ActiveNowStrip.
     }
-
-    // The tri-state answer itself is read where it is acted on: `listProfiles`
-    // folds a `.resolved` pin's preview onto the row it will open, and
-    // `HermesProfile.PreferredSession` keeps *absent* and *null* apart so a
-    // gateway that ignores `preferred_session_ids` can never be read as
-    // declaring a pin dead. Canonical-chat recovery deliberately does not
-    // consult it — `attachCanonicalSession` re-anchors off `session.resume`'s
-    // 4007, which answers for the exact resume the tap is about to perform.
 
     // MARK: - The active-now set
 
