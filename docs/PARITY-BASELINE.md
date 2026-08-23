@@ -127,6 +127,38 @@ user capability is not “n/a” merely because the Desktop interaction cannot b
 copied. For example, local terminal and filesystem UI become secure remote
 gateway controls on iOS.
 
+## Desktop → Talaria platform equivalence
+
+This matrix is the current product map, not a claim that every implemented row
+is certified. **Implemented, certification pending** means the mobile surface
+and its automated contract exist, while the required live-gateway or physical-
+device evidence is still missing. **Open** means meaningful portable behavior
+is not implemented yet. **Platform exception** is reserved for behavior whose
+purpose is inseparable from the Desktop host; it is never used to hide a
+missing mobile equivalent.
+
+| Hermes Desktop capability | Talaria mobile equivalent | Current status | Proof still required or remaining work |
+|---|---|---|---|
+| Bot Mode roster, canonical Bot Chat, unread, Active Now, profile actions | Phone-first home roster with source-qualified rows and rooms, exact canonical-chat resolution, durable unread watermarks, an Active Now rail, and guarded profile edit/duplicate/delete | Implemented, certification pending | Long-thread, background/foreground, VoiceOver, rotation, and two-gateway device cases |
+| Connections union roster and routed requests | Retained authenticated gateway clients, `GatewayBotRoute` identity, collision-safe `@name-device` handles, and source-fenced chat/management mutations without globally switching the app | Implemented, certification pending | Wi-Fi/cellular handoff, detach/reconnect, colliding names, and foreign-profile lifecycle cases |
+| Bot Mode group chats | Durable standalone rooms with immutable ids, multiple ordered memberships, source-qualified members, prompt/deadline recovery, attachment export, and bounded shared projection/CAS | Implemented, certification pending | Deadline/relaunch, rename/disband, cross-gateway prompt, and projection-conflict device cases |
+| Composer send/steer plus pending prompts | Send remains steer-first; a separate explicit text-only durable Queue persists exact route/session authority and provides scoped edit, pause/resume, removal, and uncertainty handling | Implemented, certification pending | FIFO/edit/relaunch/offline cases on a real gateway; attachment replay remains intentionally unsupported |
+| Markdown transcript, actions, tools, media, branching | Native transcript with markdown/tables/code, quiet and advanced tools, edit/rewind/regenerate, exact-source child creation, and phone-shaped navigation | Partial / open | Persistent multimodal parts, generated-media lightbox, grouped tools, specialist renderers, branch picker/lineage, TTS, timing, tours, and transcript-wide activity |
+| Image, PDF, file, clipboard, and room attachments | Native source picker and gateway-staged attachments with bounded payload handling; room attachments have protected local storage/export | Implemented, certification pending | Physical-device picker, large/failure, background/relaunch, and cross-source cases; durable Queue remains text-only |
+| Notification center and background completion | Source-qualified APNs relay, per-device profile filter, real-event notification actions, exact-session tap routing, and a local activity journal | Implemented, certification pending | Retained Debug positive/negative matrix and separate TestFlight production-APNs matrix |
+| Desktop task progress chrome | Live Activity only for sustained operational tool work, not merely because a chat is open or a normal answer is running | Implemented, certification pending | Lock-screen start/update/end behavior, background transition, stale cleanup, and reduced-motion device checks |
+| Profiles, models, providers, routines, skills, tools, plugins, MCP, memory, voice, runtime, logs | Compact bot profile plus source-qualified native management screens and guarded gateway operations | Partial | Live certification for implemented mutations; connector/relay lifecycle, learned-memory curation/import/export, auxiliary slots, MoA, subagent depth, and per-server MCP logs remain open |
+| Files, Projects, Git, system/usage, backend maintenance | Source-locked Files/Projects/Git and Command Center views with fail-closed authority checks and guarded mutations | Partial | Pagination/depth, safe project writes, usage detail, worktree integration, multi-gateway update orchestration, and real-gateway certification |
+| Integrated terminal pane | Authenticated SwiftTerm gateway PTY with exact source/profile binding, ticket refresh, opaque reattach, resize, and ordered bytes | Implemented, certification pending | Physical keyboard/touch, background/reconnect, expired-token, resize/rotation, and host-backend cases |
+| Desktop window placement, docking, titlebar/HUD, hover/tooltips, global shortcuts | Navigation stacks/sheets, compact phone layouts, long-press/context actions, accessibility labels, and touch-first controls | Native equivalent where applicable | VoiceOver, rotation, Dynamic Type, and reduced-motion certification; literal window geometry and hover are platform exceptions |
+| Finder/Explorer reveal and host path picker | Secure, gateway-authorized Files/Projects navigation; no host-local picker impersonation | Native equivalent where gateway authority exists | Resolved-target/root proof is still required before project writes can be enabled safely |
+| Desktop plugin registry/enable-disable and renderer internals | Bot Mode is the signed app shell; SwiftUI state/lifecycle replace plugin registration, React cache/compiler, DOM, and CSS machinery | Platform exception | Preserve transferable lifecycle, invalidation, accessibility, and animation semantics only |
+| Desktop app self-update / local backend spawning | App Store or TestFlight updates the signed client; gateway operations manage remote compatible services | Platform exception | Release-channel validation; Talaria must not replace its binary or pretend to spawn a phone-local Hermes backend |
+
+Every physical-device result uses the stable case ids and evidence fields in
+[`REAL-DEVICE-CERTIFICATION.md`](REAL-DEVICE-CERTIFICATION.md). A blank template
+or an automated test is not device evidence.
+
 ## Current honest status
 
 The 2026-08-17 Desktop audit measured 30% covered portable behavior. Substantial
