@@ -454,6 +454,88 @@ public struct PendingAttachment: Identifiable, Codable, Sendable, Equatable {
     }
 }
 
+enum TurnFailureMessageCodec {
+    static let maximumVisibleScalars = 8_192
+    static let clippedMarker = "\n… [turn detail clipped]"
+
+    /// Imported snapshots are an untrusted presentation source. Keep work and
+    /// retained storage finite, preserve ordinary tabs/newlines, and strip
+    /// controls that can spoof the card or copied diagnostics. A distinct raw
+    /// cap retains safe text behind dense controls without permitting an
+    /// unbounded scan.
+    static func admit(_ value: String) -> String {
+        let markerScalars = clippedMarker.unicodeScalars
+        let markerCount = markerScalars.count
+        let rawWorkMaximum = maximumVisibleScalars * 4
+        let raw = value.unicodeScalars.prefix(rawWorkMaximum + 1)
+        let rawWasClipped = raw.count > rawWorkMaximum
+        var safe = String.UnicodeScalarView()
+        safe.reserveCapacity(maximumVisibleScalars + 1)
+        var safeCount = 0
+        for scalar in raw.prefix(rawWorkMaximum) {
+            if scalar.value == 0x09 || scalar.value == 0x0A {
+                safe.append(scalar)
+                safeCount += 1
+            } else if !isUnsafeControl(scalar.value) {
+                safe.append(scalar)
+                safeCount += 1
+            }
+            if safeCount > maximumVisibleScalars { break }
+        }
+        guard rawWasClipped || safeCount > maximumVisibleScalars else {
+            return String(safe)
+        }
+        let contentCount = max(0, maximumVisibleScalars - markerCount)
+        var clipped = String.UnicodeScalarView(safe.prefix(contentCount))
+        clipped.append(contentsOf: markerScalars.prefix(
+            maximumVisibleScalars - clipped.count))
+        return String(clipped)
+    }
+
+    private static func isUnsafeControl(_ value: UInt32) -> Bool {
+        if value <= 0x1F || (0x7F...0x9F).contains(value) { return true }
+        switch value {
+        case 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+public struct TurnFailure: Codable, Sendable, Equatable {
+    public var message: String
+    public var recoverable: Bool
+    public var errorSurface: TurnErrorSurface?
+
+    public init(message: String, recoverable: Bool,
+                errorSurface: TurnErrorSurface? = nil) {
+        self.message = message
+        self.recoverable = recoverable
+        self.errorSurface = errorSurface
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        message = TurnFailureMessageCodec.admit(
+            try container.decode(String.self, forKey: .message))
+        recoverable = try container.decode(Bool.self, forKey: .recoverable)
+        errorSurface = try container.decodeIfPresent(TurnErrorSurface.self,
+                                                     forKey: .errorSurface)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(TurnFailureMessageCodec.admit(message), forKey: .message)
+        try container.encode(recoverable, forKey: .recoverable)
+        try container.encodeIfPresent(errorSurface, forKey: .errorSurface)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case message, recoverable, errorSurface
+    }
+}
+
 public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     public var id: UUID
     public var author: MessageAuthor
@@ -470,13 +552,18 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     public var toolCalls: [ToolCall]
     /// Durable transcript row id — needed for reactions and rewind.
     public var rowID: Int?
+    /// Terminal failure metadata belongs to the assistant turn rather than a
+    /// separate system row. Optional preserves decoding of older snapshots.
+    public var failure: TurnFailure?
 
     public init(id: UUID = UUID(), author: MessageAuthor, time: String? = nil,
                 text: String, card: MessageCard? = nil, isStreaming: Bool = false,
-                reasoning: String? = nil, toolCalls: [ToolCall] = [], rowID: Int? = nil) {
+                reasoning: String? = nil, toolCalls: [ToolCall] = [], rowID: Int? = nil,
+                failure: TurnFailure? = nil) {
         self.id = id; self.author = author; self.time = time
         self.text = text; self.card = card; self.isStreaming = isStreaming
         self.reasoning = reasoning; self.toolCalls = toolCalls; self.rowID = rowID
+        self.failure = failure
     }
 }
 

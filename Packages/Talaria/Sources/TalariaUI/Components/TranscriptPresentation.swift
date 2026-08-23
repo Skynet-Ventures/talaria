@@ -75,9 +75,14 @@ public enum ChatComposerAction: Sendable, Equatable {
 }
 
 public enum ChatComposerActionPolicy {
-    public static func action(draft: String, attachmentCount: Int, isTurnRunning: Bool) -> ChatComposerAction {
+    public static func action(draft: String, attachmentCount: Int, isTurnRunning: Bool,
+                              hasUnresolvedFailedTurnRetry: Bool = false) -> ChatComposerAction {
         let text = draft.trimmingCharacters(in: .whitespaces)
         let hasPayload = !text.isEmpty || attachmentCount > 0
+        // An unresolved Retry owns the next same-session lifecycle event. Keep
+        // Stop available for that operation, but never present a draft or
+        // attachment as sendable until its ownership is settled.
+        if hasUnresolvedFailedTurnRetry, hasPayload { return .disabled }
         if text == "/" { return .palette }
         if text.hasPrefix("/") { return .slash }
         // session.steer requires text. An attachment-only payload would fall

@@ -1,5 +1,6 @@
 #if canImport(XCTest)
 import Foundation
+import Observation
 import XCTest
 @testable import TalariaKit
 @testable import TalariaTheme
@@ -46,6 +47,55 @@ final class TranscriptComposerPolicyTests: XCTestCase {
         XCTAssertFalse(advanced.showsWorkingAvatar(isTurnRunning: true, hasLiveDetail: true))
     }
 
+    @MainActor
+    func testDuplicateToolStartIDCoalescesAndCompletesExactlyOnce() {
+        let model = AppModel()
+        model.mode = .live
+        let runtime = LiveRuntime.shared
+        let sessionID = "duplicate-tool-runtime"
+        let botID = "worker"
+        let previousGatewayID = runtime.gatewayID
+        let previous = runtime.sessionToBot[sessionID]
+        runtime.gatewayID = "primary"
+        runtime.sessionToBot[sessionID] = botID
+        model.chat(for: botID).sessionID = sessionID
+        defer {
+            runtime.sessionToBot[sessionID] = previous
+            runtime.gatewayID = previousGatewayID
+        }
+
+        let start = GatewayEvent(
+            type: "tool.start", sessionID: sessionID,
+            payload: .object([
+                "tool_id": .string("same-tool-id"),
+                "name": .string("search"),
+                "context": .string("first"),
+            ]))
+        model.routeToolEvent(start)
+        model.routeToolEvent(GatewayEvent(
+            type: "tool.start", sessionID: sessionID,
+            payload: .object([
+                "tool_id": .string("same-tool-id"),
+                "name": .string("search"),
+                "context": .string("updated"),
+            ])))
+        model.routeToolEvent(GatewayEvent(
+            type: "tool.complete", sessionID: sessionID,
+            payload: .object([
+                "tool_id": .string("same-tool-id"),
+                "name": .string("search"),
+                "summary": .string("done"),
+                "result": .object(["count": .number(1)]),
+            ])))
+
+        let calls = model.chat(for: botID).messages.flatMap(\.toolCalls)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.id, "same-tool-id")
+        XCTAssertEqual(calls.first?.context, "updated")
+        XCTAssertEqual(calls.first?.state, .done)
+        XCTAssertEqual(calls.first?.summary, "done")
+    }
+
     func testIdleAvatarKeepsIndependentBreatheAndGazeMotionWithoutWorkState() {
         let first = FacePose.at(.idle, t: 0, phase: 0)
         let later = FacePose.at(.idle, t: 1.25, phase: 0.8)
@@ -84,6 +134,63 @@ final class TranscriptComposerPolicyTests: XCTestCase {
         XCTAssertEqual(action("", attachments: 0, running: true), .stop)
         XCTAssertEqual(action("more detail", attachments: 0, running: true), .steer)
         XCTAssertEqual(action("", attachments: 1, running: true), .stop)
+    }
+
+    func testUnresolvedFailedRetryDisablesDraftSendButPreservesStop() {
+        XCTAssertEqual(action("keep this draft", attachments: 0, running: true,
+                              unresolvedRetry: true), .disabled)
+        XCTAssertEqual(action("/help", attachments: 0, running: false,
+                              unresolvedRetry: true), .disabled)
+        XCTAssertEqual(action("", attachments: 1, running: false,
+                              unresolvedRetry: true), .disabled)
+        XCTAssertEqual(action("", attachments: 0, running: true,
+                              unresolvedRetry: true), .stop)
+        XCTAssertEqual(action("keep this draft", attachments: 0, running: true,
+                              unresolvedRetry: false), .steer)
+    }
+
+    @MainActor
+    func testPreparedRetryPublishesImmediateDraftDisableAndSettlementRestoresSend() throws {
+        let model = AppModel()
+        model.mode = .live
+        let botID = "primary::worker"
+        let chat = model.chat(for: botID)
+        chat.sessionID = "runtime"
+        chat.storedSessionID = "stored"
+        let failed = ChatMessage(
+            author: .bot, text: "partial",
+            failure: TurnFailure(message: "failed", recoverable: true))
+        chat.messages = [ChatMessage(author: .user, text: "retry", rowID: 1), failed]
+        let published = expectation(description: "observable retry ownership published")
+        withObservationTracking {
+            _ = model.hasUnresolvedFailedTurnRetry(in: botID)
+        } onChange: {
+            published.fulfill()
+        }
+        let draft = "keep this preflight draft"
+
+        let request = try XCTUnwrap(model.prepareFailedTurnRetry(failed, in: botID))
+
+        wait(for: [published], timeout: 0.1)
+        XCTAssertTrue(chat.hasUnresolvedRetry)
+        XCTAssertFalse(chat.isRunning, "REST preflight must not expose Stop")
+        XCTAssertEqual(action(draft, attachments: 0, running: false,
+                              unresolvedRetry: model.hasUnresolvedFailedTurnRetry(in: botID)),
+                       .disabled)
+
+        let restored = expectation(description: "observable retry ownership restored")
+        withObservationTracking {
+            _ = model.hasUnresolvedFailedTurnRetry(in: botID)
+        } onChange: {
+            restored.fulfill()
+        }
+        model.settleFailedTurnRetry(request, result: .retained, in: botID, chat: chat)
+
+        wait(for: [restored], timeout: 0.1)
+        XCTAssertFalse(chat.hasUnresolvedRetry)
+        XCTAssertEqual(action(draft, attachments: 0, running: false,
+                              unresolvedRetry: model.hasUnresolvedFailedTurnRetry(in: botID)),
+                       .submit)
     }
 
     func testLongTranscriptUsesLazyStackAndRealMessageAnchor() {
@@ -209,9 +316,10 @@ final class TranscriptComposerPolicyTests: XCTestCase {
     }
 
     private func action(_ draft: String, attachments: Int,
-                        running: Bool) -> ChatComposerAction {
+                        running: Bool, unresolvedRetry: Bool = false) -> ChatComposerAction {
         ChatComposerActionPolicy.action(draft: draft, attachmentCount: attachments,
-                                        isTurnRunning: running)
+                                        isTurnRunning: running,
+                                        hasUnresolvedFailedTurnRetry: unresolvedRetry)
     }
 }
 #endif

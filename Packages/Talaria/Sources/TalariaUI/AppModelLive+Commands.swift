@@ -735,6 +735,13 @@ extension AppModel {
                                          text: display ?? message))
         let composeID = UUID()
         let chatID = ObjectIdentifier(chat)
+        let baselineDurableUserRowIDs = Set(chat.messages.compactMap { row in
+            row.author == .user ? row.rowID : nil
+        })
+        let baselineDurableUserRowIDWatermark = baselineDurableUserRowIDs.max()
+        let baselineUndurableMatchingUserCount = chat.messages.filter {
+            $0.author == .user && $0.rowID == nil && $0.text == message
+        }.count
         let lifecycleToken = profileLifecycleGenerationToken(for: botID)
 
         func retainDraft(ambiguous: Bool = false) {
@@ -742,7 +749,10 @@ extension AppModel {
             if ambiguous, let storedSessionID, !storedSessionID.isEmpty {
                 ChatRuntime.shared.offlineComposeFences[composeID] = OfflineComposeFence(
                     itemID: composeID, botID: botID, text: message, route: route,
-                    sessionID: sessionID, storedID: storedSessionID, chatID: chatID)
+                    sessionID: sessionID, storedID: storedSessionID, chatID: chatID,
+                    baselineDurableUserRowIDs: baselineDurableUserRowIDs,
+                    baselineDurableUserRowIDWatermark: baselineDurableUserRowIDWatermark,
+                    baselineUndurableMatchingUserCount: baselineUndurableMatchingUserCount)
             }
             appendComposeQueue(
                 botID: botID, text: message, id: composeID, route: route,

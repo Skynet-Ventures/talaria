@@ -240,7 +240,8 @@ struct CanonicalHydrationTimeout: Error {
 /// tools) without throwing away a row id learned from storage.
 enum TranscriptHydrationMerge {
     static func merge(history: [ChatMessage], baseline: [ChatMessage],
-                      current: [ChatMessage], clearWhenEmpty: Bool) -> [ChatMessage] {
+                      current: [ChatMessage], clearWhenEmpty: Bool,
+                      protectedIDs: Set<UUID> = []) -> [ChatMessage] {
         guard !history.isEmpty else {
             // Clearing is safe only when nothing changed during the fallback.
             // A user send, assistant delta, or error that landed while REST
@@ -263,7 +264,7 @@ enum TranscriptHydrationMerge {
                 || message.toolCalls.contains(where: { $0.state == .running })
             return changed || live || baselineUsers.contains(message.id)
                 || currentUsers.contains(message.id) || baselineLiveTurn.contains(message.id)
-                || sameSessionTail.contains(message.id)
+                || sameSessionTail.contains(message.id) || protectedIDs.contains(message.id)
         }
 
         var merged = history
@@ -353,6 +354,7 @@ enum TranscriptHydrationMerge {
         row.reasoning = live.reasoning ?? stored.reasoning
         if live.toolCalls.isEmpty { row.toolCalls = stored.toolCalls }
         row.rowID = live.rowID ?? stored.rowID
+        row.failure = TurnFailureLifecycle.merge(stored.failure, live.failure)
         return row
     }
 }
@@ -904,7 +906,7 @@ extension AppModel {
             // Seed the resume snapshot before REST yields. Any message.delta
             // that lands during fallback then extends this exact live row and
             // hydration's merge preserves the newer value.
-            replayInflight(live, botID: botID)
+            replayInflight(live, botID: botID, replacingTranscript: rebinding)
             if hydrate {
                 try await hydrateCanonical(live, botID: botID, profile: route.profile,
                                            client: client, clearWhenEmpty: rebinding)
@@ -960,6 +962,15 @@ extension AppModel {
                 ?? GatewayBotRoute(
                     gatewayID: sourceGatewayID,
                     profile: GatewayBotRoute(qualifiedID: botID)?.profile ?? botID)
+        let replacedFailureScope = (newStoredID != nil && newStoredID != oldStoredID)
+            || (oldRoute != nil && oldRoute != bindingRoute)
+        if replacedFailureScope {
+            let chatID = ObjectIdentifier(chat)
+            ChatRuntime.shared.retainedFailureRows[chatID] = nil
+            ChatRuntime.shared.dismissedFailures[chatID] = nil
+            ChatRuntime.shared.failedRetryRows[botID] = nil
+            chat.hasUnresolvedRetry = false
+        }
         ChatRuntime.shared.migratePendingStop(
             botID: botID, route: bindingRoute, sessionID: live.sessionID,
             storedID: durableID, generation: runtime.generation,
@@ -982,7 +993,8 @@ extension AppModel {
             ChatRuntime.shared.migrateMutationState(
                 botID: botID, route: route, sessionID: live.sessionID,
                 storedID: durableID, generation: runtime.generation,
-                chatID: ObjectIdentifier(chat))
+                chatID: ObjectIdentifier(chat), oldSessionID: oldSessionID)
+            chat.hasUnresolvedRetry = ChatRuntime.shared.failedRetryRows[botID] != nil
             if let fence = ChatRuntime.shared.stopFences[botID], fence.unaddressable,
                fence.storedID != durableID {
                 // A reattach to a different durable conversation is an
@@ -1181,15 +1193,16 @@ extension AppModel {
             ChatRuntime.shared.transcriptFences[botID] = nil
         }
         let hydratedRows = chat.messages
-        for (itemID, fence) in ChatRuntime.shared.offlineComposeFences {
+        for (_, fence) in ChatRuntime.shared.offlineComposeFences {
             guard fence.botID == botID, fence.route.gatewayID == sourceGatewayID,
                   fence.route.profile == profile,
                   fence.storedID == (chat.storedSessionID ?? ""),
                   fence.chatID == ObjectIdentifier(chat),
-                  hydratedRows.contains(where: {
-                      $0.author == .user && $0.rowID != nil && $0.text == fence.text
-                  }) else { continue }
-            ChatRuntime.shared.offlineComposeFences[itemID] = nil
+                  Self.provesOfflineComposeDelivery(fence, rows: hydratedRows) else { continue }
+            retireProvenOfflineCompose(
+                fence, running: live.running,
+                retainedInflight: live.retainedInflight,
+                authoritativeRows: hydratedRows)
         }
     }
 
@@ -1211,9 +1224,16 @@ extension AppModel {
         }
         try Task.checkCancellation()
         guard accepts() else { throw CancellationError() }
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
         chat.messages = TranscriptHydrationMerge.merge(
             history: history, baseline: baseline, current: chat.messages,
-            clearWhenEmpty: clearWhenEmpty)
+            clearWhenEmpty: clearWhenEmpty, protectedIDs: protectedIDs)
+        if !protectedIDs.isEmpty {
+            let visible = Set(chat.messages.map(\.id))
+            ChatRuntime.shared.retainedFailureRows[chatID] =
+                protectedIDs.intersection(visible)
+        }
     }
 
     /// Canonical hydration's narrowly-scoped retry policy.  The fallback

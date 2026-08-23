@@ -29,6 +29,9 @@ public final class ChatState {
     public var reasoningEffort: String = ""
     /// A turn is in flight — the composer's send button becomes stop.
     public var isRunning: Bool = false
+    /// A failed-turn retry owns this chat's composer, including while its
+    /// authoritative preflight is suspended before any turn is running.
+    public var hasUnresolvedRetry: Bool = false
     /// Files staged on the composer, consumed by the next submit.
     public var attachments: [PendingAttachment] = []
     /// Stored sessions for this bot (session.list), for the sessions sheet.
