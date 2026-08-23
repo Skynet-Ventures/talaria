@@ -11,7 +11,7 @@ import UIKit
 /// payload bounds independently testable.
 public enum FailedTurnCardPolicy {
     public enum Action: String, CaseIterable, Sendable {
-        case retry, settings, copy, dismiss
+        case retry, settings, copy, sendDiagnostics, dismiss
     }
 
     public enum ActionLayout: Sendable, Equatable {
@@ -46,11 +46,13 @@ public enum FailedTurnCardPolicy {
     /// classifier's deterministic verdict remains authoritative even when a
     /// stale caller accidentally says the action is available.
     public static func actions(for failure: TurnFailure, canRetry: Bool,
-                               canDismiss: Bool = true) -> [Action] {
+                               canDismiss: Bool = true,
+                               canSendDiagnostics: Bool = false) -> [Action] {
         var result: [Action] = []
         if canRetry, failure.errorSurface?.retryable != false { result.append(.retry) }
         if showsSettings(for: failure.errorSurface) { result.append(.settings) }
         result.append(.copy)
+        if canSendDiagnostics { result.append(.sendDiagnostics) }
         if canDismiss { result.append(.dismiss) }
         return result
     }
@@ -98,6 +100,7 @@ public enum FailedTurnCardPolicy {
         case .retry: return "Retry failed turn"
         case .settings: return "Open Settings"
         case .copy: return copied ? "Error details copied" : "Copy error details"
+        case .sendDiagnostics: return "Send private diagnostics to Nous"
         case .dismiss: return "Dismiss error"
         }
     }
@@ -153,6 +156,7 @@ public struct FailedTurnCard: View {
     private let retry: () -> Void
     private let dismiss: () -> Void
     private let openSettings: () -> Void
+    private let sendDiagnostics: (() -> Void)?
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var copied = false
@@ -160,7 +164,8 @@ public struct FailedTurnCard: View {
     public init(failure: TurnFailure, theme: ThemePack, canRetry: Bool, canDismiss: Bool,
                 retry: @escaping () -> Void,
                 dismiss: @escaping () -> Void,
-                openSettings: @escaping () -> Void) {
+                openSettings: @escaping () -> Void,
+                sendDiagnostics: (() -> Void)? = nil) {
         self.failure = failure
         self.theme = theme
         self.canRetry = canRetry
@@ -168,11 +173,13 @@ public struct FailedTurnCard: View {
         self.retry = retry
         self.dismiss = dismiss
         self.openSettings = openSettings
+        self.sendDiagnostics = sendDiagnostics
     }
 
     private var actions: [FailedTurnCardPolicy.Action] {
         FailedTurnCardPolicy.actions(
-            for: failure, canRetry: canRetry, canDismiss: canDismiss)
+            for: failure, canRetry: canRetry, canDismiss: canDismiss,
+            canSendDiagnostics: sendDiagnostics != nil)
             .filter { $0 != .dismiss }
     }
 
@@ -262,6 +269,7 @@ public struct FailedTurnCard: View {
                 copyToPasteboard(FailedTurnCardPolicy.diagnostics(
                     for: failure, appVersion: version))
                 copied = true
+            case .sendDiagnostics: sendDiagnostics?()
             case .dismiss: dismiss()
             }
         } label: {
@@ -287,6 +295,7 @@ public struct FailedTurnCard: View {
         case .retry: "Retry"
         case .settings: "Settings"
         case .copy: copied ? "Copied" : "Copy"
+        case .sendDiagnostics: "Send diagnostics"
         case .dismiss: "Dismiss"
         }
     }
@@ -296,6 +305,7 @@ public struct FailedTurnCard: View {
         case .retry: "arrow.clockwise"
         case .settings: "gearshape"
         case .copy: copied ? "checkmark" : "doc.on.doc"
+        case .sendDiagnostics: "lock.shield"
         case .dismiss: "xmark"
         }
     }

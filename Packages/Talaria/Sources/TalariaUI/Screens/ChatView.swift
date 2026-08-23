@@ -121,6 +121,19 @@ public struct ChatView: View {
         model.hasUnresolvedFailedTurnRetry(in: botID)
     }
 
+    /// Presentation alone is side-effect free. A system swipe or drag to
+    /// dismiss travels through the same controller invalidation as Cancel, so
+    /// an in-flight result cannot republish this sheet later.
+    private var privateDiagnosticsSheetPresented: Binding<Bool> {
+        Binding(
+            get: { model.privateDiagnosticsShare != nil },
+            set: { presented in
+                guard !presented, let id = model.privateDiagnosticsShare?.id else { return }
+                model.dismissPrivateDiagnosticsShare(id: id)
+            }
+        )
+    }
+
     private var attachmentCount: Int { chat?.attachments.count ?? 0 }
     private var transcriptPolicy: TranscriptPresentationPolicy {
         TranscriptPresentationPolicy(detail: model.settings.transcriptDetail)
@@ -168,6 +181,17 @@ public struct ChatView: View {
         }
         .onChange(of: pendingSlashPrefill) { _, _ in consumeSlashPrefillIfSafe() }
         .onChange(of: draft) { _, _ in consumeSlashPrefillIfSafe() }
+        .sheet(isPresented: privateDiagnosticsSheetPresented) {
+            if let state = model.privateDiagnosticsShare {
+                NousDiagnosticsConsentSheet(
+                    state: state,
+                    theme: theme,
+                    upload: { model.uploadPrivateDiagnosticsShare(id: state.id) },
+                    cancel: { model.dismissPrivateDiagnosticsShare(id: state.id) }
+                )
+                .id(state.id)
+            }
+        }
         .confirmationDialog(copy.rewindConfirmTitle(theme.id),
                             isPresented: Binding(
                                 get: { pendingRestore != nil },
@@ -620,7 +644,8 @@ public struct ChatView: View {
                         canDismiss: model.canDismissFailedTurn(message, in: botID),
                         retry: { model.retryFailedTurn(message, in: botID) },
                         dismiss: { model.dismissFailedTurn(message, in: botID) },
-                        openSettings: { model.requestSettings() }
+                        openSettings: { model.requestSettings() },
+                        sendDiagnostics: diagnosticsAction(for: message)
                     )
                     .padding(.top, 8)
                     .padding(.leading, theme.id == .ink ? 12 : 0)
@@ -634,6 +659,13 @@ public struct ChatView: View {
             Spacer(minLength: 44) // ≈ the prototype's 86% max width
         }
         .modifier(ChatEntrance())
+    }
+
+    private func diagnosticsAction(for message: ChatMessage) -> (() -> Void)? {
+        guard model.canPreparePrivateDiagnosticsShare(for: message, in: botID) else {
+            return nil
+        }
+        return { _ = model.preparePrivateDiagnosticsShare(for: message, in: botID) }
     }
 
     @ViewBuilder private func botBubble(_ text: String) -> some View {
