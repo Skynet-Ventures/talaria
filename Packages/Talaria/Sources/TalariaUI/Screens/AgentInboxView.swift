@@ -47,8 +47,8 @@ public struct AgentInboxView: View {
                 VStack(alignment: .leading, spacing: listGap) {
                     ForEach(Array(model.agentInbox.enumerated()), id: \.element.id) { index, message in
                         A2ARow(message: message,
-                               fromBot: model.bot(model.resolvedBotID(message.fromBotID)),
-                               toBot: model.bot(message.toBotID),
+                               fromBot: model.inboxSenderBot(for: message),
+                               toBot: model.inboxRecipientBot(for: message),
                                delivery: model.delivery(for: message),
                                theme: theme, copy: copy) {
                             model.openInboxMessage(message)
