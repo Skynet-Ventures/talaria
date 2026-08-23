@@ -1266,6 +1266,14 @@ public struct RosterView: View {
 
 extension CopyPack {
 
+    static func deletingProfile(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Deleting…"
+        case .control: "DELETING…"
+        case .ink: "unmaking…"
+        }
+    }
+
     static func rosterPin(_ t: ThemeID) -> String {
         switch t {
         case .soft: "Pin to top"

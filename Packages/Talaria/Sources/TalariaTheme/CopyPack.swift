@@ -153,7 +153,7 @@ public struct CopyPack: Sendable {
         yoloName: "YOLO mode",
         yoloSub: "Skips dangerous-command approvals for this bot. Know what you are turning off.",
         memorySec: "Memory", duplicate: "Duplicate bot", editLook: "Edit look & soul",
-        deleteNote: "Deleting a profile is CLI-only: hermes profile delete (name).",
+        deleteNote: "Non-default profiles can be deleted after confirmation.",
         searchPh: "Bots, sessions, artifacts, actions…",
         queued: "queued · sends when linked", later: "Later",
         obSkip: "Skip", obTitle0: "Talaria", obSub0: "Your agents, in your pocket.",
