@@ -1655,6 +1655,7 @@ extension AppModel {
             pruneApprovals(sessionID: event.sessionID, sourceGatewayID: sourceGatewayID)
             setWorking(botID, false)
             LiveActivityController.shared.endAllOperationalWork(botID: botID)
+            requestComposeQueueFlush()
             if let idx = bots.firstIndex(where: { $0.id == botID }) {
                 if !visibleText.isEmpty {
                     bots[idx].preview = Self.previewLine(visibleText)
@@ -1699,6 +1700,7 @@ extension AppModel {
                 chat(for: botID).messages.append(ChatMessage(author: .system, text: message))
                 setWorking(botID, false)
                 LiveActivityController.shared.endAllOperationalWork(botID: botID)
+                requestComposeQueueFlush()
             }
 
         case .changed(let what):
@@ -1891,7 +1893,7 @@ extension AppModel {
 
     // MARK: - Live actions (called from AppModel's mode dispatch)
 
-    enum LiveSendResult: Equatable {
+    enum LiveSendResult: Equatable, Sendable {
         case accepted
         /// The exact ChatState/route/fence changed while an await was
         /// suspended. The optimistic row remains visible and the caller must
@@ -2242,21 +2244,339 @@ extension AppModel {
 
     // MARK: - Offline queue
 
-    /// Send everything composed while unreachable. The user bubbles were
-    /// appended at compose time, so this goes straight to the RPC — calling
-    /// send() again would duplicate them.
+    /// Coalesced trigger for reconnect, completion, foreground, and the
+    /// explicit Queue control. A trigger while a pass owns the FIFO lanes asks
+    /// for one follow-up pass rather than starting a duplicate submit.
+    func requestComposeQueueFlush() {
+        guard mode == .live else { return }
+        guard !composeFlushActive else {
+            composeFlushRequested = true
+            return
+        }
+        Task { @MainActor [weak self] in
+            await self?.flushComposeQueue()
+        }
+    }
+
+    /// Drain only source-qualified durable rows. The compatibility tuples are
+    /// merely a projection and are never their own submit authority.
     public func flushComposeQueue() async {
-        guard !composeQueue.isEmpty, mode == .live, !isOffline else { return }
-        guard !composeFlushActive else { return }
+        guard mode == .live else { return }
+        guard !composeFlushActive else {
+            composeFlushRequested = true
+            return
+        }
         composeFlushActive = true
-        defer { composeFlushActive = false }
+        defer {
+            composeFlushActive = false
+            if composeFlushRequested {
+                composeFlushRequested = false
+                Task { @MainActor [weak self] in
+                    await self?.flushComposeQueue()
+                }
+            }
+        }
+
+        reloadDurableComposerQueueProjection()
+        let readyKeys = durableComposerQueueEntries.compactMap { entry -> DurableComposerQueueKey? in
+            entry.state == .localReady ? entry.key : nil
+        }
+        var seen = Set<DurableComposerQueueKey>()
+        let keys = readyKeys.filter { seen.insert($0).inserted }
+        await withTaskGroup(of: Void.self) { group in
+            for key in keys {
+                group.addTask { @MainActor [weak self] in
+                    guard let self else { return }
+                    _ = try? await DurableComposerQueueDrainLimiter.shared.withLane(for: key) {
+                        await self.drainDurableComposerQueueKey(key)
+                    }
+                }
+            }
+            await group.waitForAll()
+        }
+        reloadDurableComposerQueueProjection()
+        await drainLegacyComposeQueueUnderFlushOwnership()
+    }
+
+    /// Respect FIFO within one exact source session. Gateway-owned accepted
+    /// rows have already crossed that ordering boundary, but parked,
+    /// submitting, uncertain, exhausted, and edit-reserved rows stop the lane
+    /// rather than allowing later local text to leapfrog them.
+    private func drainDurableComposerQueueKey(_ key: DurableComposerQueueKey) async {
+        while mode == .live {
+            let rows = durableComposerQueueStore.entries(for: key)
+            let reserved = Set(durableComposerQueueEditReservations.keys)
+            guard let entry = DurableComposerQueuePolicy.nextFIFOEntry(
+                rows, reservedIDs: reserved) else { return }
+            // An editor reservation deliberately makes this exact FIFO head
+            // non-drainable; it must not be skipped.
+            guard claimDurableComposerEntry(id: entry.id) else { return }
+            let result = await drainDurableComposerQueueEntry(entry)
+            switch result {
+            case .accepted:
+                continue
+            case .retained:
+                return
+            case .failed:
+                do {
+                    let failed = try durableComposerQueueStore.recordAutomaticFailure(
+                        id: entry.id, error: "Automatic queue delivery failed.")
+                    reloadDurableComposerQueueProjection()
+                    if failed.state == .retryExhausted { return }
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    /// A definitive pre-wire failure consumes the small automatic retry budget.
+    /// Once `.submitting` is durably written, every ambiguous response becomes
+    /// `.uncertain`; no later drain may replay it.
+    private func drainDurableComposerQueueEntry(_ entry: DurableComposerQueueEntry)
+        async -> LiveSendResult {
+        guard durableComposerQueueStore.entry(id: entry.id)?.state == .localReady,
+              durableComposerQueueClaims.contains(entry.id) else { return .retained }
+        defer { releaseDurableComposerEntryClaim(entry.id) }
+        if entry.key.gatewayID == LiveRuntime.shared.gatewayID, isOffline {
+            return .retained
+        }
+        guard profileLifecycleAllowsGatewayTraffic(entry.key.gatewayID) else { return .retained }
+        let lifecycleToken = profileLifecycleGenerationToken(
+            for: entry.key.gatewayID == LiveRuntime.shared.gatewayID
+                ? entry.key.profile : entry.key.route.qualifiedID)
+        guard let lifecycleToken else { return .retained }
+        let connectionGeneration = LiveRuntime.shared.generation
+        let routedGeneration = MultiGatewayRuntime.shared.routedEventGenerations[
+            entry.key.gatewayID] ?? 0
+
+        let client: GatewayClient
+        do {
+            client = try await routedClient(for: entry.key.route)
+        } catch {
+            // A missing source client is not a prompt rejection. Keep the
+            // exact FIFO head until that source reconnects instead of spending
+            // its automatic retry budget while a secondary is asleep.
+            return .retained
+        }
+
+        // Hold both the pool slot and ordinary profile-traffic admission from
+        // the authoritative resume through the receipt. Generation checks are
+        // defense in depth; the leases close the final TOCTOU gap with source
+        // replacement, managed-cloud reconnect, or profile lifecycle work.
+        let pooledSnapshot = await ConnectionRegistry.shared.clientPool
+            .retainedConnectionSnapshots()
+            .first(where: { $0.gatewayID == entry.key.gatewayID })?.connection
+        if let pooledSnapshot {
+            guard ObjectIdentifier(pooledSnapshot.client) == ObjectIdentifier(client) else {
+                return .retained
+            }
+            do {
+                let result = try await ConnectionRegistry.shared.clientPool
+                    .withCommandConnectionAndTrafficLease(
+                        pooledSnapshot, for: entry.key.gatewayID
+                    ) { @MainActor [weak self] in
+                        guard let self else { return LiveSendResult.retained }
+                        return await self.drainDurableComposerQueueEntryUsingLeasedClient(
+                            entry, client: client, lifecycleToken: lifecycleToken,
+                            connectionGeneration: connectionGeneration,
+                            routedGeneration: routedGeneration,
+                            pooledSnapshot: pooledSnapshot)
+                    }
+                return result ?? .retained
+            } catch {
+                return .retained
+            }
+        }
+
+        // Production clients are pooled. Keep this primary-only fallback for
+        // an already-bound client that predates pool adoption (and focused
+        // test harnesses); it still owns an ordinary traffic lease throughout
+        // the source-qualified operation.
+        guard entry.key.gatewayID == LiveRuntime.shared.gatewayID else { return .retained }
+        do {
+            guard let trafficLease = try await client.acquireTrafficLease() else {
+                return .retained
+            }
+            let result = await drainDurableComposerQueueEntryUsingLeasedClient(
+                entry, client: client, lifecycleToken: lifecycleToken,
+                connectionGeneration: connectionGeneration,
+                routedGeneration: routedGeneration, pooledSnapshot: nil)
+            await trafficLease.release()
+            return result
+        } catch {
+            return .retained
+        }
+    }
+
+    /// Resume and submit while the caller holds source leases. A local row is
+    /// made `.submitting` before its first wire boundary; every outcome after
+    /// that boundary is accepted or fail-closed uncertain, never replayed.
+    private func drainDurableComposerQueueEntryUsingLeasedClient(
+        _ entry: DurableComposerQueueEntry, client: GatewayClient,
+        lifecycleToken: ProfileLifecycleGenerationToken,
+        connectionGeneration: Int, routedGeneration: UInt64,
+        pooledSnapshot: GatewayClientPool.ConnectionSnapshot?
+    ) async -> LiveSendResult {
+        let live: LiveSession
+        do {
+            live = try await client.resumeSession(
+                entry.key.storedSessionID, profile: entry.key.profile,
+                deferHistory: true)
+        } catch {
+            // The authoritative read did not settle. It does not authorize a
+            // retry into another source or consume a local automatic attempt.
+            return .retained
+        }
+        guard await durableDrainAuthorityMatches(
+            entry.key, client: client, lifecycleToken: lifecycleToken,
+            connectionGeneration: connectionGeneration,
+            routedGeneration: routedGeneration, pooledSnapshot: pooledSnapshot) else {
+            return .retained
+        }
+        guard live.storedSessionID.isEmpty
+                || live.storedSessionID == entry.key.storedSessionID,
+              !live.sessionID.isEmpty else {
+            markDurableQueueEntryUncertain(entry.id,
+                "The gateway returned a different durable session; this prompt will not replay automatically.")
+            return .retained
+        }
+        // This authoritative stored-session result, not a stale visible
+        // ChatState, decides when an explicit Queue row may cross the wire.
+        guard DurableComposerQueuePolicy.shouldAutoDrain(
+            state: entry.state,
+            isTurnRunning: live.running || live.hasInflightTurn
+                || live.pendingApproval != nil || live.pendingClarify != nil) else {
+            return .retained
+        }
+        do {
+            try durableComposerQueueStore.markSubmitting(id: entry.id)
+            reloadDurableComposerQueueProjection()
+        } catch {
+            return .retained
+        }
+        guard await durableDrainAuthorityMatches(
+            entry.key, client: client, lifecycleToken: lifecycleToken,
+            connectionGeneration: connectionGeneration,
+            routedGeneration: routedGeneration, pooledSnapshot: pooledSnapshot) else {
+            markDurableQueueEntryUncertain(entry.id,
+                "The source changed while this prompt was being prepared; it will not replay automatically.")
+            return .retained
+        }
+        registerDurableComposerWireSubmission(
+            id: entry.id, key: entry.key, runtimeSessionID: live.sessionID)
+        do {
+            let receipt = try await client.submitPrompt(
+                sessionID: live.sessionID, text: entry.text, queued: true)
+            try LivePromptSubmitReceipt.requireAccepted(receipt, operation: "Queued prompt")
+            let startedBeforeReceipt = finishDurableComposerWireSubmission(id: entry.id)
+            if startedBeforeReceipt {
+                try durableComposerQueueStore.removeSubmittingForExecution(id: entry.id)
+                reloadDurableComposerQueueProjection()
+                return .accepted
+            }
+            guard await durableDrainAuthorityMatches(
+                entry.key, client: client, lifecycleToken: lifecycleToken,
+                connectionGeneration: connectionGeneration,
+                routedGeneration: routedGeneration, pooledSnapshot: pooledSnapshot) else {
+                markDurableQueueEntryUncertain(entry.id,
+                    "The source changed while the gateway receipt was in flight; it will not replay automatically.")
+                return .retained
+            }
+            try durableComposerQueueStore.markAcceptedGatewayOwned(id: entry.id)
+            reloadDurableComposerQueueProjection()
+            if let botID = visibleBotID(for: entry.key),
+               let chat = chats[botID], chat.storedSessionID == entry.key.storedSessionID {
+                acceptLocalQueueEntry(id: entry.id, text: entry.text, botID: botID, chat: chat)
+            }
+            return .accepted
+        } catch let error as GatewayError where error.code == 409 {
+            if finishDurableComposerWireSubmission(id: entry.id) {
+                do {
+                    try durableComposerQueueStore.removeSubmittingForExecution(id: entry.id)
+                    reloadDurableComposerQueueProjection()
+                    return .accepted
+                } catch {
+                    markDurableQueueEntryUncertain(entry.id,
+                        "The gateway started this prompt, but local execution proof could not be saved.")
+                    return .retained
+                }
+            }
+            do {
+                try durableComposerQueueStore.markLocalReady(id: entry.id, error: error.message)
+                reloadDurableComposerQueueProjection()
+                return .failed
+            } catch {
+                return .retained
+            }
+        } catch {
+            if finishDurableComposerWireSubmission(id: entry.id) {
+                do {
+                    try durableComposerQueueStore.removeSubmittingForExecution(id: entry.id)
+                    reloadDurableComposerQueueProjection()
+                    return .accepted
+                } catch {
+                    markDurableQueueEntryUncertain(entry.id,
+                        "The gateway started this prompt, but local execution proof could not be saved.")
+                    return .retained
+                }
+            }
+            markDurableQueueEntryUncertain(entry.id,
+                "The gateway may have accepted this prompt; it will not replay automatically.")
+            return .retained
+        }
+    }
+
+    private func durableDrainAuthorityMatches(
+        _ key: DurableComposerQueueKey, client: GatewayClient,
+        lifecycleToken: ProfileLifecycleGenerationToken,
+        connectionGeneration: Int, routedGeneration: UInt64,
+        pooledSnapshot: GatewayClientPool.ConnectionSnapshot?
+    ) async -> Bool {
+        guard lifecycleToken.route == key.route,
+              profileLifecycleAccepts(lifecycleToken),
+              profileLifecycleAllowsGatewayTraffic(key.gatewayID) else {
+            return false
+        }
+        if key.gatewayID == LiveRuntime.shared.gatewayID {
+            return LiveRuntime.shared.generation == connectionGeneration
+                && self.client.map(ObjectIdentifier.init) == ObjectIdentifier(client)
+        }
+        guard MultiGatewayRuntime.shared.routedEventGenerations[key.gatewayID]
+                == routedGeneration,
+              let pooledSnapshot else { return false }
+        let current = await ConnectionRegistry.shared.clientPool
+            .retainedConnectionSnapshots()
+            .first(where: { $0.gatewayID == key.gatewayID })?.connection
+        return current?.generation == pooledSnapshot.generation
+            && current.map({ ObjectIdentifier($0.client) }) == ObjectIdentifier(client)
+    }
+
+    private func markDurableQueueEntryUncertain(_ id: UUID, _ message: String) {
+        try? durableComposerQueueStore.markUncertain(id: id, error: message)
+        reloadDurableComposerQueueProjection()
+    }
+
+    private func visibleBotID(for key: DurableComposerQueueKey) -> String? {
+        chats.first { botID, chat in
+            (stateRoute(for: botID) ?? gatewayRoute(for: botID)) == key.route
+                && chat.storedSessionID == key.storedSessionID
+        }?.key
+    }
+
+    /// Legacy optimistic rows are retained only for older callers that have
+    /// not yet supplied a source-qualified durable key. New compose paths use
+    /// `flushComposeQueue()` below and never call this fallback.
+    private func drainLegacyComposeQueueUnderFlushOwnership() async {
+        guard !composeQueue.isEmpty, mode == .live, !isOffline else { return }
         normalizeComposeQueueIDs()
         // Process one exact tuple at a time. Removing the whole array before
         // the first await used to lose every row when a route/fence changed or
         // the socket failed; a successful send now removes only the tuple that
         // is still at that index with the same identity.
-        let index = 0
-        while index < composeQueue.count {
+        while let index = composeQueueIDs.firstIndex(where: {
+            durableComposerQueueStore.entry(id: $0) == nil
+        }) {
             guard mode == .live, !isOffline else { return }
             let item = composeQueue[index]
             let itemID = composeQueueIDs[index]
@@ -2330,6 +2650,18 @@ extension AppModel {
                 // Retry-backed compose state is one transaction. If the
                 // leased assistant cannot be settled, preserve every replay
                 // and ownership surface for a later authoritative attempt.
+                return
+            }
+        }
+        // A legacy ambiguous tuple may already have been imported into the
+        // durable store as `.uncertain`. The authoritative proof above is the
+        // one safe time to clear that exact no-replay record; if persistence
+        // fails, retain every in-memory fence rather than reopening replay.
+        if durableComposerQueueStore.entry(id: fence.itemID)?.state == .uncertain {
+            do {
+                try durableComposerQueueStore.removeUncertain(id: fence.itemID)
+                reloadDurableComposerQueueProjection()
+            } catch {
                 return
             }
         }

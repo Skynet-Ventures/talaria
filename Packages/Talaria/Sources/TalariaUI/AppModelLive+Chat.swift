@@ -1108,6 +1108,12 @@ extension AppModel {
     /// Route one gateway event into chat-core state. Public so the router (and
     /// anything replaying events) can hand events in from outside this file.
     public func routeToolEvent(_ event: GatewayEvent, sourceGatewayID: String? = nil) {
+        let typed = TypedGatewayEvent(event)
+        if case .messageStart = typed {
+            noteDurableComposerQueueStart(
+                runtimeSessionID: event.sessionID,
+                sourceGatewayID: sourceGatewayID ?? LiveRuntime.shared.gatewayID)
+        }
         guard mode == .live,
               let botID = botID(forSession: event.sessionID,
                                 sourceGatewayID: sourceGatewayID),
@@ -1119,7 +1125,7 @@ extension AppModel {
         ChatRuntime.shared.pruneTranscriptState(
             botID: botID, generation: LiveRuntime.shared.generation)
 
-        switch TypedGatewayEvent(event) {
+        switch typed {
         case .messageStart:
             noteQueuedPromptStart(botID: botID, sessionID: event.sessionID)
             drainStartedQueuedPrompt(botID: botID, sessionID: event.sessionID)
@@ -1136,6 +1142,7 @@ extension AppModel {
             chat.isRunning = false
             finishRunningTools(in: chat, interrupted: payload.status != .complete)
             LiveActivityController.shared.endAllOperationalWork(botID: botID)
+            requestComposeQueueFlush()
 
         case .errorEvent:
             noteQueuedPromptCompletion(botID: botID, sessionID: event.sessionID)
@@ -1144,6 +1151,7 @@ extension AppModel {
             chat.isRunning = false
             finishRunningTools(in: chat, interrupted: true)
             LiveActivityController.shared.endAllOperationalWork(botID: botID)
+            requestComposeQueueFlush()
 
         case .sessionInfo(let info):
             // Authoritative after a resume: the turn may have kept running
@@ -1289,6 +1297,105 @@ extension AppModel {
     }
 
     // MARK: - Sending: submit, or steer while a turn runs
+
+    /// Explicit Queue is deliberately separate from the normal composer
+    /// action. Ordinary mid-turn Send continues to steer first; Queue stores
+    /// only text for the next authoritative idle turn and never creates an
+    /// optimistic transcript bubble.
+    @discardableResult
+    public func queuePrompt(text: String, to botID: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard mode == .live, !trimmed.isEmpty else { return false }
+        let chat = chat(for: botID)
+        guard chat.attachments.isEmpty else {
+            chat.messages.append(ChatMessage(author: .system,
+                text: DurableComposerQueueStoreError.attachmentRefused.description))
+            return false
+        }
+        guard enqueueDurableLocalPrompt(trimmed, botID: botID, chat: chat) != nil else {
+            return false
+        }
+        requestComposeQueueFlush()
+        return true
+    }
+
+    public func resumeQueuedPrompts(botID: String) {
+        guard let key = durableQueueKey(botID: botID) else { return }
+        do {
+            try durableComposerQueueStore.resume(key: key)
+            reloadDurableComposerQueueProjection()
+            requestComposeQueueFlush()
+        } catch {
+            chat(for: botID).messages.append(ChatMessage(author: .system,
+                text: "Queued prompts stayed paused because local storage failed: \(error.localizedDescription)"))
+        }
+    }
+
+    public func durableQueuedPrompts(for botID: String) -> [DurableComposerQueueEntry] {
+        guard let key = durableQueueKey(botID: botID) else { return [] }
+        return durableComposerQueueStore.entries(for: key).filter {
+            !($0.state == .acceptedGatewayOwned && hiddenAcceptedQueueIDs.contains($0.id))
+        }
+    }
+
+    public func removeDurableQueuedPrompt(id: UUID) {
+        guard let entry = durableComposerQueueStore.entry(id: id) else { return }
+        do {
+            if entry.state == .uncertain {
+                try durableComposerQueueStore.removeUncertain(id: id)
+            } else if entry.state == .acceptedGatewayOwned {
+                // Gateway-owned work cannot be cancelled or altered locally.
+                hiddenAcceptedQueueIDs.insert(id)
+            } else {
+                try durableComposerQueueStore.remove(id: id)
+            }
+            durableComposerQueueEditReservations[id] = nil
+            durableComposerQueueClaims.remove(id)
+            promptQueue.removeAll { $0.id == id }
+            ChatRuntime.shared.queuedBindings[id] = nil
+            reloadDurableComposerQueueProjection()
+        } catch {
+            if let botID = chats.first(where: { botID, chat in
+                (stateRoute(for: botID) ?? gatewayRoute(for: botID)) == entry.key.route
+                    && chat.storedSessionID == entry.key.storedSessionID
+            })?.key {
+                chats[botID]?.messages.append(ChatMessage(author: .system,
+                    text: "That queued prompt was retained: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    /// Local queue work becomes a gateway-owned mirror only after an
+    /// authoritative receipt. The first transcript echo stays event-driven.
+    func acceptLocalQueueEntry(id: UUID, text: String, botID: String,
+                               chat: ChatState) {
+        guard let entry = durableComposerQueueStore.entry(id: id),
+              entry.state == .acceptedGatewayOwned else { return }
+        hiddenAcceptedQueueIDs.remove(id)
+        if !promptQueue.contains(where: { $0.id == id }) {
+            promptQueue.append((id: id, botID: botID, text: text))
+        }
+        ChatRuntime.shared.queuedBindings[id] = QueuedPromptBinding(
+            botID: botID, sessionID: chat.sessionID ?? "",
+            storedID: entry.key.storedSessionID, route: entry.key.route,
+            eligibleAfterCurrentTurn: true, order: entry.order)
+        reloadDurableComposerQueueProjection()
+    }
+
+    /// The matching queued-start event is exact execution proof for this
+    /// gateway-owned mirror. Generic queue CRUD never uses this path.
+    func retireAcceptedDurableProjection(id: UUID) {
+        guard durableComposerQueueStore.entry(id: id)?.state == .acceptedGatewayOwned else { return }
+        do {
+            _ = try durableComposerQueueStore.removeAcceptedForExecution(id: id)
+            hiddenAcceptedQueueIDs.remove(id)
+            promptQueue.removeAll { $0.id == id }
+            ChatRuntime.shared.queuedBindings[id] = nil
+            reloadDurableComposerQueueProjection()
+        } catch {
+            // Preserve the truthful mirror for a later authoritative event.
+        }
+    }
 
     /// The composer's send. A turn already in flight takes the desktop path —
     /// `session.steer` injects the text into the running turn instead of
@@ -2880,6 +2987,7 @@ extension AppModel {
         if let item, let itemOrder, itemOrder < (pending?.order ?? UInt64.max) {
             promptQueue.removeAll { $0.id == item.id }
             runtime.queuedBindings[item.id] = nil
+            retireAcceptedDurableProjection(id: item.id)
             return
         }
         guard var pendingRows = runtime.pendingQueuedSubmissions[key], !pendingRows.isEmpty else { return }
@@ -3013,6 +3121,18 @@ extension AppModel {
     public func stopTurn(botID: String) {
         let chat = chat(for: botID)
         let wasRunning = chat.isRunning || chat.isTyping
+        // Stop means local follow-ups must be parked before an interrupt can
+        // race a next-turn drain. Gateway-owned/uncertain rows remain intact.
+        if let key = durableQueueKey(botID: botID, chat: chat) {
+            do {
+                try durableComposerQueueStore.park(key: key)
+                reloadDurableComposerQueueProjection()
+            } catch {
+                chat.messages.append(ChatMessage(author: .system,
+                    text: "Queued prompts were not parked because local storage failed: \(error.localizedDescription)"))
+                return
+            }
+        }
         ChatRuntime.shared.demoTurns[botID]?.cancel()
         ChatRuntime.shared.demoTurns[botID] = nil
 
