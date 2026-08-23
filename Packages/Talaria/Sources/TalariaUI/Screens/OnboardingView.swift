@@ -265,7 +265,12 @@ public struct OnboardingView: View {
         withAnimation(.easeOut(duration: 0.3)) { step = 3 }
         Task { @MainActor in
             do {
-                try await model.connectGateway(baseURL: base, credential: credential)
+                try await model.runManagedCloudBootEpisode(
+                    sourceURL: base,
+                    gatewayID: saved?.id ?? "pending-gateway"
+                ) {
+                    try await model.connectGateway(baseURL: base, credential: credential)
+                }
                 ConnectionRegistry.shared.noteBotCount(model.bots.count, forURL: base)
                 if let saved { await ConnectionRegistry.shared.probe(saved) }
                 model.connections = ConnectionRegistry.shared.rows

@@ -453,7 +453,11 @@ extension AppModel {
         }
 
         try Task.checkCancellation()
-        try await connectGateway(baseURL: baseURL, credential: credential)
+        try await runManagedCloudBootEpisode(
+            sourceURL: baseURL, gatewayID: route.gatewayID
+        ) {
+            try await self.connectGateway(baseURL: baseURL, credential: credential)
+        }
         try Task.checkCancellation()
 
         guard let current = ConnectionRegistry.shared.saved.first(where: {

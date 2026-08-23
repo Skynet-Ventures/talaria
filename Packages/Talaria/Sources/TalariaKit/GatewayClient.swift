@@ -680,6 +680,19 @@ public actor GatewayClient {
         }
     }
 
+    /// Compare against the credential currently owned by this client without
+    /// exporting token material across the actor boundary. OAuth reconnects
+    /// may rotate tokens before the WebSocket dial completes, so lifecycle
+    /// fences compare the registry to this post-refresh authority.
+    public func ownsCredential(_ candidate: GatewayCredential) -> Bool {
+        credential == candidate
+    }
+
+    /// Deterministic seam for credential-rotation lifecycle tests.
+    func replaceCredentialForTesting(_ replacement: GatewayCredential) {
+        credential = replacement
+    }
+
     /// Connect (or reconnect). Refreshes OAuth tokens when near expiry and
     /// mints a fresh single-use WS ticket per attempt.
     public func connect() async throws {
