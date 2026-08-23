@@ -275,6 +275,13 @@ public final class ConnectionRegistry {
     /// gateway id → when we last *attempted* a dial, so a gateway that refuses
     /// to answer is not re-dialled on every probe tick.
     @ObservationIgnored private var lastEnumerationAttempt: [String: Date] = [:]
+    /// Exact URL-keyed credentials installed only by focused tests. The shared
+    /// registry otherwise has no injectable credential store, while XCTest's
+    /// sandbox cannot reliably write the real Keychain. Keeping the override
+    /// at this authority boundary exercises the same `credential(for:)` reads
+    /// as production without weakening or bypassing their later fences.
+    @ObservationIgnored private var credentialOverridesForTesting:
+        [String: GatewayCredential] = [:]
 
     public init(defaults: UserDefaults = .standard, keychain: KeychainStore = KeychainStore(),
                 clientPool: GatewayClientPool = GatewayClientPool()) {
@@ -329,7 +336,10 @@ public final class ConnectionRegistry {
 
     public func remove(id: String) {
         guard let idx = saved.firstIndex(where: { $0.id == id }) else { return }
-        if let base = saved[idx].baseURL { keychain.delete(for: base) }
+        if let base = saved[idx].baseURL {
+            keychain.delete(for: base)
+            credentialOverridesForTesting.removeValue(forKey: base.absoluteString)
+        }
         health.removeValue(forKey: id)
         secondaryRosters.removeValue(forKey: id)
         lastEnumerationAttempt.removeValue(forKey: id)
@@ -349,12 +359,23 @@ public final class ConnectionRegistry {
     }
 
     public func credential(for gateway: SavedGateway) -> GatewayCredential? {
-        gateway.baseURL.flatMap { keychain.load(for: $0) }
+        guard let base = gateway.baseURL else { return nil }
+        return credentialOverridesForTesting[base.absoluteString]
+            ?? keychain.load(for: base)
     }
 
     public func setCredential(_ credential: GatewayCredential, for gateway: SavedGateway) {
         guard let base = gateway.baseURL else { return }
         try? keychain.save(credential, for: base)
+    }
+
+    /// Deterministic credential-store seam for focused tests. Overrides never
+    /// persist and are removed with their gateway; nil restores real Keychain
+    /// lookup for this exact normalized URL.
+    internal func setCredentialForTesting(_ credential: GatewayCredential?,
+                                          for gateway: SavedGateway) {
+        guard let base = gateway.baseURL else { return }
+        credentialOverridesForTesting[base.absoluteString] = credential
     }
 
     // MARK: - Live-link feedback

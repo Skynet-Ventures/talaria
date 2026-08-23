@@ -348,6 +348,178 @@ public struct CronJob: Sendable, Identifiable {
     }
 }
 
+/// Incremental response storage shared by the bounded REST transport and its
+/// focused tests. `URLSession.data(for:)` buffers an entire response before a
+/// caller can inspect it; Hermes' managed-file endpoint permits 100 MB, so the
+/// mobile client must reject both a declared oversize and a chunk that would
+/// cross its own ceiling while bytes are still arriving.
+struct GatewayBoundedResponseAccumulator: Sendable {
+    let limit: Int
+    private(set) var data = Data()
+
+    init(limit: Int) {
+        self.limit = max(0, limit)
+    }
+
+    func accepts(expectedContentLength: Int64) -> Bool {
+        expectedContentLength < 0 || expectedContentLength <= Int64(limit)
+    }
+
+    mutating func append(_ chunk: Data) -> Bool {
+        guard chunk.count <= limit - data.count else { return false }
+        data.append(chunk)
+        return true
+    }
+}
+
+/// Package-test visibility for one bounded request's terminal ownership. The
+/// production executor passes nil; focused cancellation tests use these
+/// callbacks to prove a data task completes once and the session releases its
+/// delegate after invalidation.
+struct GatewayBoundedRESTLifetimeObserver: Sendable {
+    var didCreate: @Sendable () -> Void
+    var didComplete: @Sendable () -> Void
+    var didRelease: @Sendable () -> Void
+}
+
+/// One-shot URLSession delegate that owns a bounded response transaction.
+/// Cancellation propagates to the data task; a limit rejection is reported as
+/// HTTP 413 so callers use the same mapping for Hermes' and Talaria's ceilings.
+private final class GatewayBoundedRESTRequest: NSObject, URLSessionDataDelegate,
+                                                @unchecked Sendable {
+    private let lock = NSLock()
+    private var accumulator: GatewayBoundedResponseAccumulator
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+    private var response: URLResponse?
+    private var callerCancelled = false
+    private var exceeded = false
+    private var completed = false
+    private let configuration: URLSessionConfiguration
+    private let lifetimeObserver: GatewayBoundedRESTLifetimeObserver?
+
+    init(limit: Int, configuration: URLSessionConfiguration,
+         lifetimeObserver: GatewayBoundedRESTLifetimeObserver?) {
+        accumulator = GatewayBoundedResponseAccumulator(limit: limit)
+        self.configuration = configuration
+        self.lifetimeObserver = lifetimeObserver
+        lifetimeObserver?.didCreate()
+    }
+
+    deinit { lifetimeObserver?.didRelease() }
+
+    func load(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if callerCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                self.continuation = continuation
+                configuration.timeoutIntervalForRequest = request.timeoutInterval
+                configuration.timeoutIntervalForResource = request.timeoutInterval
+                let session = URLSession(configuration: configuration, delegate: self,
+                                         delegateQueue: nil)
+                let task = session.dataTask(with: request)
+                self.session = session
+                self.task = task
+                lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    private func cancel() {
+        lock.lock()
+        callerCancelled = true
+        let task = task
+        lock.unlock()
+        task?.cancel()
+    }
+
+    private func finish(_ result: Result<(Data, URLResponse), Error>) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        let continuation = continuation
+        let session = session
+        self.continuation = nil
+        self.session = nil
+        task = nil
+        lock.unlock()
+
+        lifetimeObserver?.didComplete()
+        continuation?.resume(with: result)
+        session?.finishTasksAndInvalidate()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        lock.lock()
+        let accepted = accumulator.accepts(
+            expectedContentLength: response.expectedContentLength)
+        if accepted {
+            self.response = response
+        } else {
+            exceeded = true
+        }
+        lock.unlock()
+        completionHandler(accepted ? .allow : .cancel)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive data: Data) {
+        lock.lock()
+        let accepted = accumulator.append(data)
+        if !accepted { exceeded = true }
+        lock.unlock()
+        if !accepted { dataTask.cancel() }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
+        lock.lock()
+        let result: Result<(Data, URLResponse), Error>
+        if callerCancelled {
+            result = .failure(CancellationError())
+        } else if exceeded {
+            result = .failure(GatewayError(
+                code: 413,
+                message: "Gateway response exceeds Talaria's bounded mobile limit."))
+        } else if let error {
+            result = .failure(error)
+        } else if let response {
+            result = .success((accumulator.data, response))
+        } else {
+            result = .failure(GatewayError(code: -11,
+                                           message: "Gateway returned no REST response."))
+        }
+        lock.unlock()
+        finish(result)
+    }
+}
+
+enum GatewayBoundedRESTLoader {
+    static func load(_ request: URLRequest, limit: Int,
+                     configuration: URLSessionConfiguration = .ephemeral,
+                     lifetimeObserver: GatewayBoundedRESTLifetimeObserver? = nil) async throws
+        -> (Data, URLResponse) {
+        try await GatewayBoundedRESTRequest(
+            limit: limit, configuration: configuration,
+            lifetimeObserver: lifetimeObserver).load(request)
+    }
+}
+
 /// One gateway connection: transport lifecycle + typed RPCs.
 public actor GatewayClient {
     public struct TrafficLease: Sendable {
@@ -365,6 +537,9 @@ public actor GatewayClient {
     /// Local fail-closed rejection before any WebSocket or HTTP request can
     /// reach a gateway whose profile namespace is being mutated.
     public static let trafficFenced = -32_900
+    /// A successful managed-files response that failed the captured
+    /// root/canonical-path authority contract.
+    public static let managedFileAuthorityUnproven = -32_901
 
     public let baseURL: URL
     private let auth: GatewayAuthClient
@@ -372,6 +547,8 @@ public actor GatewayClient {
     private var transport: GatewayTransport?
     private let keychain: KeychainStore
     private var trafficAdmission: TrafficAdmission?
+    typealias RESTExecutor = @Sendable (URLRequest, Int?) async throws -> (Data, URLResponse)
+    private let restExecutor: RESTExecutor
 
     /// Re-published stream of all events from the current transport.
     public private(set) var eventsTask: Task<Void, Never>?
@@ -383,6 +560,25 @@ public actor GatewayClient {
         self.auth = GatewayAuthClient(baseURL: baseURL)
         self.credential = credential
         self.keychain = keychain
+        self.restExecutor = { request, limit in
+            if let limit {
+                return try await GatewayBoundedRESTLoader.load(request, limit: limit)
+            }
+            return try await URLSession.shared.data(for: request)
+        }
+    }
+
+    /// Package-test initializer for production-path REST authority tests. The
+    /// client still builds and authenticates the exact request and owns its
+    /// lifecycle traffic lease; only the byte source is deterministic.
+    init(baseURL: URL, credential: GatewayCredential,
+         keychain: KeychainStore = KeychainStore(),
+         restExecutor: @escaping RESTExecutor) {
+        self.baseURL = baseURL
+        self.auth = GatewayAuthClient(baseURL: baseURL)
+        self.credential = credential
+        self.keychain = keychain
+        self.restExecutor = restExecutor
     }
 
     // MARK: - Event fan-out
@@ -876,6 +1072,33 @@ public actor GatewayClient {
                          query: [URLQueryItem] = [], body: Data? = nil,
                          contentType: String = "application/json",
                          timeout: TimeInterval = 30) async throws -> Data {
+        try await authenticatedRESTData(
+            path: path, method: method, query: query, body: body,
+            contentType: contentType, timeout: timeout, responseLimit: nil)
+    }
+
+    /// The same exact-client authenticated REST call with a hard wire-body
+    /// ceiling. Unlike `data(for:)`, the bounded transport cancels as soon as
+    /// Content-Length or cumulative chunks exceed `maximumResponseBytes`.
+    @discardableResult
+    public func restDataBounded(path: String, method: String = "GET",
+                                query: [URLQueryItem] = [], body: Data? = nil,
+                                contentType: String = "application/json",
+                                timeout: TimeInterval = 30,
+                                maximumResponseBytes: Int) async throws -> Data {
+        guard maximumResponseBytes >= 0 else {
+            throw GatewayError(code: -11, message: "Invalid REST response limit.")
+        }
+        return try await authenticatedRESTData(
+            path: path, method: method, query: query, body: body,
+            contentType: contentType, timeout: timeout,
+            responseLimit: maximumResponseBytes)
+    }
+
+    private func authenticatedRESTData(
+        path: String, method: String, query: [URLQueryItem], body: Data?,
+        contentType: String, timeout: TimeInterval, responseLimit: Int?
+    ) async throws -> Data {
         let lease = try await acquireTrafficLease()
         do {
             var comps = URLComponents(url: baseURL.appending(path: path),
@@ -891,7 +1114,7 @@ public actor GatewayClient {
                 req.setValue(contentType, forHTTPHeaderField: "Content-Type")
             }
             auth.apply(credential: credential, to: &req)
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await restExecutor(req, responseLimit)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             guard (200..<300).contains(code) else {
                 let detail = (try? JSONDecoder().decode(JSONValue.self, from: data))?["detail"]?.stringValue
@@ -913,6 +1136,20 @@ public actor GatewayClient {
         let payload = try body.map { try JSONEncoder().encode($0) }
         let data = try await restData(path: path, method: method, query: query,
                                       body: payload, timeout: timeout)
+        guard !data.isEmpty else { return .null }
+        return try JSONDecoder().decode(JSONValue.self, from: data)
+    }
+
+    /// Bounded authenticated REST decoded as JSON.
+    @discardableResult
+    public func restJSONBounded(path: String, method: String = "GET",
+                                query: [URLQueryItem] = [], body: JSONValue? = nil,
+                                timeout: TimeInterval = 30,
+                                maximumResponseBytes: Int) async throws -> JSONValue {
+        let payload = try body.map { try JSONEncoder().encode($0) }
+        let data = try await restDataBounded(
+            path: path, method: method, query: query, body: payload,
+            timeout: timeout, maximumResponseBytes: maximumResponseBytes)
         guard !data.isEmpty else { return .null }
         return try JSONDecoder().decode(JSONValue.self, from: data)
     }

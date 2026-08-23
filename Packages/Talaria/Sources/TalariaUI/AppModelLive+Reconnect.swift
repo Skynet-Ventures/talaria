@@ -593,6 +593,7 @@ extension AppModel {
     /// Forget the credential but keep the row: the gateway stays listed and
     /// probeable, and the next tap runs sign-in again.
     public func signOutGateway(_ gateway: SavedGateway) async {
+        ArtifactStore.shared.purge(gatewayID: gateway.id)
         AdvancedTerminalCoordinator.shared.stopAndForget(gatewayID: gateway.id)
         beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
         defer { finishExactStoredSessionSourceTeardown(gatewayID: gateway.id) }
@@ -612,6 +613,9 @@ extension AppModel {
             // an exact open while that barrier was held.
             await detachRoutedEvents(gatewayID: gateway.id)
         }
+        // Close the suspension window above: a new request that began after
+        // the eager purge can no longer publish once the retained slot is gone.
+        ArtifactStore.shared.purge(gatewayID: gateway.id)
         ConnectionSupervisor.shared.keychain.delete(for: base)
         // Detach/disconnect already dropped this source's scope. Repeat after
         // the Keychain delete so a late cache publish cannot outlive the
@@ -625,6 +629,7 @@ extension AppModel {
 
     /// Remove the gateway entirely — registry row and Keychain credential.
     public func removeGateway(_ gateway: SavedGateway) async {
+        ArtifactStore.shared.purge(gatewayID: gateway.id)
         AdvancedTerminalCoordinator.shared.stopAndForget(gatewayID: gateway.id)
         beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
         defer { finishExactStoredSessionSourceTeardown(gatewayID: gateway.id) }
@@ -640,6 +645,7 @@ extension AppModel {
             // source-qualified runtime survives removal.
             await detachRoutedEvents(gatewayID: gateway.id)
         }
+        ArtifactStore.shared.purge(gatewayID: gateway.id)
         dropArtifactScope(gatewayID: gateway.id)
         let supervisor = ConnectionSupervisor.shared
         if let base = gateway.baseURL,

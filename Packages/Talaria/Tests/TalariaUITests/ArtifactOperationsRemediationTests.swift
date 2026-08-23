@@ -566,7 +566,7 @@ final class ArtifactOperationsRemediationTests: XCTestCase {
         workspace.fileRoots = ["/srv/hermes-managed"]
         workspace.fileRootSources = ["/srv/hermes-managed": .managed]
 
-        let artifact = AppModel.artifact(from: "/Users/alice/.hermes/credentials.json",
+        let artifact = AppModel.artifact(from: "/Users/alice/.hermes/auth.json",
                                          botID: "worker", sessionID: "session-1",
                                          sessionTitle: "render", at: Date())
         feeds.artifactSessions[artifact.id] = SessionRef(

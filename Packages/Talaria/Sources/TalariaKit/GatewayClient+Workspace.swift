@@ -20,6 +20,18 @@ public struct AckValidationError: Error, LocalizedError, Sendable, Equatable {
 public enum WorkspaceFileSizePolicy {
     public static let maximumBytes = 12 * 1_024 * 1_024
 
+    /// `/api/files` includes the root directory's complete entry list even
+    /// when artifact loading needs only its locked-root metadata. Bound that
+    /// proof envelope independently so a very large directory cannot be fully
+    /// buffered on mobile merely to establish capability.
+    public static let maximumManagedRootResponseBytes = 1 * 1_024 * 1_024
+
+    /// Base64 JSON envelope ceiling for `/api/files/read`. Hermes permits a
+    /// 100 MB decoded file, while Talaria admits only 12 MB; the transport must
+    /// stop the encoded response before Foundation buffers the larger body.
+    public static let maximumManagedReadResponseBytes =
+        ((maximumBytes + 2) / 3) * 4 + 64 * 1_024
+
     public static func allows(byteCount: Int) -> Bool {
         byteCount >= 0 && byteCount <= maximumBytes
     }
@@ -491,6 +503,48 @@ public struct ManagedFileBody: Sendable {
             throw GatewayError(code: 502,
                                message: "Hermes could not prove the requested file stayed inside its locked managed root.")
         }
+        path = returned
+    }
+
+    /// Artifact reads first capture `/api/files`' locked root, then require the
+    /// exact same root and canonical target from `/api/files/read`. A root
+    /// change is authority loss, not an ordinary malformed preview.
+    init(validatingArtifact value: JSONValue, requestedPath: String,
+         expectedLockedRoot: String) throws {
+        guard let expected = WorkspaceRemotePath.normalized(expectedLockedRoot),
+              WorkspaceRemotePath.isAbsolute(expected),
+              !WorkspaceRemotePath.isFilesystemRoot(expected),
+              let returnedRoot = value["locked_root"]?.stringValue
+                .flatMap(WorkspaceRemotePath.normalized),
+              returnedRoot == expected,
+              let rootEcho = value["root"]?.stringValue
+                .flatMap(WorkspaceRemotePath.normalized),
+              rootEcho == expected,
+              let requested = WorkspaceRemotePath.normalized(requestedPath),
+              let returned = value["path"]?.stringValue
+                .flatMap(WorkspaceRemotePath.normalized),
+              returned == requested,
+              WorkspaceRemotePath.contains(returned, in: expected),
+              WorkspaceSensitivePath.allows(returned) else {
+            throw GatewayError(
+                code: GatewayClient.managedFileAuthorityUnproven,
+                message: "Hermes did not preserve the captured managed-file root and canonical path.")
+        }
+        guard let sizeValue = value["size"],
+              case .number(let rawSize) = sizeValue,
+              rawSize.isFinite,
+              rawSize >= 0,
+              rawSize.rounded(.towardZero) == rawSize,
+              rawSize < Double(Int.max) else {
+            throw GatewayError(code: 502,
+                               message: "Hermes returned an invalid managed-file size.")
+        }
+        guard Int(rawSize) <= WorkspaceFileSizePolicy.maximumBytes else {
+            throw GatewayError(
+                code: 413,
+                message: "This file exceeds Talaria’s 12 MB mobile preview limit.")
+        }
+        try self.init(value, source: .managed)
         path = returned
     }
 
@@ -1353,6 +1407,54 @@ public extension GatewayClient {
         return try ManagedFileListing(
             validatingManaged: try await restJSON(path: "api/files", query: query),
             requestedPath: path
+        )
+    }
+
+    /// Root proof for a gateway-hosted artifact. Ordinary self-managed Hermes
+    /// installs deliberately return `locked_root: null`; that is an honest nil
+    /// capability, never permission to borrow an active WorkspaceRuntime root.
+    func managedArtifactRoot() async throws -> String? {
+        try Self.validatedManagedArtifactRoot(
+            try await restJSONBounded(
+                path: "api/files",
+                timeout: 30,
+                maximumResponseBytes: WorkspaceFileSizePolicy.maximumManagedRootResponseBytes
+            ))
+    }
+
+    internal static func validatedManagedArtifactRoot(_ value: JSONValue) throws -> String? {
+        guard let rawLocked = value["locked_root"]?.stringValue?.nilIfEmpty else {
+            return nil
+        }
+        guard let locked = WorkspaceRemotePath.normalized(rawLocked),
+              WorkspaceRemotePath.isAbsolute(locked),
+              !WorkspaceRemotePath.isFilesystemRoot(locked),
+              let root = value["root"]?.stringValue.flatMap(WorkspaceRemotePath.normalized),
+              root == locked,
+              let returned = value["path"]?.stringValue.flatMap(WorkspaceRemotePath.normalized),
+              returned == locked,
+              value["can_change_path"]?.boolValue == false else {
+            throw GatewayError(
+                code: managedFileAuthorityUnproven,
+                message: "Hermes did not provide one canonical locked managed-files root.")
+        }
+        return locked
+    }
+
+    /// Exact-client, wire-bounded artifact body read. The captured root is
+    /// required again in the body acknowledgement; both it and the canonical
+    /// returned path must match before decoded bytes leave TalariaKit.
+    func managedArtifactFile(path: String, expectedLockedRoot: String) async throws
+        -> ManagedFileBody {
+        try ManagedFileBody(
+            validatingArtifact: try await restJSONBounded(
+                path: "api/files/read",
+                query: [URLQueryItem(name: "path", value: path)],
+                timeout: 60,
+                maximumResponseBytes: WorkspaceFileSizePolicy.maximumManagedReadResponseBytes
+            ),
+            requestedPath: path,
+            expectedLockedRoot: expectedLockedRoot
         )
     }
 

@@ -68,6 +68,11 @@ public enum ArtifactBody: Sendable {
         case .unavailable: return 0
         }
     }
+
+    var isArtifactFetchSuccess: Bool {
+        if case .unavailable = self { return false }
+        return true
+    }
 }
 
 /// Immutable authority for one artifact fetch. The same path can exist on two
@@ -82,6 +87,48 @@ struct ArtifactProvenance: Hashable, Sendable {
     var cacheKey: String {
         [gatewayID, profile, sessionID, value].joined(separator: "\u{1f}")
     }
+}
+
+/// Deduplication belongs to one exact retained connection generation. A
+/// replacement may serve a different host despite sharing the same registry
+/// id and artifact path, so it must never join work already running on the old
+/// client. Successful cache identity remains provenance-based and is purged on
+/// explicit source sign-out/removal.
+struct ArtifactFetchKey: Hashable, Sendable {
+    var source: ArtifactProvenance
+    var connectionGeneration: UInt64?
+    var baseURLString: String?
+
+    static func local(_ source: ArtifactProvenance) -> ArtifactFetchKey {
+        ArtifactFetchKey(source: source, connectionGeneration: nil, baseURLString: nil)
+    }
+}
+
+private struct ArtifactGatewayBodyAuthority: Sendable {
+    var artifact: Artifact
+    var source: ArtifactProvenance
+    var path: String
+    var snapshot: GatewayClientPool.ConnectionSnapshot
+    var registryURLString: String
+    var registryCredential: GatewayCredential
+    var lifecycle: ProfileLifecycleGenerationToken
+
+    var fetchKey: ArtifactFetchKey {
+        ArtifactFetchKey(
+            source: source,
+            connectionGeneration: snapshot.generation,
+            baseURLString: snapshot.baseURL?.absoluteString
+        )
+    }
+}
+
+@MainActor
+final class ArtifactBodyRuntime {
+    static let shared = ArtifactBodyRuntime()
+
+    /// Focused race seam after all network reads and before the short
+    /// publication lease. Production never installs this hook.
+    var beforePublicationForTesting: (() async -> Void)?
 }
 
 /// Admission proof for a gateway-hosted artifact path.
@@ -119,7 +166,7 @@ public enum ArtifactUnavailable: Error, Sendable, Equatable {
     case noREST
     /// An http(s) artifact: it is a link, and links are opened, not inlined.
     case remoteLink
-    /// 413 — past the gateway's serve ceiling (25 MB media / 16 MB data URL).
+    /// 413 — past Hermes' ceiling or Talaria's stricter 12 MB mobile ceiling.
     case tooLarge
     /// 404 — the agent wrote it, then it moved or was cleaned up.
     case missing
@@ -155,12 +202,16 @@ public final class ArtifactStore {
     /// Media folders produced by an in-flight fetch but not yet published in
     /// `bodies`. The orphan sweeper must keep these alive just as it keeps a
     /// cached body alive; a sibling waiter may still be about to publish them.
-    @ObservationIgnored private var inflightMediaFolders: [String: [UUID: Set<String>]] = [:]
+    @ObservationIgnored private var inflightMediaFolders:
+        [ArtifactFetchKey: [UUID: Set<String>]] = [:]
+    @ObservationIgnored private var bodySources: [String: ArtifactProvenance] = [:]
     struct FetchLease: Sendable {
-        var sourceKey: String
+        var fetchKey: ArtifactFetchKey
         var fetchID: UUID
         var waiterID: UUID
         var task: Task<ArtifactBody, Never>
+
+        var sourceKey: String { fetchKey.source.cacheKey }
     }
 
     private struct Inflight {
@@ -169,7 +220,7 @@ public final class ArtifactStore {
         var waiters: Set<UUID>
     }
 
-    @ObservationIgnored private var tasks: [String: Inflight] = [:]
+    @ObservationIgnored private var tasks: [ArtifactFetchKey: Inflight] = [:]
 
     /// Resident ceiling. Generous enough to keep a screenful of renders warm,
     /// small enough that a gallery sweep cannot push the app into a jetsam.
@@ -190,22 +241,33 @@ public final class ArtifactStore {
 
     func acquire(for source: ArtifactProvenance,
                  make: () -> Task<ArtifactBody, Never>) -> FetchLease {
-        let key = source.cacheKey
+        acquire(for: .local(source), make: make)
+    }
+
+    func acquire(for key: ArtifactFetchKey,
+                 make: () -> Task<ArtifactBody, Never>) -> FetchLease {
         let waiter = UUID()
         if var inflight = tasks[key] {
             inflight.waiters.insert(waiter)
             tasks[key] = inflight
-            return FetchLease(sourceKey: key, fetchID: inflight.id,
+            return FetchLease(fetchKey: key, fetchID: inflight.id,
                               waiterID: waiter, task: inflight.task)
         }
         let task = make()
         let fetchID = UUID()
         tasks[key] = Inflight(id: fetchID, task: task, waiters: [waiter])
-        return FetchLease(sourceKey: key, fetchID: fetchID, waiterID: waiter, task: task)
+        return FetchLease(fetchKey: key, fetchID: fetchID,
+                          waiterID: waiter, task: task)
     }
 
     func inflightWaiterCount(for source: ArtifactProvenance) -> Int {
-        tasks[source.cacheKey]?.waiters.count ?? 0
+        tasks.reduce(0) { count, pair in
+            count + (pair.key.source == source ? pair.value.waiters.count : 0)
+        }
+    }
+
+    func inflightWaiterCount(for key: ArtifactFetchKey) -> Int {
+        tasks[key]?.waiters.count ?? 0
     }
 
     /// Record a media result while the exact fetch lease is still live. This
@@ -213,10 +275,10 @@ public final class ArtifactStore {
     /// `finish` publishing it into the cache.
     func retainInflightMedia(_ body: ArtifactBody, lease: FetchLease) {
         guard let folder = Self.mediaFolder(for: body),
-              let inflight = tasks[lease.sourceKey], inflight.id == lease.fetchID else { return }
-        var byFetch = inflightMediaFolders[lease.sourceKey] ?? [:]
+              let inflight = tasks[lease.fetchKey], inflight.id == lease.fetchID else { return }
+        var byFetch = inflightMediaFolders[lease.fetchKey] ?? [:]
         byFetch[lease.fetchID, default: []].insert(folder)
-        inflightMediaFolders[lease.sourceKey] = byFetch
+        inflightMediaFolders[lease.fetchKey] = byFetch
     }
 
     /// Run the media TTL sweep with this store's cached and in-flight folders
@@ -227,14 +289,14 @@ public final class ArtifactStore {
     }
 
     func release(_ lease: FetchLease, cancelIfLast: Bool) {
-        guard var inflight = tasks[lease.sourceKey], inflight.id == lease.fetchID,
+        guard var inflight = tasks[lease.fetchKey], inflight.id == lease.fetchID,
               inflight.waiters.remove(lease.waiterID) != nil else { return }
         if inflight.waiters.isEmpty, cancelIfLast {
-            tasks[lease.sourceKey] = nil
+            tasks[lease.fetchKey] = nil
             clearInflightMedia(for: lease)
             inflight.task.cancel()
         } else {
-            tasks[lease.sourceKey] = inflight
+            tasks[lease.fetchKey] = inflight
         }
     }
 
@@ -242,22 +304,31 @@ public final class ArtifactStore {
     func finish(_ body: ArtifactBody, lease: FetchLease,
                 for source: ArtifactProvenance) -> Bool {
         let id = source.cacheKey
-        guard let inflight = tasks[id], inflight.id == lease.fetchID else {
+        guard let inflight = tasks[lease.fetchKey], inflight.id == lease.fetchID else {
             // A stale completion may race a replacement fetch. The old task
             // owns its result, but must not remove a file while a newer
             // inflight owner is still resolving the same cache key.
-            if tasks[id] == nil, !Self.sameOwnedFile(body, bodies[id]) {
+            let sourceStillInflight = tasks.keys.contains { $0.source.cacheKey == id }
+            if !sourceStillInflight, !Self.sameOwnedFile(body, bodies[id]) {
                 Self.removeOwnedFile(body)
             }
             return false
         }
-        tasks[id] = nil
+        tasks[lease.fetchKey] = nil
         clearInflightMedia(for: lease)
+        // Failures are observations, not cache entries. A transient timeout or
+        // stale authority must be retried on the next explicit request and
+        // must never replace a previously successful body.
+        guard body.isArtifactFetchSuccess else {
+            if !Self.sameOwnedFile(body, bodies[id]) { Self.removeOwnedFile(body) }
+            return false
+        }
         if let prior = bodies[id] {
             if !Self.sameOwnedFile(prior, body) { Self.removeOwnedFile(prior) }
             bytes -= cost[id] ?? 0
         }
         bodies[id] = body
+        bodySources[id] = source
         cost[id] = body.byteCost
         bytes += body.byteCost
         touch(id)
@@ -284,7 +355,7 @@ public final class ArtifactStore {
         if let cached = bodies[lease.sourceKey], Self.sameOwnedFile(body, cached) {
             return
         }
-        if let inflight = tasks[lease.sourceKey], inflight.id == lease.fetchID,
+        if let inflight = tasks[lease.fetchKey], inflight.id == lease.fetchID,
            !inflight.waiters.isEmpty {
             return
         }
@@ -296,40 +367,54 @@ public final class ArtifactStore {
     /// gateway-scoped; prefer `flush(gatewayID:)` so a primary switch cannot
     /// evict a retained remote's bodies.
     public func flush() {
-        flushMatching { _ in true }
+        for inflight in tasks.values { inflight.task.cancel() }
+        for body in bodies.values { Self.removeOwnedFile(body) }
+        for byFetch in inflightMediaFolders.values {
+            for folders in byFetch.values {
+                for folder in folders { Self.removeOwnedFolder(folder) }
+            }
+        }
+        tasks.removeAll()
+        inflightMediaFolders.removeAll()
+        bodies.removeAll(); thumbs.removeAll(); cost.removeAll(); order.removeAll()
+        bodySources.removeAll()
+        bytes = 0
     }
 
     /// Drop one source's bodies, thumbnails, inflight fetches and owned media.
     /// Sign-out/remove of any gateway — primary or secondary — must go through
     /// here so leftover bytes cannot outlive that source's credential.
     public func flush(gatewayID: String) {
-        let prefix = gatewayID + "\u{1f}"
-        flushMatching { $0.hasPrefix(prefix) }
+        purge(gatewayID: gatewayID)
     }
 
-    private func flushMatching(_ belongs: (String) -> Bool) {
-        for key in tasks.keys.filter(belongs) {
-            tasks[key]?.task.cancel()
-            tasks[key] = nil
-        }
-        for key in inflightMediaFolders.keys.filter(belongs) {
+    /// Remove only one retained gateway's resident and in-flight host bytes.
+    /// Sign-out and removal call this before disconnecting the pool slot, so a
+    /// late response cannot republish after credentials are forgotten.
+    public func purge(gatewayID: String) {
+        guard !gatewayID.isEmpty else { return }
+
+        let taskKeys = tasks.keys.filter { $0.source.gatewayID == gatewayID }
+        for key in taskKeys {
+            tasks.removeValue(forKey: key)?.task.cancel()
             if let byFetch = inflightMediaFolders.removeValue(forKey: key) {
                 for folders in byFetch.values {
-                    for path in folders {
-                        try? FileManager.default.removeItem(
-                            at: URL(fileURLWithPath: path, isDirectory: true))
-                    }
+                    for folder in folders { Self.removeOwnedFolder(folder) }
                 }
             }
         }
-        for key in bodies.keys.filter(belongs) {
-            if let body = bodies.removeValue(forKey: key) {
-                Self.removeOwnedFile(body)
-            }
-            bytes -= cost.removeValue(forKey: key) ?? 0
-            thumbs[key] = nil
+
+        let bodyKeys = bodySources.compactMap { key, source in
+            source.gatewayID == gatewayID ? key : nil
         }
-        order.removeAll(where: belongs)
+        for key in bodyKeys {
+            if let body = bodies.removeValue(forKey: key) { Self.removeOwnedFile(body) }
+            thumbs.removeValue(forKey: key)
+            bytes -= cost.removeValue(forKey: key) ?? 0
+            bodySources.removeValue(forKey: key)
+            order.removeAll { $0 == key }
+        }
+        bytes = max(0, bytes)
     }
 
     private func touch(_ id: String) {
@@ -344,6 +429,7 @@ public final class ArtifactStore {
             if let body = bodies[oldest] { Self.removeOwnedFile(body) }
             bodies[oldest] = nil
             thumbs[oldest] = nil
+            bodySources[oldest] = nil
         }
     }
 
@@ -351,6 +437,11 @@ public final class ArtifactStore {
         guard case .media(let url) = body,
               url.path.contains("/talaria-media-") else { return }
         try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+    }
+
+    private static func removeOwnedFolder(_ path: String) {
+        guard path.contains("/talaria-media-") else { return }
+        try? FileManager.default.removeItem(atPath: path)
     }
 
     private static func sameOwnedFile(_ lhs: ArtifactBody, _ rhs: ArtifactBody?) -> Bool {
@@ -373,18 +464,18 @@ public final class ArtifactStore {
     }
 
     private func clearInflightMedia(for lease: FetchLease) {
-        guard var byFetch = inflightMediaFolders[lease.sourceKey] else { return }
+        guard var byFetch = inflightMediaFolders[lease.fetchKey] else { return }
         byFetch[lease.fetchID] = nil
         if byFetch.isEmpty {
-            inflightMediaFolders[lease.sourceKey] = nil
+            inflightMediaFolders[lease.fetchKey] = nil
         } else {
-            inflightMediaFolders[lease.sourceKey] = byFetch
+            inflightMediaFolders[lease.fetchKey] = byFetch
         }
     }
 
     private func removeInflightMedia(_ body: ArtifactBody, for lease: FetchLease) {
         guard let folder = Self.mediaFolder(for: body),
-              var byFetch = inflightMediaFolders[lease.sourceKey],
+              var byFetch = inflightMediaFolders[lease.fetchKey],
               var folders = byFetch[lease.fetchID] else { return }
         folders.remove(folder)
         if folders.isEmpty {
@@ -393,9 +484,9 @@ public final class ArtifactStore {
             byFetch[lease.fetchID] = folders
         }
         if byFetch.isEmpty {
-            inflightMediaFolders[lease.sourceKey] = nil
+            inflightMediaFolders[lease.fetchKey] = nil
         } else {
-            inflightMediaFolders[lease.sourceKey] = byFetch
+            inflightMediaFolders[lease.fetchKey] = byFetch
         }
     }
 }
@@ -473,24 +564,27 @@ public extension AppModel {
         return .managed(path: normalized, root: root)
     }
 
-    /// Current-runtime admission. WorkspaceRuntime only publishes a root after
-    /// `ManagedFileListing(validatingManaged:)` has verified Hermes' locked,
-    /// canonical root and every returned entry. Project roots are intentionally
-    /// excluded: their API has no symlink/realpath proof yet.
-    internal func artifactPathAdmission(_ source: ArtifactProvenance) -> ArtifactPathAdmission {
-        if mode == .demo, source.gatewayID == "demo" { return .notRequired }
-        let runtime = WorkspaceRuntime.shared
-        let managedRoots = runtime.fileRoots.filter {
-            runtime.fileRootSources[$0] == .managed
-        }
-        return Self.artifactPathAdmission(source.value,
-                                          gatewayID: source.gatewayID,
-                                          workspaceGatewayID: runtime.gatewayID,
-                                          managedRoots: managedRoots)
-    }
-
     private static func artifactNeedsGatewayAdmission(_ value: String) -> Bool {
         ArtifactScan.isGatewayPath(gatewayPath(value))
+    }
+
+    /// Cheap pre-network rejection only. It does not grant a host read: the
+    /// exact retained client must still prove a locked root and echo both that
+    /// root and this canonical target from `/api/files/read`.
+    private static func artifactGatewayPathCandidate(_ value: String) -> String? {
+        let path = gatewayPath(value)
+        guard ArtifactScan.isGatewayPath(path),
+              !path.contains("%"),
+              let normalized = WorkspaceRemotePath.normalized(path),
+              WorkspaceRemotePath.isAbsolute(normalized),
+              !WorkspaceRemotePath.isFilesystemRoot(normalized),
+              WorkspaceSensitivePath.allows(normalized) else { return nil }
+        return normalized
+    }
+
+    private static func artifactCacheAdmissionAllows(_ source: ArtifactProvenance) -> Bool {
+        !artifactNeedsGatewayAdmission(source.value)
+            || artifactGatewayPathCandidate(source.value) != nil
     }
 
     internal func artifactProvenance(_ artifact: Artifact) -> ArtifactProvenance? {
@@ -522,7 +616,7 @@ public extension AppModel {
     /// completing repaints them.
     func artifactBody(_ artifact: Artifact) -> ArtifactBody? {
         guard let source = artifactProvenance(artifact) else { return nil }
-        guard artifactPathAdmission(source).isAllowed else { return nil }
+        guard Self.artifactCacheAdmissionAllows(source) else { return nil }
         guard artifactSourceCredentialIsLive(source) else { return nil }
         return ArtifactStore.shared.body(for: source)
     }
@@ -530,7 +624,7 @@ public extension AppModel {
     /// The grid thumbnail for an image artifact, once fetched.
     func artifactThumbnail(_ artifact: Artifact) -> Image? {
         guard let source = artifactProvenance(artifact) else { return nil }
-        guard artifactPathAdmission(source).isAllowed else { return nil }
+        guard Self.artifactCacheAdmissionAllows(source) else { return nil }
         guard artifactSourceCredentialIsLive(source) else { return nil }
         return ArtifactStore.shared.thumbnail(for: source)
     }
@@ -556,7 +650,7 @@ public extension AppModel {
             return .unavailable(Self.artifactNeedsGatewayAdmission(artifactLocation(artifact))
                                 ? .unproven : .noREST)
         }
-        guard artifactPathAdmission(source).isAllowed else {
+        guard Self.artifactCacheAdmissionAllows(source) else {
             return .unavailable(.unproven)
         }
         let store = ArtifactStore.shared
@@ -571,13 +665,32 @@ public extension AppModel {
             }
             return cached
         }
+
+        let gatewayAuthority: ArtifactGatewayBodyAuthority?
+        let fetchKey: ArtifactFetchKey
+        if Self.artifactNeedsGatewayAdmission(source.value) {
+            guard let path = Self.artifactGatewayPathCandidate(source.value) else {
+                return .unavailable(.unproven)
+            }
+            switch await captureArtifactGatewayBodyAuthority(
+                artifact: artifact, source: source, path: path) {
+            case .success(let authority):
+                gatewayAuthority = authority
+                fetchKey = authority.fetchKey
+            case .failure(let reason):
+                return .unavailable(reason)
+            }
+        } else {
+            gatewayAuthority = nil
+            fetchKey = .local(source)
+        }
         let kind = artifact.kind
-        let sourceGeneration = LiveRuntime.shared.generation
-        let lease = store.acquire(for: source) {
+        let lease = store.acquire(for: fetchKey) {
             Task { @MainActor [weak self] in
                 guard let self else { return ArtifactBody.unavailable(.notLive) }
-                return await self.fetchArtifactBody(source: source, kind: kind,
-                                                    allowRemote: allowRemote)
+                return await self.fetchArtifactBody(
+                    source: source, kind: kind, allowRemote: allowRemote,
+                    authority: gatewayAuthority)
             }
         }
         let body = await withTaskCancellationHandler {
@@ -591,18 +704,56 @@ public extension AppModel {
             store.discard(body, lease: lease)
             return .unavailable(.notLive)
         }
-        guard artifactPathAdmission(source).isAllowed else {
-            store.release(lease, cancelIfLast: true)
-            store.discard(body, lease: lease)
-            return .unavailable(.unproven)
-        }
-        guard artifactProvenance(artifact) == source,
-              (source.gatewayID == "public" || source.gatewayID == "demo"
-               || LiveRuntime.shared.generation == sourceGeneration) else {
+        guard Self.artifactCacheAdmissionAllows(source),
+              artifactProvenance(artifact) == source else {
             store.release(lease, cancelIfLast: true)
             store.discard(body, lease: lease)
             return .unavailable(.notLive)
         }
+        if let authority = gatewayAuthority {
+            guard await artifactGatewayBodyAuthorityAccepts(authority) else {
+                store.release(lease, cancelIfLast: true)
+                store.discard(body, lease: lease)
+                return .unavailable(.notLive)
+            }
+        }
+
+        // Failure observations remove only this in-flight transaction. They
+        // are never cached, so a later request retries transient transport.
+        guard body.isArtifactFetchSuccess else {
+            _ = store.finish(body, lease: lease, for: source)
+            return body
+        }
+
+        if let authority = gatewayAuthority {
+            if let hook = ArtifactBodyRuntime.shared.beforePublicationForTesting {
+                await hook()
+            }
+            if Task.isCancelled {
+                store.release(lease, cancelIfLast: true)
+                store.discard(body, lease: lease)
+                return .unavailable(.notLive)
+            }
+            let pool = ConnectionRegistry.shared.clientPool
+            guard let connectionLease = await pool.acquireLease(
+                authority.snapshot, for: authority.source.gatewayID) else {
+                store.release(lease, cancelIfLast: true)
+                store.discard(body, lease: lease)
+                return .unavailable(.notLive)
+            }
+            let accepted = artifactGatewayBodyAuthorityAcceptsSynchronously(authority)
+            let published = accepted
+                ? store.finish(body, lease: lease, for: source) : false
+            await pool.release(connectionLease)
+            guard accepted else {
+                store.release(lease, cancelIfLast: true)
+                store.discard(body, lease: lease)
+                return .unavailable(.notLive)
+            }
+            return published
+                ? body : (store.body(for: source) ?? .unavailable(.notLive))
+        }
+
         let published = store.finish(body, lease: lease, for: source)
         return published ? body : (store.body(for: source) ?? .unavailable(.notLive))
     }
@@ -611,9 +762,9 @@ public extension AppModel {
     /// credential to fetch with. Anything else stays a placeholder until asked
     /// for, which is what keeps the tab from becoming a network storm.
     func prefetchArtifactThumbnail(_ artifact: Artifact) {
-        guard mode == .live, !isOffline, artifact.kind == .image else { return }
+        guard mode == .live, artifact.kind == .image else { return }
         guard let source = artifactProvenance(artifact) else { return }
-        guard artifactPathAdmission(source).isAllowed else { return }
+        guard Self.artifactCacheAdmissionAllows(source) else { return }
         let value = source.value
         guard !value.hasPrefix("http://"), !value.hasPrefix("https://") else { return }
         let store = ArtifactStore.shared
@@ -701,10 +852,88 @@ public extension AppModel {
         return name
     }
 
+    private func captureArtifactGatewayBodyAuthority(
+        artifact: Artifact, source: ArtifactProvenance, path: String
+    ) async -> Result<ArtifactGatewayBodyAuthority, ArtifactUnavailable> {
+        guard !Task.isCancelled, mode == .live else { return .failure(.notLive) }
+        let registry = ConnectionRegistry.shared
+        guard let saved = registry.saved.first(where: { $0.id == source.gatewayID }),
+              let credential = registry.credential(for: saved) else {
+            return .failure(.noREST)
+        }
+        let route = GatewayBotRoute(gatewayID: source.gatewayID, profile: source.profile)
+        let rosterID = route.gatewayID == LiveRuntime.shared.gatewayID
+            ? route.profile : route.qualifiedID
+        guard let lifecycle = profileLifecycleGenerationToken(for: rosterID),
+              lifecycle.route == route else { return .failure(.notLive) }
+
+        // One actor hop observes every already-retained slot atomically. It
+        // neither starts nor joins a connection attempt.
+        let retained = await registry.clientPool.retainedConnectionSnapshots()
+        guard !Task.isCancelled, mode == .live,
+              artifactProvenance(artifact) == source,
+              Self.artifactGatewayPathCandidate(source.value) == path,
+              let currentSaved = registry.saved.first(where: { $0.id == source.gatewayID }),
+              currentSaved.urlString == saved.urlString,
+              registry.credential(for: currentSaved) == credential,
+              profileLifecycleAccepts(lifecycle),
+              profileLifecycleAllowsGatewayTraffic(source.gatewayID) else {
+            return .failure(.notLive)
+        }
+        guard let retainedSource = retained.first(where: { $0.gatewayID == source.gatewayID })
+        else { return .failure(.noREST) }
+        guard retainedSource.connection.baseURL?.absoluteString == saved.urlString else {
+            return .failure(.notLive)
+        }
+        return .success(ArtifactGatewayBodyAuthority(
+            artifact: artifact,
+            source: source,
+            path: path,
+            snapshot: retainedSource.connection,
+            registryURLString: saved.urlString,
+            registryCredential: credential,
+            lifecycle: lifecycle
+        ))
+    }
+
+    private func artifactGatewayBodyAuthorityAccepts(
+        _ authority: ArtifactGatewayBodyAuthority
+    ) async -> Bool {
+        guard !Task.isCancelled,
+              await ConnectionRegistry.shared.clientPool.isCurrent(
+                authority.snapshot, for: authority.source.gatewayID) else { return false }
+        return artifactGatewayBodyAuthorityAcceptsSynchronously(authority)
+    }
+
+    /// Called after the pool-current actor hop or while the final short
+    /// ConnectionLease is held. Registry, lifecycle, path and provenance are
+    /// all MainActor state and therefore form one synchronous final fence.
+    private func artifactGatewayBodyAuthorityAcceptsSynchronously(
+        _ authority: ArtifactGatewayBodyAuthority
+    ) -> Bool {
+        let registry = ConnectionRegistry.shared
+        guard !Task.isCancelled,
+              mode == .live,
+              artifactProvenance(authority.artifact) == authority.source,
+              Self.artifactGatewayPathCandidate(authority.source.value) == authority.path,
+              profileLifecycleAccepts(authority.lifecycle),
+              profileLifecycleAllowsGatewayTraffic(authority.source.gatewayID),
+              let saved = registry.saved.first(
+                where: { $0.id == authority.source.gatewayID }),
+              saved.urlString == authority.registryURLString,
+              authority.snapshot.baseURL?.absoluteString == saved.urlString,
+              registry.credential(for: saved) == authority.registryCredential else {
+            return false
+        }
+        return true
+    }
+
     // MARK: - Fetch
 
     private func fetchArtifactBody(source: ArtifactProvenance, kind: ArtifactKind,
-                                   allowRemote: Bool) async -> ArtifactBody {
+                                   allowRemote: Bool,
+                                   authority: ArtifactGatewayBodyAuthority?) async
+        -> ArtifactBody {
         let value = source.value
         // Inline data: URLs are already the bytes — an image.generate result
         // pasted into the transcript never needs a round trip.
@@ -720,53 +949,72 @@ public extension AppModel {
         }
 
         guard mode == .live else { return .unavailable(.notLive) }
-        guard let path = artifactPathAdmission(source).path else {
+        guard let path = Self.artifactGatewayPathCandidate(source.value) else {
             return .unavailable(.unproven)
         }
-        guard let (base, credential) = gatewayRESTContext(gatewayID: source.gatewayID) else {
+        guard let authority, authority.source == source, authority.path == path else {
             return .unavailable(.noREST)
+        }
+        guard await artifactGatewayBodyAuthorityAccepts(authority) else {
+            return .unavailable(.notLive)
+        }
+
+        let rootAnswer: String?
+        do {
+            rootAnswer = try await authority.snapshot.client.managedArtifactRoot()
+        } catch {
+            guard await artifactGatewayBodyAuthorityAccepts(authority) else {
+                return .unavailable(.notLive)
+            }
+            return .unavailable(Self.artifactRootFailure(error))
+        }
+        guard await artifactGatewayBodyAuthorityAccepts(authority) else {
+            return .unavailable(.notLive)
+        }
+        guard let lockedRoot = rootAnswer else { return .unavailable(.unproven) }
+        guard WorkspaceRemotePath.contains(path, in: lockedRoot) else {
+            return .unavailable(.unproven)
         }
 
         let ext = (ArtifactScan.ext(of: value) ?? "").lowercased()
-        var last: ArtifactUnavailable = .missing
-
+        let remoteBody: ManagedFileBody
         do {
-            // The locked managed route is the only host-file data door. Its
-            // response is validated again in GatewayREST.managedDataURL, so a
-            // lexical path under a root cannot authorize a symlink escape.
-            let (dataURL, mime, size) = try await GatewayREST.managedDataURL(
-                base, credential, path)
-            let bounded = Self.boundedArtifactDataURL(dataURL, declaredSize: size)
-            let data: Data
-            switch bounded {
-            case .image(let decoded):
-                data = decoded
-            case .unavailable(let why):
-                return .unavailable(why)
-            default:
-                return .unavailable(.unreadable(""))
-            }
-            if kind == .image || mime.hasPrefix("image/") { return .image(data) }
-            if kind == .media || mime.hasPrefix("audio/") || mime.hasPrefix("video/") {
-                do {
-                    return .media(try GatewayREST.materializeMedia(
-                        data: data, suggestedName: ArtifactScan.label(of: value)))
-                } catch {
-                    return .unavailable(.unreadable(error.localizedDescription))
-                }
-            }
-            // A file with no known text extension can still be text (a
-            // LICENSE, a Dockerfile); decode before giving up on a preview.
-            if mime.hasPrefix("text/") || mime.contains("json") || mime.contains("xml"),
-               let text = String(data: data, encoding: .utf8) {
-                return .text(text, language: Self.language(for: ext), truncated: false,
-                             bytes: data.count)
-            }
-            return .binary(data, mime: mime)
+            remoteBody = try await authority.snapshot.client.managedArtifactFile(
+                path: path, expectedLockedRoot: lockedRoot)
         } catch {
-            last = Self.artifactFailure(error)
+            guard await artifactGatewayBodyAuthorityAccepts(authority) else {
+                return .unavailable(.notLive)
+            }
+            return .unavailable(Self.artifactFailure(error))
         }
-        return .unavailable(last)
+        guard await artifactGatewayBodyAuthorityAccepts(authority) else {
+            return .unavailable(.notLive)
+        }
+
+        let data = remoteBody.bytes
+        let mime = remoteBody.mimeType
+        if kind == .image || mime.hasPrefix("image/") { return .image(data) }
+        if kind == .media || mime.hasPrefix("audio/") || mime.hasPrefix("video/") {
+            do {
+                try Task.checkCancellation()
+                let url = try GatewayREST.materializeMedia(
+                    data: data, suggestedName: ArtifactScan.label(of: value))
+                try Task.checkCancellation()
+                return .media(url)
+            } catch is CancellationError {
+                return .unavailable(.notLive)
+            } catch {
+                return .unavailable(.unreadable(error.localizedDescription))
+            }
+        }
+        // A file with no known text extension can still be text (a LICENSE or
+        // Dockerfile); decode before falling back to a binary share body.
+        if mime.hasPrefix("text/") || mime.contains("json") || mime.contains("xml"),
+           let text = String(data: data, encoding: .utf8) {
+            return .text(text, language: Self.language(for: ext), truncated: false,
+                         bytes: data.count)
+        }
+        return .binary(data, mime: mime)
     }
 
     /// A user-opened image URL. Plain `URLSession`, no gateway credential: this
@@ -882,13 +1130,34 @@ public extension AppModel {
     /// these (404 moved, 403 outside roots, 413 over the ceiling) and a phone
     /// showing "failed" for all three throws that away.
     static func artifactFailure(_ error: Error) -> ArtifactUnavailable {
+        if error is CancellationError { return .notLive }
         guard let gateway = error as? GatewayError else { return .unreadable("") }
         switch gateway.code {
         case 404, 410: return .missing
         case 403, 415: return .refused
         case 413: return .tooLarge
+        case GatewayClient.managedFileAuthorityUnproven: return .unproven
+        case GatewayClient.trafficFenced: return .notLive
+        case -71: return .unreadable(gateway.message)
         case ..<0: return .noREST
         default: return .unreadable(gateway.message)
+        }
+    }
+
+    /// `/api/files` is an authority proof, not the artifact itself. Missing or
+    /// contradictory proof stays `.unproven`; only an explicit policy refusal,
+    /// lifecycle fence, cancellation, or unreachable REST context has a more
+    /// specific meaning.
+    private static func artifactRootFailure(_ error: Error) -> ArtifactUnavailable {
+        if error is CancellationError { return .notLive }
+        guard let gateway = error as? GatewayError else { return .unproven }
+        switch gateway.code {
+        case 403, 415: return .refused
+        case 413: return .unproven
+        case GatewayClient.trafficFenced: return .notLive
+        case GatewayClient.managedFileAuthorityUnproven: return .unproven
+        case ..<0: return .noREST
+        default: return .unproven
         }
     }
 
