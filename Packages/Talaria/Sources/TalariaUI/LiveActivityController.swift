@@ -1,6 +1,44 @@
 import Foundation
 import TalariaKit
 
+/// Pure admission state shared with tests. Generic chat "working" is not
+/// authority for a Lock Screen surface; only an explicit operation that
+/// survives the grace period is admitted.
+public struct LiveActivityWorkAdmission: Sendable, Equatable {
+    public static let graceSeconds: Double = 20
+    private var pending: [String: Set<String>] = [:]
+    private var admitted: [String: Set<String>] = [:]
+
+    public init() {}
+
+    @discardableResult public mutating func begin(botID: String, operationID: String) -> Bool {
+        guard !botID.isEmpty, !operationID.isEmpty else { return false }
+        return pending[botID, default: []].insert(operationID).inserted
+    }
+
+    @discardableResult public mutating func admit(botID: String, operationID: String) -> Bool {
+        guard pending[botID]?.remove(operationID) != nil else { return false }
+        if pending[botID]?.isEmpty == true { pending[botID] = nil }
+        admitted[botID, default: []].insert(operationID)
+        return true
+    }
+
+    public mutating func end(botID: String, operationID: String) {
+        pending[botID]?.remove(operationID)
+        admitted[botID]?.remove(operationID)
+        if pending[botID]?.isEmpty == true { pending[botID] = nil }
+        if admitted[botID]?.isEmpty == true { admitted[botID] = nil }
+    }
+
+    public mutating func endAll(botID: String) {
+        pending[botID] = nil
+        admitted[botID] = nil
+    }
+
+    public var admittedBotIDs: Set<String> { Set(admitted.keys) }
+    public var trackedBotIDs: Set<String> { Set(pending.keys).union(admitted.keys) }
+}
+
 // Drives the "<bot> is working" Live Activity (lock screen + Dynamic Island)
 // from AppModel state. Mirrors the prototype's island pill: it appears while
 // any bot is working, shows the avatar + phosphor elapsed clock, and taps
@@ -29,6 +67,9 @@ public final class LiveActivityController {
     private var lastState: BotWorkAttributes.ContentState?
     /// When each bot was first seen working — "most recent" is decided here.
     private var workingSince: [String: Date] = [:]
+    private var workAdmission = LiveActivityWorkAdmission()
+    private struct OperationKey: Hashable { let botID: String; let operationID: String }
+    private var admissionTasks: [OperationKey: Task<Void, Never>] = [:]
     private var attached = false
 
     public init() {}
@@ -55,6 +96,9 @@ public final class LiveActivityController {
         attached = false
         model = nil
         workingSince = [:]
+        admissionTasks.values.forEach { $0.cancel() }
+        admissionTasks = [:]
+        workAdmission = LiveActivityWorkAdmission()
         stopActivity()
     }
 
@@ -80,16 +124,22 @@ public final class LiveActivityController {
     }
 
     private func sync(reading model: AppModel) {
-        let working = model.workingBots
+        let allWorking = model.workingBots
+        let workingIDs = Set(allWorking.map(\.id))
+        for stale in workAdmission.trackedBotIDs.subtracting(workingIDs) {
+            endAllOperationalWorkInternal(botID: stale)
+        }
+        let admitted = workAdmission.admittedBotIDs
+        let working = allWorking.filter { admitted.contains($0.id) }
         let pending = model.pendingApprovalCount()
 
         // Track when each bot began working; drop the ones that stopped.
         let now = Date()
-        let workingIDs = Set(working.map(\.id))
+        let eligibleIDs = Set(working.map(\.id))
         for bot in working where workingSince[bot.id] == nil {
             workingSince[bot.id] = now
         }
-        workingSince = workingSince.filter { workingIDs.contains($0.key) }
+        workingSince = workingSince.filter { eligibleIDs.contains($0.key) }
 
         guard isEnabled, !working.isEmpty else {
             stopActivity()
@@ -123,6 +173,41 @@ public final class LiveActivityController {
     }
 
     // MARK: - Public start / update / stop
+
+    /// A concrete tool may earn a Live Activity only if it is still running
+    /// after the grace period. Short tools and ordinary model turns stay off
+    /// the Lock Screen entirely.
+    public func beginOperationalWork(botID: String, operationID: String) {
+        guard workAdmission.begin(botID: botID, operationID: operationID) else { return }
+        let key = OperationKey(botID: botID, operationID: operationID)
+        admissionTasks[key] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(LiveActivityWorkAdmission.graceSeconds))
+            guard !Task.isCancelled, let self else { return }
+            self.admissionTasks[key] = nil
+            guard self.workAdmission.admit(botID: botID, operationID: operationID) else { return }
+            self.sync()
+        }
+    }
+
+    public func endOperationalWork(botID: String, operationID: String) {
+        let key = OperationKey(botID: botID, operationID: operationID)
+        admissionTasks.removeValue(forKey: key)?.cancel()
+        workAdmission.end(botID: botID, operationID: operationID)
+        sync()
+    }
+
+    public func endAllOperationalWork(botID: String) {
+        endAllOperationalWorkInternal(botID: botID)
+        sync()
+    }
+
+    private func endAllOperationalWorkInternal(botID: String) {
+        let keys = admissionTasks.keys.filter { $0.botID == botID }
+        for key in keys {
+            admissionTasks.removeValue(forKey: key)?.cancel()
+        }
+        workAdmission.endAll(botID: botID)
+    }
 
     /// Start (or replace) the single concurrent activity for `bot`.
     public func startActivity(for bot: Bot, pendingApprovals: Int) {
@@ -211,6 +296,9 @@ public final class LiveActivityController {
     public func attach(to model: AppModel) {}
     public func detach() {}
     public func stopActivity() {}
+    public func beginOperationalWork(botID: String, operationID: String) {}
+    public func endOperationalWork(botID: String, operationID: String) {}
+    public func endAllOperationalWork(botID: String) {}
 }
 
 #endif
