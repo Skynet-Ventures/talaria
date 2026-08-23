@@ -25,6 +25,13 @@ ALL_EVENT_KINDS = (
     "gateway",
 )
 
+# Routine remains a recognized wire/display kind for compatibility and the
+# synthetic presentation probe, but no live producer may emit it until Hermes
+# supplies immutable job creator/delivery provenance.
+DEFAULT_EVENT_KINDS = tuple(
+    kind for kind in ALL_EVENT_KINDS if kind != "routine"
+)
+
 APNS_HOSTS = {
     "dev": "https://api.sandbox.push.apple.com",
     "prod": "https://api.push.apple.com",
@@ -152,7 +159,7 @@ class RelaySettings:
     disabled: bool = False
     # Event kinds this process may emit. In-process hook mode and sidecar
     # mode overlap on some kinds; running both unfiltered would double-push.
-    enabled_events: List[str] = field(default_factory=lambda: list(ALL_EVENT_KINDS))
+    enabled_events: List[str] = field(default_factory=lambda: list(DEFAULT_EVENT_KINDS))
     long_task_min_s: float = 600.0
     # @handles that count as a mention of "this" agent in inbound messages.
     # Defaults to the current profile name.
@@ -202,7 +209,6 @@ class SidecarSettings:
     token: str = ""
     health_interval_s: float = 15.0
     health_failures_for_offline: int = 3
-    cron_poll_min_interval_s: float = 20.0
     session_rescan_debounce_s: float = 2.0
 
     @classmethod

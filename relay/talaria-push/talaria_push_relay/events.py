@@ -34,11 +34,11 @@ post_llm_call           fires once when Hermes has a final assistant response
                         task_id, turn_id, user_message, assistant_response,
                         conversation_history, model, platform.
 on_session_end          fires at the end of every turn with completed /
-                        failed / interrupted / platform. Used for:
-                        * ``long_task`` pushes (elapsed >= threshold) when
-                          ``response`` pushes are disabled,
-                        * ``routine`` pushes (platform == "cron" — hermes
-                          cron jobs run their agent with platform="cron").
+                        failed / interrupted / platform. Used only for
+                        ``long_task`` pushes (elapsed >= threshold) when
+                        ``response`` pushes are disabled. Cron completion does
+                        not carry immutable creator/delivery provenance and is
+                        therefore never admitted to Talaria push.
 pre_gateway_dispatch    ``mention`` pushes: observes every user-originated
                         inbound MessageEvent in the messaging gateway
                         (Telegram / Discord / A2A / ...) and scans for
@@ -174,7 +174,7 @@ def on_post_approval_response(**kwargs: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# final responses / long task / routine
+# final responses / long task
 # ---------------------------------------------------------------------------
 
 
@@ -258,20 +258,9 @@ def on_session_end(**kwargs: Any) -> None:
     dispatcher = push_mod.get_dispatcher()
 
     if platform.strip().lower() == "cron":
-        # Hermes cron jobs (Talaria "routines") run their agent with
-        # platform="cron" (cron/scheduler.py). The hook surface does not
-        # carry the job name — see the README gap table; the sidecar's
-        # cron watcher does have it.
-        if relay_settings().event_enabled("routine"):
-            dispatcher.notify(push_mod.routine_event(
-                bot=bot,
-                session_id=session_id,
-                ok=completed and not failed,
-                detail=(
-                    "" if completed and not failed
-                    else f"exit: {_safe_text(kwargs.get('turn_exit_reason')) or 'failed'}"
-                ),
-            ))
+        # Fail closed. This hook omits job id/name, creator surface, origin and
+        # delivery target. A Slack-owned cron and a Talaria-created routine are
+        # identical here, so emitting would fan messaging work out to Talaria.
         return None
 
     if interrupted:

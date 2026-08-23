@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import sys
 import tempfile
@@ -14,7 +15,10 @@ from talaria_push_relay.apns import APNsResult
 from talaria_push_relay.apns import APNsClient
 from talaria_push_relay import events
 from talaria_push_relay import push as push_module
-from talaria_push_relay.config import ALL_EVENT_KINDS, RelaySettings, current_bot
+from talaria_push_relay.config import (
+    ALL_EVENT_KINDS, RelaySettings, SidecarSettings, current_bot,
+)
+from talaria_push_relay.sidecar import Sidecar
 from talaria_push_relay.push import (
     DEFAULT_TEST_KIND,
     APNS_PAYLOAD_SAFE_BYTES,
@@ -26,6 +30,7 @@ from talaria_push_relay.push import (
     PushEvent,
     payload_for_device,
     response_event,
+    routine_event,
     synthetic_test_event,
 )
 
@@ -221,6 +226,7 @@ class SourceQualifiedPushTests(unittest.TestCase):
         self.assertIn("response", ALL_EVENT_KINDS)
         settings = RelaySettings()
         self.assertTrue(settings.event_enabled("response"))
+        self.assertFalse(settings.event_enabled("routine"))
 
         with patch("talaria_push_relay.push.time.time", return_value=1_000):
             event = response_event(
@@ -654,6 +660,46 @@ class SourceQualifiedPushTests(unittest.TestCase):
             )
 
         self.assertEqual(dispatcher.events, [])
+
+    def test_cron_completion_never_enters_talaria_push_without_provenance(self):
+        settings = RelaySettings(enabled_events=list(ALL_EVENT_KINDS))
+        for completed, failed in ((True, False), (False, True)):
+            with self.subTest(completed=completed, failed=failed):
+                dispatcher = _Dispatcher()
+                with patch.object(events, "current_bot", return_value="default"), \
+                     patch.object(events, "relay_settings", return_value=settings), \
+                     patch.object(events.push_mod, "get_dispatcher",
+                                  return_value=dispatcher):
+                    events.on_session_end(
+                        session_id="cron_slack-owned_123",
+                        turn_id="turn",
+                        completed=completed,
+                        failed=failed,
+                        interrupted=False,
+                        platform="cron",
+                    )
+
+                self.assertEqual(dispatcher.events, [])
+
+    def test_sidecar_has_no_cron_polling_surface_without_creator_provenance(self):
+        with patch("talaria_push_relay.sidecar.push_mod.get_dispatcher",
+                   return_value=_Dispatcher()):
+            sidecar = Sidecar(SidecarSettings(token="token"))
+
+        self.assertFalse(hasattr(sidecar, "scan_cron"))
+        self.assertFalse(hasattr(sidecar, "_cron_fp"))
+
+    def test_routine_builder_never_exposes_raw_default_or_status_in_title(self):
+        configured = routine_event(
+            bot="default", routine="nightly", display_name="Skynet")
+        fallback = routine_event(bot="default", routine="nightly")
+
+        self.assertEqual(configured.title, "Skynet")
+        self.assertEqual(configured.bot, "default")
+        self.assertEqual(configured.extra[BOT_DISPLAY_NAME_KEY], "Skynet")
+        self.assertEqual(fallback.title, "Hermes")
+        self.assertNotIn("routine", fallback.title.lower())
+        self.assertNotIn("finished", fallback.title.lower())
 
     def test_response_fanout_uses_profile_filter_and_payload_source(self):
         token_ops = "ab" * 32
