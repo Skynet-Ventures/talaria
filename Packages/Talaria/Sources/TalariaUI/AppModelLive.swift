@@ -181,6 +181,10 @@ final class LiveRuntime {
 
     /// Bumped on every (re)connect + teardown; stale monitors check it.
     var generation = 0
+    /// Exact primary transition currently permitted to publish after a
+    /// connection/adoption suspension. Generation alone cannot distinguish
+    /// two overlapping attempts that share a normalized endpoint.
+    var connectionAttemptToken: UUID?
     var eventPump: Task<Void, Never>?
     var monitorTask: Task<Void, Never>?
     var reconnectTask: Task<Void, Never>?
@@ -219,6 +223,27 @@ final class LiveRuntime {
         for key in tasks.keys { attachTasks.removeValue(forKey: key) }
         canonicalSessionByBot = canonicalSessionByBot.filter { !$0.key.hasPrefix(prefix) }
     }
+}
+
+/// MainActor proof carried through the complete primary dial/adoption
+/// transaction. Every field must still match before post-await publication.
+struct PrimaryConnectionAttemptAuthority {
+    let generation: Int
+    let baseURL: URL
+    let client: GatewayClient
+    let token: UUID
+}
+
+/// Focused suspension seams for the post-dial adoption transaction. Production
+/// installs the real operations; tests can suspend an exact boundary without
+/// opening a socket or changing unrelated lifecycle code.
+struct ConnectedGatewayAdoptionOperations {
+    var adopt: (GatewayClient, String) async throws -> GatewayClientPool.ConnectionSnapshot
+    var refreshRoster: () async throws -> Void
+    var refreshRoutines: () async -> Void
+    var hideOwnedSessions: () async -> Void
+    var flushComposeQueue: () async -> Void
+    var reseedRoomProjection: (String) async -> Void
 }
 
 struct CanonicalSessionIdentity: Equatable, Sendable {
@@ -273,6 +298,34 @@ extension AppModel {
     /// onboarding auth flow (AuthController) or the Keychain. Registers the
     /// gateway in the ConnectionRegistry and starts the disconnect monitor.
     public func connectGateway(baseURL: URL, credential: GatewayCredential) async throws {
+        let registry = ConnectionRegistry.shared
+        try await connectGateway(
+            baseURL: baseURL,
+            credential: credential,
+            connectionOperation: { try await $0.connect() },
+            adoptionOperations: ConnectedGatewayAdoptionOperations(
+                adopt: { client, gatewayID in
+                    try await registry.clientPool.adoptWithGeneration(client, for: gatewayID)
+                },
+                refreshRoster: { try await self.refreshRoster() },
+                refreshRoutines: { await self.refreshRoutinesLive(force: true) },
+                hideOwnedSessions: { await self.hideOwnedBotSessions() },
+                flushComposeQueue: { await self.flushComposeQueue() },
+                reseedRoomProjection: { gatewayID in
+                    await self.pullAndReseedRoomProjection(gatewayID: gatewayID)
+                }
+            )
+        )
+    }
+
+    /// Deterministic focused seam preserving the production transition order.
+    func connectGateway(
+        baseURL: URL,
+        credential: GatewayCredential,
+        connectionOperation: (GatewayClient) async throws -> Void,
+        adoptionOperations: ConnectedGatewayAdoptionOperations
+    ) async throws {
+        invalidateManagedCloudBootEpisodeUnlessOwnedByCurrentTask(sourceURL: baseURL)
         let runtime = LiveRuntime.shared
 
         // Tear down any previous link.
@@ -294,6 +347,15 @@ extension AppModel {
             reconcileComposeQueueIDs(sources: primaryBots, destination: nil)
         }
         runtime.generation += 1
+        let transitionGeneration = runtime.generation
+        let transitionToken = UUID()
+        runtime.connectionAttemptToken = transitionToken
+        defer {
+            if runtime.generation == transitionGeneration,
+               runtime.connectionAttemptToken == transitionToken {
+                runtime.connectionAttemptToken = nil
+            }
+        }
         runtime.reconnectTask?.cancel(); runtime.reconnectTask = nil
         runtime.monitorTask?.cancel(); runtime.monitorTask = nil
         runtime.eventPump?.cancel(); runtime.eventPump = nil
@@ -313,33 +375,67 @@ extension AppModel {
         let registry = ConnectionRegistry.shared
         if let oldGatewayID = runtime.gatewayID {
             await registry.clientPool.disconnect(gatewayID: oldGatewayID)
+            try requireCurrentConnectionTransition(
+                generation: transitionGeneration, token: transitionToken)
         } else if let old = client {
             await old.disconnect()
+            try requireCurrentConnectionTransition(
+                generation: transitionGeneration, token: transitionToken)
         }
+        try requireCurrentConnectionTransition(
+            generation: transitionGeneration, token: transitionToken)
         runtime.gatewayID = nil
 
         let client = GatewayClient(baseURL: baseURL, credential: credential)
         self.client = client
         runtime.baseURL = baseURL
+        let authority = PrimaryConnectionAttemptAuthority(
+            generation: transitionGeneration, baseURL: baseURL,
+            client: client, token: transitionToken)
         // Events fan out of the client on its own actor; funnel them through
         // one AsyncStream so MainActor delivery preserves wire order (deltas
         // arrive in ~30 fps bursts and must append in order).
         let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
         _ = await client.addEventHandler { continuation.yield($0) }
+        guard isCurrentConnectionAttempt(authority), !Task.isCancelled else {
+            continuation.finish()
+            await disconnectCapturedClientIfUnowned(authority)
+            throw CancellationError()
+        }
         runtime.eventPump = Task { @MainActor [weak self] in
             for await event in stream { self?.handle(event: event) }
         }
 
-        try await client.connect()
+        do {
+            try await connectionOperation(client)
+        } catch {
+            guard isCurrentConnectionAttempt(authority), !Task.isCancelled else {
+                continuation.finish()
+                await disconnectCapturedClientIfUnowned(authority)
+                throw CancellationError()
+            }
+            throw error
+        }
+        guard isCurrentConnectionAttempt(authority), !Task.isCancelled else {
+            continuation.finish()
+            await disconnectCapturedClientIfUnowned(authority)
+            throw CancellationError()
+        }
         // Entering the real world: the canned demo content must not survive
         // next to live data.
         if demoDataLoaded { flushDemoWorld() }
         mode = .live
         isOffline = false
 
-        try await finishConnectedGatewayAdoption(
-            client, baseURL: baseURL, credential: credential,
-            rosterRefresh: { try await self.refreshRoster() })
+        do {
+            try await finishConnectedGatewayAdoption(
+                client, baseURL: baseURL, credential: credential,
+                authority: authority, operations: adoptionOperations)
+        } catch is CancellationError {
+            continuation.finish()
+            await disconnectCapturedClientIfUnowned(authority)
+            throw CancellationError()
+        }
     }
 
     /// Publish an authenticated post-dial client, then perform ancillary world
@@ -354,49 +450,185 @@ extension AppModel {
         _ client: GatewayClient,
         baseURL: URL,
         credential: GatewayCredential,
-        rosterRefresh: () async throws -> Void
+        rosterRefresh: @escaping () async throws -> Void
+    ) async throws {
+        let runtime = LiveRuntime.shared
+        let authority = PrimaryConnectionAttemptAuthority(
+            generation: runtime.generation, baseURL: baseURL,
+            client: client, token: UUID())
+        runtime.connectionAttemptToken = authority.token
+        defer {
+            if runtime.generation == authority.generation,
+               runtime.connectionAttemptToken == authority.token {
+                runtime.connectionAttemptToken = nil
+            }
+        }
+        let registry = ConnectionRegistry.shared
+        try await finishConnectedGatewayAdoption(
+            client, baseURL: baseURL, credential: credential,
+            authority: authority,
+            operations: ConnectedGatewayAdoptionOperations(
+                adopt: { client, gatewayID in
+                    try await registry.clientPool.adoptWithGeneration(client, for: gatewayID)
+                },
+                refreshRoster: rosterRefresh,
+                refreshRoutines: { await self.refreshRoutinesLive(force: true) },
+                hideOwnedSessions: { await self.hideOwnedBotSessions() },
+                flushComposeQueue: { await self.flushComposeQueue() },
+                reseedRoomProjection: { gatewayID in
+                    await self.pullAndReseedRoomProjection(gatewayID: gatewayID)
+                }
+            )
+        )
+    }
+
+    private func finishConnectedGatewayAdoption(
+        _ client: GatewayClient,
+        baseURL: URL,
+        credential: GatewayCredential,
+        authority: PrimaryConnectionAttemptAuthority,
+        operations: ConnectedGatewayAdoptionOperations
     ) async throws {
         let runtime = LiveRuntime.shared
         let registry = ConnectionRegistry.shared
+        try requireCurrentConnectionAttempt(authority)
         guard let savedGateway = registry.upsert(urlString: baseURL.absoluteString,
                                                  credential: credential) else {
-            await client.disconnect()
-            self.client = nil
-            runtime.baseURL = nil
+            if isCurrentConnectionAttempt(authority) {
+                await client.disconnect()
+                if isCurrentConnectionAttempt(authority) {
+                    self.client = nil
+                    runtime.baseURL = nil
+                    runtime.connectionAttemptToken = nil
+                }
+            }
             throw AuthError.protocolError("connected gateway could not be registered")
         }
+        try requireCurrentConnectionAttempt(authority)
+        let poolSnapshot: GatewayClientPool.ConnectionSnapshot
+        do {
+            poolSnapshot = try await operations.adopt(client, savedGateway.id)
+        } catch {
+            guard isCurrentConnectionAttempt(authority) else { throw CancellationError() }
+            throw error
+        }
+        guard isCurrentConnectionAttempt(authority) else {
+            _ = await registry.clientPool.disconnectIfCurrent(
+                poolSnapshot, for: savedGateway.id)
+            throw CancellationError()
+        }
         runtime.gatewayID = savedGateway.id
-        await registry.clientPool.adopt(client, for: savedGateway.id)
 
         // Source, credential and pooled-client authority are all installed now.
         // Signal before profiles.list or any other ancillary refresh can fail.
         retryExactStoredSessionNavigation()
         registry.noteState(.connected, forURL: baseURL)
 
-        startDisconnectMonitor(for: client)
-
         #if os(iOS)
         // Hand the APNs token to this gateway's push relay (if installed).
         PushCoordinator.shared.registerWithRelayIfConnected()
         #endif
 
-        try await rosterRefresh()
-        await refreshRoutinesLive(force: true)
+        try await performConnectionAttempt(
+            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id,
+            operation: operations.refreshRoster)
+        try requireCurrentConnectionAttempt(authority)
+        await operations.refreshRoutines()
+        try await requireCurrentConnectionAttempt(
+            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
         connections = registry.rows
-        await hideOwnedBotSessions()
-        await flushComposeQueue()
-        await pullAndReseedRoomProjection(gatewayID: savedGateway.id)
+        try requireCurrentConnectionAttempt(authority)
+        await operations.hideOwnedSessions()
+        try await requireCurrentConnectionAttempt(
+            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
+        await operations.flushComposeQueue()
+        try await requireCurrentConnectionAttempt(
+            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
+        await operations.reseedRoomProjection(savedGateway.id)
+        try await requireCurrentConnectionAttempt(
+            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
+        // Arm socket-loss recovery only after the initial adoption transaction
+        // can no longer resume and CAS-remove this same pooled client.
+        startSupervisedMonitor(for: client, generation: authority.generation)
+    }
+
+    private func isCurrentConnectionAttempt(_ authority: PrimaryConnectionAttemptAuthority) -> Bool {
+        let runtime = LiveRuntime.shared
+        return runtime.generation == authority.generation
+            && runtime.baseURL == authority.baseURL
+            && runtime.connectionAttemptToken == authority.token
+            && client.map(ObjectIdentifier.init) == ObjectIdentifier(authority.client)
+    }
+
+    private func requireCurrentConnectionTransition(generation: Int, token: UUID) throws {
+        let runtime = LiveRuntime.shared
+        guard !Task.isCancelled, runtime.generation == generation,
+              runtime.connectionAttemptToken == token else {
+            throw CancellationError()
+        }
+    }
+
+    private func disconnectCapturedClientIfUnowned(
+        _ authority: PrimaryConnectionAttemptAuthority
+    ) async {
+        guard client.map(ObjectIdentifier.init) != ObjectIdentifier(authority.client) else {
+            return
+        }
+        await authority.client.disconnect()
+    }
+
+    private func requireCurrentConnectionAttempt(
+        _ authority: PrimaryConnectionAttemptAuthority
+    ) throws {
+        guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
+            throw CancellationError()
+        }
+    }
+
+    private func requireCurrentConnectionAttempt(
+        _ authority: PrimaryConnectionAttemptAuthority,
+        poolSnapshot: GatewayClientPool.ConnectionSnapshot,
+        gatewayID: String
+    ) async throws {
+        guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
+            _ = await ConnectionRegistry.shared.clientPool.disconnectIfCurrent(
+                poolSnapshot, for: gatewayID)
+            throw CancellationError()
+        }
+    }
+
+    private func performConnectionAttempt(
+        _ authority: PrimaryConnectionAttemptAuthority,
+        poolSnapshot: GatewayClientPool.ConnectionSnapshot,
+        gatewayID: String,
+        operation: () async throws -> Void
+    ) async throws {
+        try requireCurrentConnectionAttempt(authority)
+        do {
+            try await operation()
+        } catch {
+            guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
+                _ = await ConnectionRegistry.shared.clientPool.disconnectIfCurrent(
+                    poolSnapshot, for: gatewayID)
+                throw CancellationError()
+            }
+            throw error
+        }
+        try await requireCurrentConnectionAttempt(
+            authority, poolSnapshot: poolSnapshot, gatewayID: gatewayID)
     }
 
     /// Deliberate disconnect (Settings → Connections). No reconnect follows.
     public func disconnectGateway() async {
         let runtime = LiveRuntime.shared
         let departingGatewayID = runtime.gatewayID
+        invalidateManagedCloudBootEpisode(gatewayID: departingGatewayID)
         let departingPrimaryBots = Set(chats.keys.filter {
             stateRoute(for: $0)?.gatewayID == departingGatewayID
                 || (GatewayBotRoute(qualifiedID: $0)?.gatewayID == departingGatewayID)
         })
         runtime.generation += 1
+        runtime.connectionAttemptToken = nil
         runtime.reconnectTask?.cancel(); runtime.reconnectTask = nil
         runtime.monitorTask?.cancel(); runtime.monitorTask = nil
         runtime.eventPump?.cancel(); runtime.eventPump = nil
@@ -1939,110 +2171,6 @@ extension AppModel {
         let firstLine = text.split(separator: "\n", omittingEmptySubsequences: true)
             .first.map(String.init) ?? text
         return firstLine.count > 120 ? String(firstLine.prefix(119)) + "…" : firstLine
-    }
-
-    // MARK: - Disconnect → backoff reconnect → grace-window resume
-
-    /// The client's event pump finishes exactly when the socket dies; awaiting
-    /// it is the disconnect signal (no polling, no heartbeats — ws-protocol §3).
-    private func startDisconnectMonitor(for client: GatewayClient) {
-        let runtime = LiveRuntime.shared
-        let generation = runtime.generation
-        runtime.monitorTask?.cancel()
-        runtime.monitorTask = Task { [weak self] in
-            guard let pump = await client.eventsTask else { return }
-            await pump.value
-            guard !Task.isCancelled else { return }
-            self?.noteDisconnect(generation: generation)
-        }
-    }
-
-    private func noteDisconnect(generation: Int) {
-        let runtime = LiveRuntime.shared
-        guard generation == runtime.generation, mode == .live, client != nil else { return }
-        // Last known state stays on screen (the bots keep working server-side);
-        // the offline banner + queued composes communicate the rest.
-        isOffline = true
-        if let base = runtime.baseURL {
-            ConnectionRegistry.shared.noteState(.offline, forURL: base)
-            connections = ConnectionRegistry.shared.rows
-        }
-        scheduleReconnect()
-    }
-
-    /// Exponential backoff: 1, 2, 4, … capped at 30 s with jitter. The server
-    /// parks live sessions for ~20 s, so the first attempts usually reattach
-    /// the in-memory session with its in-flight turn intact.
-    private func scheduleReconnect() {
-        let runtime = LiveRuntime.shared
-        guard runtime.reconnectTask == nil, let client else { return }
-        let generation = runtime.generation
-        runtime.reconnectTask = Task { @MainActor [weak self] in
-            var attempt = 0
-            while !Task.isCancelled {
-                let backoff = min(30.0, Double(1 << min(attempt, 5))) + Double.random(in: 0...0.5)
-                try? await Task.sleep(for: .seconds(backoff))
-                guard let self, !Task.isCancelled,
-                      LiveRuntime.shared.generation == generation else { return }
-                do {
-                    try await client.connect()
-                    LiveRuntime.shared.reconnectTask = nil
-                    await self.reattachAfterReconnect(client: client)
-                    return
-                } catch AuthError.sessionExpired {
-                    // Refresh token is dead — stay offline until re-auth.
-                    LiveRuntime.shared.reconnectTask = nil
-                    return
-                } catch {
-                    attempt += 1
-                }
-            }
-        }
-    }
-
-    private func reattachAfterReconnect(client: GatewayClient) async {
-        let runtime = LiveRuntime.shared
-        runtime.generation += 1
-        runtime.resetSessionState()
-        approvals.removeAll { GatewayBotRoute(qualifiedID: $0.botID) == nil }
-        // Primary pending prompts replay via session.resume below; remote
-        // approvals remain backed by their still-live source connections.
-
-        isOffline = false
-        if let base = runtime.baseURL {
-            ConnectionRegistry.shared.noteState(.connected, forURL: base)
-        }
-        startDisconnectMonitor(for: client)
-
-        // Reattach every chat that had a session. Within the ~20 s grace this
-        // is the live fast path (inflight + pending approval replayed); later
-        // it's a cold resume from the durable key.
-        for (botID, chat) in chats where GatewayBotRoute(qualifiedID: botID) == nil {
-            guard let stored = chat.storedSessionID else { continue }
-            if let sessionID = chat.sessionID, !sessionID.isEmpty {
-                runtime.reconnectParkedSessionIDs[botID] = sessionID
-            }
-            chat.sessionID = nil
-            chat.isTyping = false
-            if let live = try? await client.resumeSession(stored, profile: botID, deferHistory: true) {
-                // Route this legacy reconnect path through the same adoption
-                // boundary as supervised reconnects so unresolved mutation
-                // and kickoff leases migrate from the parked sid.
-                adopt(live, storedID: live.storedSessionID.isEmpty ? stored : live.storedSessionID,
-                      botID: botID, sourceGatewayID: runtime.gatewayID ?? "")
-                replayInflight(live, botID: botID)
-                replayPendingPrompts(live)
-            }
-        }
-
-        try? await refreshRoster()
-        await refreshRoutinesLive(force: true)
-        connections = ConnectionRegistry.shared.rows
-        await hideOwnedBotSessions()
-        await flushComposeQueue()
-        if let gatewayID = runtime.gatewayID {
-            await pullAndReseedRoomProjection(gatewayID: gatewayID)
-        }
     }
 
     // MARK: - Model / reasoning / YOLO controls (chat model strip)

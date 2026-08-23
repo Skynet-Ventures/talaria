@@ -6,9 +6,9 @@ import Observation
 // ladder needs answered: "did the route just become usable again?"
 //
 // Why this exists at all: Talaria's reconnect is an exponential backoff capped
-// at 30 s (AppModelLive.swift `scheduleReconnect`, AppModelLive+Reconnect.swift
-// `scheduleSupervisedReconnect`). That ladder is correct for a gateway that is
-// down, and wrong for a phone that walked out of a dead zone — the route came
+// at 15 s (AppModelLive+Reconnect.swift `scheduleSupervisedReconnect`). That
+// ladder is correct for a gateway that is down, and wrong for a phone that
+// walked out of a dead zone — the route came
 // back in the first second and the user still waits out the sleep. Desktop
 // hangs the same nudge off the browser's `online` event
 // (app/gateway/hooks/use-gateway-boot.ts:547); NWPathMonitor is the iOS twin.
@@ -16,7 +16,7 @@ import Observation
 // Two things this deliberately does NOT do:
 //   - it never dials, and never touches AppModel state. It reports a settled
 //     path change and the caller decides. A monitor that reconnects on its own
-//     would race the two existing backoff loops.
+//     would race the source-qualified supervised backoff loop.
 //   - it never treats `.satisfied` as "the gateway is reachable". A satisfied
 //     path to a captive-portal Wi-Fi is satisfied; only the dial itself knows.
 

@@ -107,7 +107,18 @@ public final class AppModel {
         (@MainActor (ExactStoredSessionRoute) async throws -> Bool)?
     var exactStoredSessionOpenOverride:
         (@MainActor (ExactStoredSessionRoute) async throws -> Void)?
+    /// One-shot launch restore guard. `launchWorldRestoreCompleted` cannot
+    /// serve this role because it deliberately stays false across the awaited
+    /// connection attempt so deferred exact-session routes remain parked.
+    var launchWorldRestoreStarted = false
     var launchWorldRestoreCompleted = false
+    /// Focused test seams for launch selection and the one network boundary.
+    /// Nil in production. The saved-row override keeps package tests isolated
+    /// from a developer device's real UserDefaults without changing the
+    /// production credential lookup or ordering policy.
+    var launchSavedGatewaysOverrideForTesting: [SavedGateway]?
+    var launchConnectOverrideForTesting:
+        (@MainActor (URL, GatewayCredential) async throws -> Void)?
 
     public init() {
         showOnboarding = !UserDefaults.standard.bool(forKey: "talaria-onboarded")
@@ -174,23 +185,55 @@ public final class AppModel {
         showOnboarding = true
     }
 
-    /// Launch restore, in order of intent: reconnect the most recent saved
-    /// gateway; else reload the demo world if that was the explicit choice;
-    /// else stay on the honest empty state.
+    /// Launch restore, in order of intent: reconnect the first eligible saved
+    /// gateway in the registry's existing deterministic order; else reload the
+    /// demo world if that was the explicit choice; else stay honest and empty.
     public func restoreWorldAtLaunch() async {
-        defer { completeLaunchWorldRestore() }
+        // An early call while onboarding or after another world already won is
+        // not the launch attempt. Keep the one-shot guard available for the
+        // later eligible lifecycle call.
         guard mode == .demo, bots.isEmpty, !showOnboarding else { return }
+        guard !launchWorldRestoreStarted else { return }
+        launchWorldRestoreStarted = true
+        defer { completeLaunchWorldRestore() }
         let registry = ConnectionRegistry.shared
-        for gateway in registry.saved {
+        let saved = launchSavedGatewaysOverrideForTesting ?? registry.saved
+        let selected = saved.lazy.compactMap { gateway
+            -> (gateway: SavedGateway, base: URL, credential: GatewayCredential)? in
             guard let base = gateway.baseURL,
-                  let credential = registry.credential(for: gateway) else { continue }
+                  let credential = registry.credential(for: gateway) else { return nil }
+            return (gateway, base, credential)
+        }.first
+
+        if let selected {
             do {
-                try await connectGateway(baseURL: base, credential: credential)
-                return
+                try await runManagedCloudBootEpisode(
+                    sourceURL: selected.base, gatewayID: selected.gateway.id
+                ) {
+                    if let launchConnectOverrideForTesting = self.launchConnectOverrideForTesting {
+                        try await launchConnectOverrideForTesting(
+                            selected.base, selected.credential)
+                    } else {
+                        try await self.connectGateway(
+                            baseURL: selected.base, credential: selected.credential)
+                    }
+                }
+            } catch is ManagedCloudBootSupersededError {
+                // Another primary connection won while this launch attempt
+                // was suspended. Do not mark the selected saved row offline:
+                // this stale attempt has no result to publish.
             } catch {
-                registry.noteState(.offline, forURL: base)
+                // The selected saved source outranks demo. Keep its honest
+                // offline row visible and stop; another saved gateway is not
+                // an implicit failover target.
+                registry.noteState(.offline, forURL: selected.base)
+                connections = registry.rows
             }
+            return
         }
+
+        // Demo remains a fallback only when there is no credentialed saved
+        // source to select at all.
         if UserDefaults.standard.bool(forKey: Self.demoChoiceKey) {
             enterDemoMode()
         } else {

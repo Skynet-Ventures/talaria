@@ -285,15 +285,28 @@ public actor GatewayClientPool {
     /// Replacing a different pooled client closes the old one after the new
     /// identity is installed, so a re-entrant lookup never returns the loser.
     public func adopt(_ client: GatewayClient, for gatewayID: String) async {
+        _ = try? await adoptWithGeneration(client, for: gatewayID)
+    }
+
+    /// The same adoption transaction, returning the exact generation installed
+    /// by this call. A caller that loses source authority after this suspension
+    /// can use `disconnectIfCurrent` without racing a later re-adoption — even
+    /// when that later owner deliberately reuses the same client object.
+    @discardableResult
+    public func adoptWithGeneration(_ client: GatewayClient, for gatewayID: String) async throws
+        -> ConnectionSnapshot {
         let baseURL = await client.baseURL
         // Install admission before entering the pool barrier. This actor hop
         // used to occur after `waitForLease`; a second operation could acquire
         // a lease during the hop and then be overwritten by this adoption.
         await installLifecycleAdmission(on: client, gatewayID: gatewayID)
-        guard let reservation = await acquireLeaseBarrier(gatewayID: gatewayID) else { return }
+        guard let reservation = await acquireLeaseBarrier(gatewayID: gatewayID) else {
+            throw CancellationError()
+        }
         let previous = slots[gatewayID]
         nextGeneration &+= 1
-        slots[gatewayID] = Slot(generation: nextGeneration, baseURL: baseURL,
+        let generation = nextGeneration
+        slots[gatewayID] = Slot(generation: generation, baseURL: baseURL,
                                  task: nil, client: client, leaseToken: nil)
         releaseLeaseBarrier(reservation, gatewayID: gatewayID)
 
@@ -304,6 +317,7 @@ public actor GatewayClientPool {
                   ObjectIdentifier(old) != ObjectIdentifier(client) {
             await old.disconnect()
         }
+        return ConnectionSnapshot(client: client, generation: generation, baseURL: baseURL)
     }
 
     public func disconnect(gatewayID: String) async {

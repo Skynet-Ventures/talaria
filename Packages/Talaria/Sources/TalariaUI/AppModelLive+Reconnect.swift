@@ -4,12 +4,11 @@ import SwiftUI
 import TalariaKit
 import TalariaTheme
 
-// Connection supervision: the layer above AppModelLive's backoff loop.
+// Connection supervision for every post-boot socket-loss path.
 //
-// AppModelLive owns the automatic path — event-pump completion is the
-// disconnect signal, then exponential backoff 1→30 s, then session.resume of
-// every open chat inside the server's ~20 s park window. Three things that loop
-// cannot do for itself live here:
+// Event-pump completion is the disconnect signal. The single supervised loop
+// applies the host-agnostic full-jitter policy, re-auth handling, exact-source
+// fences, session reattachment, and recovery escalation. It also handles:
 //
 //   1. Re-auth. GatewayClient.connect() throws AuthError.sessionExpired when
 //      the refresh token is rejected, and deletes the Keychain credential on
@@ -25,12 +24,37 @@ import TalariaTheme
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
-// All of it is additive — AppModelLive is untouched. The supervised retry parks
-// itself in the SAME LiveRuntime.reconnectTask slot the automatic loop uses (so
-// the two can never dial concurrently) and re-dials the same GatewayClient the
-// same way, which keeps the event fan-out and the ~20 s park window intact.
+// The supervised retry parks in LiveRuntime.reconnectTask and re-dials the same
+// GatewayClient, preserving event fan-out and the server's ~20 s park window.
 
 // MARK: - Supervisor state (side table)
+
+/// A post-boot reconnect episode that has remained offline long enough for the
+/// recovery UI to offer stronger help. This is exact saved-source state, not a
+/// managed-cloud availability diagnosis.
+public struct PostBootReconnectRecovery: Sendable, Equatable {
+    public let gatewayID: String
+    public let sourceOrigin: String
+    public let host: String
+    public let elapsed: TimeInterval
+
+    init(gatewayID: String, baseURL: URL, elapsed: TimeInterval) {
+        self.gatewayID = gatewayID
+        let host = baseURL.host?.lowercased() ?? ""
+        self.host = host
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        components?.user = nil
+        components?.password = nil
+        components?.host = host.isEmpty ? nil : host
+        components?.path = ""
+        components?.query = nil
+        components?.fragment = nil
+        let projected = components?.url?.absoluteString ?? host
+        self.sourceOrigin = projected.hasSuffix("/")
+            ? String(projected.dropLast()) : projected
+        self.elapsed = elapsed
+    }
+}
 
 /// AppModel's stored properties live in AppModel.swift (another owner) and
 /// extensions cannot add storage, so supervision state rides an observable
@@ -39,6 +63,19 @@ import TalariaTheme
 @MainActor
 @Observable
 final class ConnectionSupervisor {
+    typealias Sleep = @MainActor (TimeInterval) async throws -> Void
+    typealias RandomUnit = @MainActor () -> Double
+    typealias Now = @MainActor () -> TimeInterval
+    typealias Dial = @MainActor (GatewayClient) async throws -> Void
+    typealias SwitchConnect = @MainActor (AppModel, URL, GatewayCredential) async throws -> Void
+
+    struct EpisodeSource: Equatable {
+        let generation: Int
+        let gatewayID: String
+        let baseURL: URL
+        let clientID: ObjectIdentifier
+    }
+
     static let shared = ConnectionSupervisor()
 
     /// Gateway whose sign-in must be repeated; nil when auth is healthy.
@@ -47,16 +84,59 @@ final class ConnectionSupervisor {
     var isReconnecting = false
     /// Last status-probe result per saved-gateway id.
     var diagnostics: [String: GatewayDiagnostics] = [:]
+    /// Exact source whose unlimited reconnect episode crossed the recovery
+    /// escalation threshold. This intentionally does not reuse managed-cloud
+    /// outage state: post-boot reconnect is host agnostic.
+    var postBootRecovery: PostBootReconnectRecovery?
     /// Probe seam for deterministic lifecycle tests. Production always uses
     /// the real unauthenticated status endpoint; tests replace this briefly
     /// while exercising AppModel.refreshConnectionHealth end to end.
     @ObservationIgnored var healthProbe:
         @Sendable (SavedGateway) async -> (ConnectionState, GatewayDiagnostics) =
-            GatewayDiagnostics.probe
+            { gateway in await GatewayDiagnostics.probe(gateway) }
 
     @ObservationIgnored let keychain = KeychainStore()
     /// App-lifetime watch loop; nil until the first start request.
     @ObservationIgnored var watchTask: Task<Void, Never>?
+    @ObservationIgnored var reconnectTaskToken: UUID?
+    @ObservationIgnored var episodeSource: EpisodeSource?
+    @ObservationIgnored var episodeStartedAt: TimeInterval?
+    @ObservationIgnored var episodeAttempt = 0
+    @ObservationIgnored var sleep: Sleep = ConnectionSupervisor.productionSleep
+    @ObservationIgnored var randomUnit: RandomUnit = { Double.random(in: 0..<1) }
+    @ObservationIgnored var now: Now = { ProcessInfo.processInfo.systemUptime }
+    @ObservationIgnored var dial: Dial = { client in try await client.connect() }
+    @ObservationIgnored var switchConnect: SwitchConnect?
+
+    private static let productionSleep: Sleep = { delay in
+        guard delay > 0 else {
+            await Task.yield()
+            try Task.checkCancellation()
+            return
+        }
+        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+    }
+
+    func resetEpisode(for reason: PostBootReconnectResetReason,
+                      source: EpisodeSource? = nil) {
+        let reset = PostBootReconnectPolicy.resetEpisode(for: reason)
+        episodeSource = source
+        episodeStartedAt = source == nil ? nil : now()
+        episodeAttempt = reset.attempt
+        postBootRecovery = nil
+    }
+
+    func resetTestingSeams() {
+        sleep = Self.productionSleep
+        randomUnit = { Double.random(in: 0..<1) }
+        now = { ProcessInfo.processInfo.systemUptime }
+        dial = { client in try await client.connect() }
+        switchConnect = nil
+        reconnectTaskToken = nil
+        resetEpisode(for: .cleanOpen)
+        isReconnecting = false
+        reauthGateway = nil
+    }
 
     func note(error: Error, forGatewayID id: String?) {
         guard let id else { return }
@@ -156,6 +236,27 @@ public struct GatewayDiagnostics: Sendable, Equatable {
     }
 }
 
+enum SupervisedReconnectOutcome: Equatable {
+    case success
+    case retryable
+    case reauth
+    case stale
+}
+
+private struct SupervisedReconnectAuthority {
+    let generation: Int
+    let baseURL: URL
+    let gatewayID: String
+    let client: GatewayClient
+    let credential: GatewayCredential
+
+    var episodeSource: ConnectionSupervisor.EpisodeSource {
+        ConnectionSupervisor.EpisodeSource(
+            generation: generation, gatewayID: gatewayID, baseURL: baseURL,
+            clientID: ObjectIdentifier(client))
+    }
+}
+
 // MARK: - AppModel surface
 
 extension AppModel {
@@ -166,6 +267,12 @@ extension AppModel {
 
     /// A supervised (manual / foreground) reconnect is dialing right now.
     public var isReconnecting: Bool { ConnectionSupervisor.shared.isReconnecting }
+
+    /// Exact saved source whose host-agnostic post-boot reconnect episode has
+    /// crossed the recovery escalation threshold.
+    public var postBootReconnectRecovery: PostBootReconnectRecovery? {
+        ConnectionSupervisor.shared.postBootRecovery
+    }
 
     /// Last health probe for a saved gateway row.
     public func diagnostics(forGatewayID id: String) -> GatewayDiagnostics? {
@@ -204,6 +311,7 @@ extension AppModel {
         guard mode == .live, client != nil, let base = runtime.baseURL else { return }
 
         if !isOffline {
+            supervisor.resetEpisode(for: .cleanOpen)
             // Only the live gateway's own banner is cleared here: a re-auth
             // raised for some other saved row (tapped while signed out) has to
             // survive a healthy current link.
@@ -216,9 +324,8 @@ extension AppModel {
         guard runtime.reconnectTask == nil, !supervisor.isReconnecting else { return }
 
         if supervisor.keychain.load(for: base) == nil {
-            // AppModelLive.scheduleReconnect() stops dead on
-            // AuthError.sessionExpired, and that path has already dropped the
-            // Keychain credential — the one state where the user must act.
+            // GatewayClient has already dropped the expired Keychain
+            // credential — the one state where the user must act.
             supervisor.reauthGateway = base
         } else if supervisor.reauthGateway == nil {
             // Offline, credential intact, no retry loop alive: the automatic
@@ -270,14 +377,25 @@ extension AppModel {
 
     /// "Reconnect now" — abandons any backoff sleep and dials at once.
     public func reconnectNow() {
-        guard !ConnectionSupervisor.shared.isReconnecting else { return }
-        Task { @MainActor in
-            let runtime = LiveRuntime.shared
-            runtime.reconnectTask?.cancel()
+        let supervisor = ConnectionSupervisor.shared
+        guard !supervisor.isReconnecting else { return }
+        let source = currentReconnectAuthority()?.episodeSource
+        let runtime = LiveRuntime.shared
+        runtime.reconnectTask?.cancel()
+        runtime.reconnectTask = nil
+        supervisor.reconnectTaskToken = nil
+        supervisor.resetEpisode(for: .manualWake, source: source)
+
+        let token = UUID()
+        supervisor.reconnectTaskToken = token
+        runtime.reconnectTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.attemptReconnectOutcome(expected: source)
+            guard supervisor.reconnectTaskToken == token else { return }
+            supervisor.reconnectTaskToken = nil
             runtime.reconnectTask = nil
-            let reconnected = await attemptReconnect()
-            if !reconnected, ConnectionSupervisor.shared.reauthGateway == nil {
-                scheduleSupervisedReconnect()
+            if outcome == .retryable, let source {
+                self.scheduleSupervisedReconnect(continuing: source)
             }
         }
     }
@@ -356,22 +474,114 @@ extension AppModel {
     /// the loop cancelling itself mid-dial.
     @discardableResult
     func attemptReconnect() async -> Bool {
+        await attemptReconnectOutcome() == .success
+    }
+
+    private func currentReconnectAuthority() -> SupervisedReconnectAuthority? {
         let runtime = LiveRuntime.shared
-        let supervisor = ConnectionSupervisor.shared
-        // One dial at a time: the backoff loop, the banner button and the
-        // foreground hook can all arrive at once.
-        guard !supervisor.isReconnecting else { return false }
-        // Fence Operator status before the first await below. Reconnecting
-        // the same GatewayClient preserves its object identity, so a client
-        // check alone would let an old /api/status response publish while the
-        // transport is being replaced. This bump also remains in force on
-        // every failure path, including expired credentials and dial errors.
-        OperatorSettingsRuntime.shared.beginReconnectAttempt()
-        guard mode == .live, let base = runtime.baseURL else { return false }
-        guard let credential = supervisor.keychain.load(for: base) else {
-            supervisor.reauthGateway = base
+        let registry = ConnectionRegistry.shared
+        guard mode == .live, let base = runtime.baseURL,
+              let gatewayID = runtime.gatewayID, let client,
+              let saved = registry.gateway(forURL: base), saved.id == gatewayID,
+              let credential = registry.credential(for: saved) else { return nil }
+        return SupervisedReconnectAuthority(
+            generation: runtime.generation, baseURL: base, gatewayID: gatewayID,
+            client: client, credential: credential)
+    }
+
+    /// Focused package-test projection of the same exact source identity the
+    /// scheduler captures; contains no credential prose beyond Equatable state.
+    var currentReconnectSourceForTesting: ConnectionSupervisor.EpisodeSource? {
+        currentReconnectAuthority()?.episodeSource
+    }
+
+    private func reconnectAuthorityIsCurrent(
+        _ authority: SupervisedReconnectAuthority
+    ) async -> Bool {
+        let registry = ConnectionRegistry.shared
+        guard reconnectSourceIdentityIsCurrent(authority),
+              let saved = registry.gateway(forURL: authority.baseURL),
+              let credential = registry.credential(for: saved),
+              await authority.client.ownsCredential(credential),
+              reconnectSourceIdentityIsCurrent(authority),
+              registry.credential(for: saved) == credential else { return false }
+        return true
+    }
+
+    private func reconnectSourceIdentityIsCurrent(
+        _ authority: SupervisedReconnectAuthority
+    ) -> Bool {
+        let runtime = LiveRuntime.shared
+        let registry = ConnectionRegistry.shared
+        guard mode == .live, runtime.generation == authority.generation,
+              runtime.baseURL?.absoluteString == authority.baseURL.absoluteString,
+              runtime.gatewayID == authority.gatewayID,
+              client === authority.client,
+              let saved = registry.gateway(forURL: authority.baseURL),
+              saved.id == authority.gatewayID else { return false }
+        return true
+    }
+
+    private func reconnectSessionExpiryIsCurrent(
+        _ authority: SupervisedReconnectAuthority
+    ) -> Bool {
+        guard reconnectSourceIdentityIsCurrent(authority),
+              let saved = ConnectionRegistry.shared.gateway(forURL: authority.baseURL) else {
             return false
         }
+        // GatewayClient deletes the exact expired credential before throwing.
+        // A different replacement credential means another authority won and
+        // this old error must not raise re-auth over it.
+        let current = ConnectionRegistry.shared.credential(for: saved)
+        return current == nil || current == authority.credential
+    }
+
+    private func adoptedReconnectAuthorityIsCurrent(
+        _ authority: SupervisedReconnectAuthority, generation: Int
+    ) async -> Bool {
+        let runtime = LiveRuntime.shared
+        let registry = ConnectionRegistry.shared
+        guard mode == .live, runtime.generation == generation,
+              runtime.baseURL?.absoluteString == authority.baseURL.absoluteString,
+              runtime.gatewayID == authority.gatewayID,
+              client === authority.client,
+              let saved = registry.gateway(forURL: authority.baseURL),
+              saved.id == authority.gatewayID,
+              let credential = registry.credential(for: saved),
+              await authority.client.ownsCredential(credential),
+              mode == .live, runtime.generation == generation,
+              runtime.baseURL?.absoluteString == authority.baseURL.absoluteString,
+              runtime.gatewayID == authority.gatewayID,
+              client === authority.client,
+              registry.credential(for: saved) == credential else { return false }
+        return true
+    }
+
+    func attemptReconnectOutcome(
+        expected source: ConnectionSupervisor.EpisodeSource? = nil
+    ) async -> SupervisedReconnectOutcome {
+        let runtime = LiveRuntime.shared
+        let supervisor = ConnectionSupervisor.shared
+        guard !supervisor.isReconnecting else { return .stale }
+        guard let authority = currentReconnectAuthority() else {
+            // Missing credential is re-auth only when the remaining source
+            // coordinates still describe the exact live row.
+            if mode == .live, let base = runtime.baseURL,
+               let gatewayID = runtime.gatewayID,
+               let saved = ConnectionRegistry.shared.gateway(forURL: base),
+               saved.id == gatewayID,
+               ConnectionRegistry.shared.credential(for: saved) == nil {
+                supervisor.reauthGateway = base
+                return .reauth
+            }
+            return .stale
+        }
+        if let source, source != authority.episodeSource { return .stale }
+        guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
+
+        // Fence Operator status before the first await below. This generation
+        // remains in force on every exact-source failure path.
+        OperatorSettingsRuntime.shared.beginReconnectAttempt()
 
         supervisor.isReconnecting = true
         defer { supervisor.isReconnecting = false }
@@ -389,65 +599,83 @@ extension AppModel {
         }
 
         let registry = ConnectionRegistry.shared
-        let gatewayID = registry.gateway(forURL: base)?.id
         do {
-            if let client {
-                try await client.connect()
-            } else {
-                // No client in this process (a launch-time restore that never
-                // completed): build one the ordinary way.
-                try await connectGateway(baseURL: base, credential: credential)
-            }
+            try await supervisor.dial(authority.client)
         } catch AuthError.sessionExpired {
-            supervisor.reauthGateway = base
-            supervisor.note(error: AuthError.sessionExpired, forGatewayID: gatewayID)
+            guard reconnectSessionExpiryIsCurrent(authority) else { return .stale }
+            supervisor.reauthGateway = authority.baseURL
+            supervisor.note(error: AuthError.sessionExpired,
+                            forGatewayID: authority.gatewayID)
             isOffline = true
-            return false
+            return .reauth
         } catch {
+            guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
             isOffline = true
-            registry.noteState(.offline, forURL: base)
-            supervisor.note(error: error, forGatewayID: gatewayID)
+            registry.noteState(.offline, forURL: authority.baseURL)
+            supervisor.note(error: error, forGatewayID: authority.gatewayID)
             connections = registry.rows
-            return false
+            return .retryable
         }
 
+        guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
         supervisor.reauthGateway = nil
-        await adoptReconnectedLink(base: base, parked: parked)
-        return true
+        let adopted = await adoptReconnectedLink(authority: authority, parked: parked)
+        return adopted ? .success : .stale
     }
 
     /// Post-dial housekeeping, mirroring AppModelLive's own reattach (that one
     /// is file-private, so the sequence is repeated rather than called): retire
     /// the old generation, re-arm the disconnect watch, re-resume every parked
     /// chat, then resync the surfaces the outage may have staled.
-    private func adoptReconnectedLink(base: URL, parked: [String]) async {
+    private func adoptReconnectedLink(
+        authority: SupervisedReconnectAuthority, parked: [String]
+    ) async -> Bool {
+        guard await reconnectAuthorityIsCurrent(authority) else { return false }
         let runtime = LiveRuntime.shared
         runtime.generation += 1
+        let adoptedGeneration = runtime.generation
         OperatorSettingsRuntime.shared.completeReconnectAttempt()
         runtime.resetSessionState()
         // Pending approvals replay through session.resume below; keeping the
         // old cards would let the user answer request ids that no longer exist.
         approvals.removeAll { GatewayBotRoute(qualifiedID: $0.botID) == nil }
         isOffline = false
-        ConnectionRegistry.shared.noteState(.connected, forURL: base)
+        ConnectionRegistry.shared.noteState(.connected, forURL: authority.baseURL)
 
-        if let client { startSupervisedMonitor(for: client, generation: runtime.generation) }
+        startSupervisedMonitor(for: authority.client, generation: adoptedGeneration)
 
         // ensureSession does the whole reattach: resume by durable key, bind the
         // new sid, replay the inflight snapshot and any pending approval. The
         // transcript is already in memory, so history is never re-hydrated.
         for botID in parked {
+            guard await adoptedReconnectAuthorityIsCurrent(
+                authority, generation: adoptedGeneration) else { return false }
             _ = try? await ensureSession(botID: botID, hydrate: false)
+            guard await adoptedReconnectAuthorityIsCurrent(
+                authority, generation: adoptedGeneration) else { return false }
         }
 
         try? await refreshRoster()
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: adoptedGeneration) else { return false }
         await refreshRoutinesLive(force: true)
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: adoptedGeneration) else { return false }
+        await hideOwnedBotSessions()
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: adoptedGeneration) else { return false }
         connections = ConnectionRegistry.shared.rows
         await flushComposeQueue()
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: adoptedGeneration) else { return false }
         exactStoredSessionSourceDidReconnect()
         if let gatewayID = runtime.gatewayID {
             await pullAndReseedRoomProjection(gatewayID: gatewayID)
+            guard await adoptedReconnectAuthorityIsCurrent(
+                authority, generation: adoptedGeneration) else { return false }
         }
+        ConnectionSupervisor.shared.resetEpisode(for: .cleanOpen)
+        return true
     }
 
     /// Supervised reconnect finishes after the foreground/network callbacks
@@ -459,7 +687,7 @@ extension AppModel {
 
     /// The client's event pump finishes exactly when the socket dies; awaiting
     /// it is the disconnect signal (ws-protocol §3 — liveness is socket-level).
-    private func startSupervisedMonitor(for client: GatewayClient, generation: Int) {
+    func startSupervisedMonitor(for client: GatewayClient, generation: Int) {
         let runtime = LiveRuntime.shared
         runtime.monitorTask?.cancel()
         runtime.monitorTask = Task { @MainActor [weak self] in
@@ -477,34 +705,77 @@ extension AppModel {
         }
     }
 
-    /// Backoff retry owned by the supervisor: same 1→30 s full-second ladder
-    /// with jitter as AppModelLive's, but it ends on the re-auth banner instead
-    /// of silence. Parks in LiveRuntime.reconnectTask so the automatic loop and
-    /// this one are mutually exclusive.
-    func scheduleSupervisedReconnect() {
+    /// Host-agnostic unlimited full-jitter post-boot retry. Parks in
+    /// LiveRuntime.reconnectTask; exact task tokens prevent a late old loop
+    /// from clearing or rescheduling a successor.
+    func scheduleSupervisedReconnect(
+        continuing expectedSource: ConnectionSupervisor.EpisodeSource? = nil
+    ) {
         let runtime = LiveRuntime.shared
-        guard runtime.reconnectTask == nil, !ConnectionSupervisor.shared.isReconnecting,
-              mode == .live, runtime.baseURL != nil else { return }
-        let generation = runtime.generation
-        runtime.reconnectTask = Task { @MainActor [weak self] in
-            var attempt = 0
-            while !Task.isCancelled {
-                let backoff = min(30.0, Double(1 << min(attempt, 5))) + Double.random(in: 0...0.5)
-                try? await Task.sleep(for: .seconds(backoff))
-                guard let self, !Task.isCancelled,
-                      LiveRuntime.shared.generation == generation else { return }
-                if await self.attemptReconnect() {
-                    LiveRuntime.shared.reconnectTask = nil
-                    return
-                }
-                if ConnectionSupervisor.shared.reauthGateway != nil {
-                    // Only a human can move this forward now.
-                    LiveRuntime.shared.reconnectTask = nil
-                    return
-                }
-                attempt += 1
-            }
+        let supervisor = ConnectionSupervisor.shared
+        guard runtime.reconnectTask == nil, !supervisor.isReconnecting,
+              let currentSource = currentReconnectAuthority()?.episodeSource else { return }
+        if let expectedSource, expectedSource != currentSource { return }
+        if supervisor.episodeSource != currentSource {
+            supervisor.resetEpisode(for: .manualWake, source: currentSource)
         }
+        let token = UUID()
+        supervisor.reconnectTaskToken = token
+        runtime.reconnectTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, supervisor.reconnectTaskToken == token,
+                      supervisor.episodeSource == currentSource else { return }
+                let delay = PostBootReconnectPolicy.delay(
+                    attempt: supervisor.episodeAttempt,
+                    randomUnit: supervisor.randomUnit())
+                do {
+                    try await supervisor.sleep(delay.delay)
+                } catch {
+                    self.clearSupervisedReconnectTask(ifOwned: token)
+                    return
+                }
+                guard !Task.isCancelled, supervisor.reconnectTaskToken == token,
+                      supervisor.episodeSource == currentSource,
+                      self.currentReconnectAuthority()?.episodeSource == currentSource else {
+                    self.clearSupervisedReconnectTask(ifOwned: token)
+                    return
+                }
+                self.publishRecoveryEscalationIfNeeded(source: currentSource)
+                let outcome = await self.attemptReconnectOutcome(expected: currentSource)
+                guard supervisor.reconnectTaskToken == token else { return }
+                switch outcome {
+                case .success:
+                    self.clearSupervisedReconnectTask(ifOwned: token)
+                    return
+                case .reauth, .stale:
+                    self.clearSupervisedReconnectTask(ifOwned: token)
+                    return
+                case .retryable:
+                    supervisor.episodeAttempt &+= 1
+                    self.publishRecoveryEscalationIfNeeded(source: currentSource)
+                }
+            }
+            self?.clearSupervisedReconnectTask(ifOwned: token)
+        }
+    }
+
+    private func publishRecoveryEscalationIfNeeded(
+        source: ConnectionSupervisor.EpisodeSource
+    ) {
+        let supervisor = ConnectionSupervisor.shared
+        guard supervisor.episodeSource == source,
+              let startedAt = supervisor.episodeStartedAt else { return }
+        let elapsed = max(0, supervisor.now() - startedAt)
+        guard PostBootReconnectPolicy.shouldEscalateRecovery(elapsed: elapsed) else { return }
+        supervisor.postBootRecovery = PostBootReconnectRecovery(
+            gatewayID: source.gatewayID, baseURL: source.baseURL, elapsed: elapsed)
+    }
+
+    private func clearSupervisedReconnectTask(ifOwned token: UUID) {
+        let supervisor = ConnectionSupervisor.shared
+        guard supervisor.reconnectTaskToken == token else { return }
+        supervisor.reconnectTaskToken = nil
+        LiveRuntime.shared.reconnectTask = nil
     }
 
     // MARK: Re-auth completion
@@ -518,10 +789,11 @@ extension AppModel {
         let runtime = LiveRuntime.shared
         runtime.reconnectTask?.cancel()
         runtime.reconnectTask = nil
+        ConnectionSupervisor.shared.reconnectTaskToken = nil
 
         if runtime.baseURL?.absoluteString == baseURL.absoluteString, client != nil {
-            if await attemptReconnect() == false,
-               ConnectionSupervisor.shared.reauthGateway == nil {
+            let outcome = await attemptReconnectOutcome()
+            if outcome == .retryable {
                 scheduleSupervisedReconnect()
             }
         } else if let saved = registry.gateway(forURL: baseURL) {
@@ -565,12 +837,26 @@ extension AppModel {
         let runtime = LiveRuntime.shared
         runtime.reconnectTask?.cancel()
         runtime.reconnectTask = nil
+        supervisor.reconnectTaskToken = nil
+        supervisor.resetEpisode(for: .manualWake)
         flushWorldForGatewaySwitch()
 
         do {
-            try await connectGateway(baseURL: base, credential: credential)
+            try await runManagedCloudBootEpisode(
+                sourceURL: base, gatewayID: gateway.id
+            ) {
+                if let switchConnect = supervisor.switchConnect {
+                    try await switchConnect(self, base, credential)
+                } else {
+                    try await self.connectGateway(baseURL: base, credential: credential)
+                }
+            }
             supervisor.reauthGateway = nil
             supervisor.diagnostics[gateway.id]?.lastError = nil
+        } catch is ManagedCloudBootSupersededError {
+            // A newer primary transition superseded this switch while its
+            // connect/boot work was suspended. That newer owner exclusively
+            // decides the global offline flag and row health.
         } catch AuthError.sessionExpired {
             supervisor.reauthGateway = base
             supervisor.note(error: AuthError.sessionExpired, forGatewayID: gateway.id)
@@ -593,6 +879,7 @@ extension AppModel {
     /// Forget the credential but keep the row: the gateway stays listed and
     /// probeable, and the next tap runs sign-in again.
     public func signOutGateway(_ gateway: SavedGateway) async {
+        invalidateManagedCloudBootEpisode(gatewayID: gateway.id)
         ArtifactStore.shared.purge(gatewayID: gateway.id)
         AdvancedTerminalCoordinator.shared.stopAndForget(gatewayID: gateway.id)
         beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
@@ -629,6 +916,7 @@ extension AppModel {
 
     /// Remove the gateway entirely — registry row and Keychain credential.
     public func removeGateway(_ gateway: SavedGateway) async {
+        invalidateManagedCloudBootEpisode(gatewayID: gateway.id)
         ArtifactStore.shared.purge(gatewayID: gateway.id)
         AdvancedTerminalCoordinator.shared.stopAndForget(gatewayID: gateway.id)
         beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
