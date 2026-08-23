@@ -40,6 +40,53 @@ final class ArtifactOperationsRemediationTests: XCTestCase {
         XCTAssertEqual(store.body(for: third)?.data, Data([0xC]))
     }
 
+    @MainActor
+    func testArtifactStoreFlushByGatewayLeavesPeerBodiesAndCancelsInflight() async throws {
+        let store = ArtifactStore.shared
+        store.flush()
+        defer { store.flush() }
+
+        let keep = ArtifactProvenance(gatewayID: "gateway-a", profile: "worker",
+                                      sessionID: "session-1", value: "/tmp/keep.bin")
+        let drop = ArtifactProvenance(gatewayID: "gateway-b", profile: "worker",
+                                      sessionID: "session-1", value: "/tmp/drop.bin")
+        func publish(_ body: ArtifactBody, _ source: ArtifactProvenance) {
+            let lease = store.acquire(for: source) { Task { body } }
+            XCTAssertTrue(store.finish(body, lease: lease, for: source))
+        }
+        publish(.binary(Data([0xA]), mime: "application/octet-stream"), keep)
+        publish(.binary(Data([0xB]), mime: "application/octet-stream"), drop)
+
+        let folder = FileManager.default.temporaryDirectory
+            .appending(path: "talaria-media-flush-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "clip.mp4")
+        try Data("drop media".utf8).write(to: file)
+        let media = ArtifactProvenance(gatewayID: "gateway-b", profile: "worker",
+                                       sessionID: "media", value: "/managed/clip.mp4")
+        publish(.media(file), media)
+
+        let inflightSource = ArtifactProvenance(
+            gatewayID: "gateway-b", profile: "worker", sessionID: "inflight",
+            value: "/tmp/inflight.bin")
+        let inflightTask = Task<ArtifactBody, Never> {
+            while !Task.isCancelled { await Task.yield() }
+            return .unavailable(.notLive)
+        }
+        _ = store.acquire(for: inflightSource) { inflightTask }
+
+        store.flush(gatewayID: "gateway-b")
+
+        XCTAssertEqual(store.body(for: keep)?.data, Data([0xA]))
+        XCTAssertNil(store.body(for: drop))
+        XCTAssertNil(store.body(for: media))
+        XCTAssertEqual(store.inflightWaiterCount(for: inflightSource), 0)
+        XCTAssertTrue(inflightTask.isCancelled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path),
+                       "flush(gatewayID:) must delete that source's owned media")
+        _ = await inflightTask.value
+    }
+
     func testMediaRequestsKeepSessionAndOAuthSecretsOutOfURL() throws {
         let base = try XCTUnwrap(URL(string: "https://gateway.example/base/"))
         let session = try GatewayREST.authenticatedMediaRequest(

@@ -363,9 +363,9 @@ public final class ArtifactStore {
         discard(body)
     }
 
-    /// Drop everything for the current gateway (sign-out, gateway swap). Keys
-    /// are gateway-scoped so this is belt-and-braces, but a stale render of
-    /// another machine's file is exactly the kind of thing that must not linger.
+    /// Drop everything (tests, last-gateway teardown). Keys are
+    /// gateway-scoped; prefer `flush(gatewayID:)` so a primary switch cannot
+    /// evict a retained remote's bodies.
     public func flush() {
         for inflight in tasks.values { inflight.task.cancel() }
         for body in bodies.values { Self.removeOwnedFile(body) }
@@ -379,6 +379,13 @@ public final class ArtifactStore {
         bodies.removeAll(); thumbs.removeAll(); cost.removeAll(); order.removeAll()
         bodySources.removeAll()
         bytes = 0
+    }
+
+    /// Drop one source's bodies, thumbnails, inflight fetches and owned media.
+    /// Sign-out/remove of any gateway — primary or secondary — must go through
+    /// here so leftover bytes cannot outlive that source's credential.
+    public func flush(gatewayID: String) {
+        purge(gatewayID: gatewayID)
     }
 
     /// Remove only one retained gateway's resident and in-flight host bytes.
@@ -610,6 +617,7 @@ public extension AppModel {
     func artifactBody(_ artifact: Artifact) -> ArtifactBody? {
         guard let source = artifactProvenance(artifact) else { return nil }
         guard Self.artifactCacheAdmissionAllows(source) else { return nil }
+        guard artifactSourceCredentialIsLive(source) else { return nil }
         return ArtifactStore.shared.body(for: source)
     }
 
@@ -617,7 +625,15 @@ public extension AppModel {
     func artifactThumbnail(_ artifact: Artifact) -> Image? {
         guard let source = artifactProvenance(artifact) else { return nil }
         guard Self.artifactCacheAdmissionAllows(source) else { return nil }
+        guard artifactSourceCredentialIsLive(source) else { return nil }
         return ArtifactStore.shared.thumbnail(for: source)
+    }
+
+    /// Public/demo cache is not a gateway secret. Every other hit is only
+    /// readable while that source still has a Keychain credential.
+    private func artifactSourceCredentialIsLive(_ source: ArtifactProvenance) -> Bool {
+        if source.gatewayID == "public" || source.gatewayID == "demo" { return true }
+        return gatewayRESTContext(gatewayID: source.gatewayID) != nil
     }
 
     /// Fetch (or return) an artifact's bytes.
@@ -642,7 +658,13 @@ public extension AppModel {
         // are excluded from the TTL sweep before a new fetch starts. The
         // materializer itself never sweeps shared cache storage.
         store.sweepOrphanMediaDownloads()
-        if let cached = store.body(for: source) { return cached }
+        if let cached = store.body(for: source) {
+            guard artifactSourceCredentialIsLive(source) else {
+                store.flush(gatewayID: source.gatewayID)
+                return .unavailable(.noREST)
+            }
+            return cached
+        }
 
         let gatewayAuthority: ArtifactGatewayBodyAuthority?
         let fetchKey: ArtifactFetchKey
@@ -662,7 +684,6 @@ public extension AppModel {
             gatewayAuthority = nil
             fetchKey = .local(source)
         }
-
         let kind = artifact.kind
         let lease = store.acquire(for: fetchKey) {
             Task { @MainActor [weak self] in

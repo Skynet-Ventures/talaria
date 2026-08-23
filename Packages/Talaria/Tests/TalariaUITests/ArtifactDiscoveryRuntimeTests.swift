@@ -821,5 +821,262 @@ final class ArtifactDiscoveryRuntimeTests: XCTestCase {
         ])
         XCTAssertThrowsError(try ArtifactTranscriptPage(payload: malformed))
     }
+
+    func testPrimaryClientIdentityChangeKeepsRemoteArtifactRefsAndCards() async throws {
+        try await withFixture(includeRemote: true) { fixture in
+            let remote = try XCTUnwrap(fixture.remote)
+            let primary = seedPriorArtifact(
+                model: fixture.model, gatewayID: fixture.primary.id,
+                profile: fixture.primaryProfile, value: "/tmp/primary.md")
+            let remoteCard = AppModel.artifact(
+                from: "/tmp/remote.md",
+                botID: fixture.primaryProfile,
+                sessionID: "\(remote.id)\u{1f}remote-stored",
+                sessionTitle: "Remote",
+                at: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+            fixture.model.artifacts = [primary, remoteCard]
+            FeedsRuntime.shared.artifactSessions[remoteCard.id] = SessionRef(
+                gatewayID: remote.id,
+                botID: fixture.primaryProfile,
+                storedID: "remote-stored"
+            )
+            FeedsRuntime.shared.artifactDiscoveryStatus[remote.id] = .incomplete(
+                cursor: nil, reason: "remote snapshot")
+
+            FeedsRuntime.shared.routedClient = ObjectIdentifier(fixture.primaryClient)
+            fixture.model.client = GatewayClient(
+                baseURL: try XCTUnwrap(fixture.primary.baseURL),
+                credential: .sessionToken("rotated-primary-client"))
+            fixture.model.reconcileFeeds()
+
+            XCTAssertEqual(
+                FeedsRuntime.shared.artifactSessions[remoteCard.id]?.gatewayID, remote.id,
+                "a primary client identity change must preserve remote session refs")
+            XCTAssertEqual(
+                FeedsRuntime.shared.artifactSessions[primary.id]?.gatewayID, fixture.primary.id)
+            XCTAssertTrue(fixture.model.artifacts.contains { $0.id == remoteCard.id })
+            XCTAssertTrue(fixture.model.artifacts.contains { $0.id == primary.id })
+        }
+    }
+
+    func testDropArtifactScopeRemovesOnlyThatGatewayCardsAndRefs() async throws {
+        try await withFixture(includeRemote: true) { fixture in
+            let remote = try XCTUnwrap(fixture.remote)
+            let primary = seedPriorArtifact(
+                model: fixture.model, gatewayID: fixture.primary.id,
+                profile: fixture.primaryProfile, value: "/tmp/primary.md")
+            let remoteCard = AppModel.artifact(
+                from: "/tmp/remote.md",
+                botID: fixture.primaryProfile,
+                sessionID: "\(remote.id)\u{1f}remote-stored",
+                sessionTitle: "Remote",
+                at: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+            fixture.model.artifacts.append(remoteCard)
+            FeedsRuntime.shared.artifactSessions[remoteCard.id] = SessionRef(
+                gatewayID: remote.id,
+                botID: fixture.primaryProfile,
+                storedID: "remote-stored"
+            )
+            FeedsRuntime.shared.artifactDiscoveryStatus[remote.id] = .incomplete(
+                cursor: nil, reason: "remote snapshot")
+
+            fixture.model.dropArtifactScope(gatewayID: fixture.primary.id)
+
+            XCTAssertFalse(fixture.model.artifacts.contains { $0.id == primary.id })
+            XCTAssertNil(FeedsRuntime.shared.artifactSessions[primary.id])
+            XCTAssertNil(FeedsRuntime.shared.artifactDiscoveryStatus[fixture.primary.id])
+            XCTAssertTrue(fixture.model.artifacts.contains { $0.id == remoteCard.id })
+            XCTAssertEqual(
+                FeedsRuntime.shared.artifactSessions[remoteCard.id]?.gatewayID, remote.id)
+        }
+    }
+
+    func testPrimarySignOutKeepsRemoteArtifactCards() async throws {
+        try await withFixture(includeRemote: true) { fixture in
+            let remote = try XCTUnwrap(fixture.remote)
+            let primary = seedPriorArtifact(
+                model: fixture.model, gatewayID: fixture.primary.id,
+                profile: fixture.primaryProfile, value: "/tmp/primary.md")
+            let remoteCard = AppModel.artifact(
+                from: "/tmp/remote.md",
+                botID: fixture.primaryProfile,
+                sessionID: "\(remote.id)\u{1f}remote-stored",
+                sessionTitle: "Remote",
+                at: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+            fixture.model.artifacts = [primary, remoteCard]
+            FeedsRuntime.shared.artifactSessions[remoteCard.id] = SessionRef(
+                gatewayID: remote.id,
+                botID: fixture.primaryProfile,
+                storedID: "remote-stored"
+            )
+
+            await fixture.model.signOutGateway(fixture.primary)
+
+            XCTAssertFalse(fixture.model.artifacts.contains { $0.id == primary.id })
+            XCTAssertNil(FeedsRuntime.shared.artifactSessions[primary.id])
+            XCTAssertTrue(fixture.model.artifacts.contains { $0.id == remoteCard.id },
+                          "primary sign-out must restore remote gallery cards")
+            XCTAssertEqual(
+                FeedsRuntime.shared.artifactSessions[remoteCard.id]?.gatewayID, remote.id)
+        }
+    }
+
+    func testOpenArtifactWithoutRefDoesNotOpenCollidingPrimary() async throws {
+        try await withFixture(includeRemote: true) { fixture in
+            fixture.model.selectedTab = .artifacts
+            fixture.model.openBotID = nil
+            let orphan = AppModel.artifact(
+                from: "/tmp/orphan.md",
+                botID: fixture.primaryProfile,
+                sessionID: "missing-ref",
+                sessionTitle: "Orphan",
+                at: Date()
+            )
+            fixture.model.artifacts = [orphan]
+
+            fixture.model.openArtifact(orphan)
+
+            XCTAssertNil(fixture.model.openBotID,
+                         "a missing artifact ref must not openChat the colliding primary profile")
+            XCTAssertEqual(fixture.model.selectedTab, .artifacts)
+        }
+    }
+
+    func testLoadArtifactRefusesCacheAfterSourceCredentialIsDeleted() async throws {
+        try await withFixture(includeRemote: true) { fixture in
+            let remote = try XCTUnwrap(fixture.remote)
+            let store = ArtifactStore.shared
+            store.flush()
+            let workspace = WorkspaceRuntime.shared
+            let priorGateway = workspace.gatewayID
+            let priorRoots = workspace.fileRoots
+            let priorSources = workspace.fileRootSources
+            defer {
+                store.flush()
+                workspace.gatewayID = priorGateway
+                workspace.fileRoots = priorRoots
+                workspace.fileRootSources = priorSources
+            }
+
+            workspace.gatewayID = remote.id
+            workspace.fileRoots = ["/srv/hermes-managed"]
+            workspace.fileRootSources = ["/srv/hermes-managed": .managed]
+            let value = "/srv/hermes-managed/cached.bin"
+            let source = ArtifactProvenance(
+                gatewayID: remote.id, profile: fixture.primaryProfile,
+                sessionID: "cached-stored", value: value)
+            let lease = store.acquire(for: source) {
+                Task { ArtifactBody.binary(Data([0xCC]), mime: "application/octet-stream") }
+            }
+            XCTAssertTrue(store.finish(
+                .binary(Data([0xCC]), mime: "application/octet-stream"),
+                lease: lease, for: source))
+            XCTAssertEqual(store.body(for: source)?.data, Data([0xCC]))
+
+            let artifact = AppModel.artifact(
+                from: value,
+                botID: fixture.primaryProfile,
+                sessionID: "\(remote.id)\u{1f}cached-stored",
+                sessionTitle: "Cached",
+                at: Date()
+            )
+            FeedsRuntime.shared.artifactSessions[artifact.id] = SessionRef(
+                gatewayID: remote.id,
+                botID: fixture.primaryProfile,
+                storedID: "cached-stored"
+            )
+            ConnectionSupervisor.shared.keychain.delete(for: try XCTUnwrap(remote.baseURL))
+
+            let loaded = await fixture.model.loadArtifact(artifact)
+            guard case .unavailable(.noREST) = loaded else {
+                return XCTFail("a cache hit must not outlive the source credential")
+            }
+            XCTAssertNil(store.body(for: source),
+                         "refusing a dead credential must evict that source's leftover bytes")
+            XCTAssertNil(fixture.model.artifactBody(artifact))
+        }
+    }
+
+    func testSecondarySignOutPurgesThatGatewayBodiesAndRefs() async throws {
+        try await withFixture(includeRemote: true) { fixture in
+            try await assertSecondaryTeardownPurges(
+                fixture, operation: { await $0.signOutGateway($1) })
+            XCTAssertNotNil(
+                ConnectionRegistry.shared.saved.first { $0.id == fixture.remote?.id },
+                "sign-out keeps the saved row")
+        }
+    }
+
+    func testSecondaryRemovePurgesThatGatewayBodiesAndRefs() async throws {
+        try await withFixture(includeRemote: true) { fixture in
+            let remoteID = try XCTUnwrap(fixture.remote?.id)
+            try await assertSecondaryTeardownPurges(
+                fixture, operation: { await $0.removeGateway($1) })
+            XCTAssertNil(ConnectionRegistry.shared.saved.first { $0.id == remoteID })
+        }
+    }
+
+    private func assertSecondaryTeardownPurges(
+        _ fixture: Fixture,
+        operation: @MainActor (AppModel, SavedGateway) async -> Void
+    ) async throws {
+        let remote = try XCTUnwrap(fixture.remote)
+        let store = ArtifactStore.shared
+        store.flush()
+        defer { store.flush() }
+
+        let remoteSource = ArtifactProvenance(
+            gatewayID: remote.id, profile: fixture.primaryProfile,
+            sessionID: "remote-stored", value: "/tmp/remote.bin")
+        let primarySource = ArtifactProvenance(
+            gatewayID: fixture.primary.id, profile: fixture.primaryProfile,
+            sessionID: "primary-stored", value: "/tmp/primary.bin")
+        func publish(_ body: ArtifactBody, _ source: ArtifactProvenance) {
+            let lease = store.acquire(for: source) { Task { body } }
+            XCTAssertTrue(store.finish(body, lease: lease, for: source))
+        }
+        publish(.binary(Data([0xAA]), mime: "application/octet-stream"), remoteSource)
+        publish(.binary(Data([0xBB]), mime: "application/octet-stream"), primarySource)
+
+        let folder = FileManager.default.temporaryDirectory
+            .appending(path: "talaria-media-secondary-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "clip.mp4")
+        try Data("remote media".utf8).write(to: file)
+        let mediaSource = ArtifactProvenance(
+            gatewayID: remote.id, profile: fixture.primaryProfile,
+            sessionID: "remote-media", value: "/managed/clip.mp4")
+        publish(.media(file), mediaSource)
+
+        let remoteCard = AppModel.artifact(
+            from: "/tmp/remote.bin",
+            botID: fixture.primaryProfile,
+            sessionID: "\(remote.id)\u{1f}remote-stored",
+            sessionTitle: "Remote",
+            at: Date()
+        )
+        fixture.model.artifacts.append(remoteCard)
+        FeedsRuntime.shared.artifactSessions[remoteCard.id] = SessionRef(
+            gatewayID: remote.id,
+            botID: fixture.primaryProfile,
+            storedID: "remote-stored"
+        )
+
+        await operation(fixture.model, remote)
+
+        XCTAssertNil(store.body(for: remoteSource),
+                     "secondary teardown must purge that gateway's cached bodies")
+        XCTAssertNil(store.body(for: mediaSource))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path),
+                       "owned media for the signed-out source must be deleted")
+        XCTAssertEqual(store.body(for: primarySource)?.data, Data([0xBB]),
+                       "a peer gateway's cache must survive secondary teardown")
+        XCTAssertNil(FeedsRuntime.shared.artifactSessions[remoteCard.id])
+        XCTAssertFalse(fixture.model.artifacts.contains { $0.id == remoteCard.id })
+        XCTAssertNil(ConnectionRegistry.shared.credential(for: remote))
+    }
 }
 #endif

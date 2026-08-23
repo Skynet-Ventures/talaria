@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+@testable import TalariaKit
 @testable import TalariaUI
 
 @MainActor
@@ -122,6 +123,146 @@ final class AdvancedTerminalCoordinatorTests: XCTestCase {
         ), AdvancedTerminalLaunchRequest(
             gatewayID: "gateway-a", profile: "beta", resume: nil
         ))
+        XCTAssertEqual(binding.freshSessionRequest(
+            workspaceGatewayID: "gateway-a",
+            workspaceProfile: "beta",
+            knownProfiles: ["alpha", "beta"]
+        ), AdvancedTerminalLaunchRequest(
+            gatewayID: "gateway-a", profile: "beta", resume: nil
+        ))
+    }
+
+    func testWaitScreenFreshSessionDoesNotAuthorizeLeftoverWorkspace() {
+        var binding = AdvancedTerminalSourceBinding(
+            initialGatewayID: "gateway-a",
+            initialProfile: "default",
+            initialResume: "durable-session-a"
+        )
+
+        XCTAssertNil(binding.freshSessionRequest(
+            workspaceGatewayID: "gateway-b",
+            workspaceProfile: "other",
+            knownProfiles: ["other"]
+        ))
+        XCTAssertFalse(binding.hasBoundInitialTarget)
+        XCTAssertFalse(binding.hasLeftInitialTarget)
+    }
+
+    func testSameSourceFreshSessionDropsResume() {
+        var binding = AdvancedTerminalSourceBinding(
+            initialGatewayID: "gateway-a",
+            initialProfile: "default",
+            initialResume: "durable-session-a"
+        )
+
+        XCTAssertEqual(binding.freshSessionRequest(
+            workspaceGatewayID: "gateway-a",
+            workspaceProfile: "default",
+            knownProfiles: ["default"]
+        ), AdvancedTerminalLaunchRequest(
+            gatewayID: "gateway-a", profile: "default", resume: nil
+        ))
+        XCTAssertTrue(binding.hasBoundInitialTarget)
+        XCTAssertFalse(binding.hasLeftInitialTarget)
+
+        XCTAssertEqual(binding.freshSessionRequest(
+            workspaceGatewayID: "gateway-a",
+            workspaceProfile: "default",
+            knownProfiles: ["default"]
+        ), AdvancedTerminalLaunchRequest(
+            gatewayID: "gateway-a", profile: "default", resume: nil
+        ))
+    }
+
+    func testUnscopedResumeFreshSessionFailsClosed() {
+        var binding = AdvancedTerminalSourceBinding(
+            initialGatewayID: nil,
+            initialProfile: nil,
+            initialResume: "unscoped-session"
+        )
+
+        XCTAssertNil(binding.freshSessionRequest(
+            workspaceGatewayID: "gateway-a",
+            workspaceProfile: "default",
+            knownProfiles: ["default"]
+        ))
+    }
+
+    func testNewSessionOnWaitScreenDoesNotDialDialableLeftover() throws {
+        let leftover = try seedDialableWorkspace(
+            host: "leftover-b-\(UUID().uuidString)",
+            profile: "other"
+        )
+        defer { tearDownSeededWorkspace(leftover) }
+
+        let probe = AdvancedTerminalCoordinator()
+        defer { probe.stop() }
+        probe.startFromWorkspace(
+            AdvancedTerminalLaunchRequest(
+                gatewayID: leftover.id, profile: "other", resume: nil
+            ),
+            fresh: true
+        )
+        XCTAssertEqual(probe.profile, "other",
+                       "leftover B must be authoritative enough to open a PTY")
+
+        var binding = AdvancedTerminalSourceBinding(
+            initialGatewayID: "gateway-a",
+            initialProfile: "default",
+            initialResume: "durable-session-a"
+        )
+        let coordinator = AdvancedTerminalCoordinator()
+        defer { coordinator.stop() }
+        coordinator.startNewSession(&binding)
+
+        XCTAssertEqual(
+            coordinator.message,
+            "Preparing the requested gateway and profile before opening Advanced Terminal."
+        )
+        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertNotEqual(coordinator.profile, "other")
+        XCTAssertNotEqual(coordinator.gatewayName, leftover.name)
+        XCTAssertFalse(binding.hasBoundInitialTarget)
+    }
+
+    func testSameSourceNewSessionStartsFreshWithoutResume() throws {
+        let source = try seedDialableWorkspace(
+            host: "requested-a-\(UUID().uuidString)",
+            profile: "default"
+        )
+        defer { tearDownSeededWorkspace(source) }
+
+        let store = GatewayPTYAttachmentStore.shared
+        let beforeFresh = store.token(gatewayID: source.id, profile: "default", resume: nil)
+        let beforeResume = store.token(
+            gatewayID: source.id, profile: "default", resume: "durable-session-a")
+
+        var binding = AdvancedTerminalSourceBinding(
+            initialGatewayID: source.id,
+            initialProfile: "default",
+            initialResume: "durable-session-a"
+        )
+        let coordinator = AdvancedTerminalCoordinator()
+        defer { coordinator.stop() }
+        coordinator.startNewSession(&binding)
+
+        XCTAssertEqual(coordinator.profile, "default")
+        XCTAssertEqual(coordinator.gatewayName, source.name)
+        XCTAssertTrue(coordinator.message.isEmpty)
+        XCTAssertTrue(binding.hasBoundInitialTarget)
+        XCTAssertFalse(binding.hasLeftInitialTarget)
+        XCTAssertNotEqual(
+            beforeFresh,
+            store.token(gatewayID: source.id, profile: "default", resume: nil),
+            "a new session must rotate the unscoped attach token"
+        )
+        XCTAssertEqual(
+            beforeResume,
+            store.token(gatewayID: source.id, profile: "default", resume: "durable-session-a"),
+            "a new session must not consume the durable resume attach"
+        )
+
+        store.remove(gatewayID: source.id)
     }
 
     func testAttachmentTokensAreStableScopedRotatableAndRemovable() {
@@ -162,5 +303,27 @@ final class AdvancedTerminalCoordinatorTests: XCTestCase {
         coordinator.setForeground(false, now: start.addingTimeInterval(1_700))
         coordinator.setForeground(true, now: start.addingTimeInterval(1_741))
         XCTAssertTrue(coordinator.requiresResumeDecision)
+    }
+
+    @discardableResult
+    private func seedDialableWorkspace(host: String, profile: String) throws -> SavedGateway {
+        let registry = ConnectionRegistry.shared
+        let gateway = try XCTUnwrap(registry.upsert(
+            urlString: "https://\(host).example",
+            name: host,
+            credential: .sessionToken("leftover-token-\(host)")
+        ))
+        let workspace = WorkspaceRuntime.shared
+        workspace.gatewayID = gateway.id
+        workspace.profile = profile
+        workspace.profiles = [WorkspaceProfileSource(profile: profile)]
+        return gateway
+    }
+
+    private func tearDownSeededWorkspace(_ gateway: SavedGateway) {
+        AdvancedTerminalCoordinator.shared.stop()
+        GatewayPTYAttachmentStore.shared.remove(gatewayID: gateway.id)
+        ConnectionRegistry.shared.remove(id: gateway.id)
+        _ = WorkspaceRuntime.shared.begin(gatewayID: nil)
     }
 }

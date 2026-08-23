@@ -189,6 +189,15 @@ final class LivenessRuntime {
     /// the link is back, so a foreground-while-offline still gets its re-seed.
     var reseedPending = false
 
+    /// Package-test seam: `session.active_list` for one owning gateway, using
+    /// the captured client the reaper resolved. Production still asks that
+    /// client on the wire.
+    var activeSessionsForTesting:
+        (@MainActor (GatewayClient, String) async throws -> [LiveSessionRow])?
+    /// Package-test seam: `session.history` on the same captured client.
+    var sessionHistoryForTesting:
+        (@MainActor (GatewayClient, String, String) async throws -> JSONValue)?
+
     /// Point the bookkeeping at the live gateway, dropping anything learned
     /// about a different one — its session ids resolve to nothing here (or,
     /// worse, to something else).
@@ -348,7 +357,7 @@ extension AppModel {
 
     private func runLivenessReconcile(trigger: LivenessTrigger) async {
         let liveness = LivenessRuntime.shared
-        guard mode == .live, let client else { return }
+        guard mode == .live, client != nil else { return }
         guard !isOffline else {
             // Nothing to ask and nothing to conclude. The reaper carries the
             // debt until the link is back.
@@ -364,37 +373,169 @@ extension AppModel {
             liveness.supportedGeneration = generation
             liveness.supported = true
         }
-        guard liveness.supported else { return }
-        // Sampled BEFORE the round trip. Everything below reads the snapshot as
-        // authoritative about absence, and it only *is* authoritative about the
-        // turns that already existed when it was taken: a `prompt.submit`
-        // accepted while this request was in flight is legitimately missing
-        // from it, and both immediate-clear paths would then reap a turn that
-        // is genuinely running. A bot that started working during the round
-        // trip is therefore held to the same two-observation settle grace as
-        // any other ambiguous verdict.
+        // Sampled BEFORE any source's round trip. Everything below reads a
+        // snapshot as authoritative about absence, and it only *is*
+        // authoritative about the turns that already existed when it was
+        // taken: a `prompt.submit` accepted while this request was in flight
+        // is legitimately missing from it, and both immediate-clear paths
+        // would then reap a turn that is genuinely running. A bot that
+        // started working during the round trip is therefore held to the
+        // same two-observation settle grace as any other ambiguous verdict.
         let believedBeforeAsking = LiveRuntime.shared.workingBotIDs
-        // Same reasoning one level down, for the bindings rather than the
-        // turns: a runtime sid minted by an `ensureSession` that ran while this
-        // request was in flight is necessarily missing from an answer that
-        // predates it, and unbinding on that would drop a live session's events
-        // and orphan its approval cards.
-        let boundBeforeAsking = Set(chats.values.compactMap(\.sessionID))
-        let rows: [LiveSessionRow]
-        do {
-            rows = try await client.activeSessions()
-        } catch let error as GatewayError where error.code == GatewayClient.methodNotFound {
-            liveness.supported = false
-            liveness.reseedPending = false
-            return
-        } catch {
-            // Transient (socket dying, gateway busy). Leave every belief as it
-            // is — a failed question is not evidence of anything.
-            return
-        }
-        guard LiveRuntime.shared.generation == generation, mode == .live, !isOffline else { return }
-        liveness.reseedPending = false
 
+        // Every bot with a chat, plus any the runtime still believes is
+        // working. `chats[botID]` is read directly rather than through
+        // `chat(for:)`, which would mint a ChatState for every idle bot.
+        // Group by the gateway that owns the row: a remote
+        // `gateway::profile` sid is invisible to the primary snapshot, and
+        // short sids collide across Hermes processes.
+        let candidates = Set(chats.keys).union(LiveRuntime.shared.workingBotIDs)
+        var byGateway: [String: Set<String>] = [:]
+        var unrouted: [String] = []
+        for botID in candidates {
+            if let gatewayID = livenessOwnerGatewayID(for: botID) {
+                byGateway[gatewayID, default: []].insert(botID)
+            } else {
+                unrouted.append(botID)
+            }
+        }
+
+        let now = ContinuousClock.now
+        var changed = false
+        var reattach: [String] = []
+        var refresh: [(botID: String, runtimeSID: String?, client: GatewayClient)] = []
+        var hadTransientFailure = false
+        let primaryGatewayID = LiveRuntime.shared.gatewayID
+
+        for botID in unrouted {
+            if settleUnverifiableWorking(botID: botID, now: now) { changed = true }
+        }
+
+        for (gatewayID, botIDs) in byGateway {
+            if gatewayID == primaryGatewayID, !liveness.supported { continue }
+
+            // Same reasoning one level down, for the bindings rather than the
+            // turns, and only for this source: a runtime sid minted by an
+            // `ensureSession` that ran while THIS request was in flight is
+            // necessarily missing from an answer that predates it. SIDs from
+            // another gateway are not this snapshot's to judge.
+            let boundBeforeAsking = Set(botIDs.compactMap { botID in
+                chats[botID]?.sessionID.flatMap { $0.isEmpty ? nil : $0 }
+            })
+
+            let capturedClient: GatewayClient
+            do {
+                capturedClient = try await routedClient(gatewayID: gatewayID)
+            } catch {
+                // Unknown, fenced, or still connecting. Leave every belief
+                // for this source as it is — another gateway's snapshot is
+                // not a substitute.
+                hadTransientFailure = true
+                continue
+            }
+            guard LiveRuntime.shared.generation == generation, mode == .live, !isOffline else { return }
+
+            let rows: [LiveSessionRow]
+            do {
+                rows = try await livenessSnapshot(from: capturedClient, gatewayID: gatewayID)
+            } catch let error as GatewayError where error.code == GatewayClient.methodNotFound {
+                if gatewayID == primaryGatewayID {
+                    liveness.supported = false
+                }
+                continue
+            } catch {
+                // Transient (socket dying, gateway busy). Leave every belief
+                // for this source as it is — a failed question is not
+                // evidence of anything.
+                hadTransientFailure = true
+                continue
+            }
+            guard LiveRuntime.shared.generation == generation, mode == .live, !isOffline else { return }
+
+            applyLivenessSnapshot(
+                rows, bots: botIDs, trigger: trigger,
+                believedBeforeAsking: believedBeforeAsking,
+                boundBeforeAsking: boundBeforeAsking,
+                client: capturedClient, sourceGatewayID: gatewayID, now: now,
+                changed: &changed, reattach: &reattach, refresh: &refresh)
+        }
+
+        // A pass that asked every reachable source (or learned the method is
+        // gone) has paid the offline-foreground debt. A transient hole on
+        // any source leaves the debt so the reaper retries.
+        if !hadTransientFailure { liveness.reseedPending = false }
+
+        // Re-attaching hydrates from the resume ack, so a session that advanced
+        // while we were away comes back with its transcript whole rather than
+        // resuming mid-gap.
+        for botID in reattach {
+            guard LiveRuntime.shared.generation == generation else { return }
+            _ = try? await ensureSession(botID: botID, hydrate: true)
+            changed = true
+        }
+
+        // Turns that ENDED while we were away never delivered their last
+        // tokens; pull the tail so the user does not see the conversation stop
+        // mid-thought. The client is the one that answered this bot's
+        // snapshot — never a leftover primary.
+        for item in refresh {
+            guard LiveRuntime.shared.generation == generation else { return }
+            await rehydrateTranscript(botID: item.botID, runtimeSID: item.runtimeSID,
+                                     client: item.client)
+        }
+
+        if changed { try? await refreshRoster() }
+    }
+
+    /// The gateway whose `session.active_list` is allowed to judge this bot.
+    private func livenessOwnerGatewayID(for botID: String) -> String? {
+        stateRoute(for: botID)?.gatewayID ?? gatewayRoute(for: botID)?.gatewayID
+    }
+
+    private func livenessSnapshot(from client: GatewayClient,
+                                 gatewayID: String) async throws -> [LiveSessionRow] {
+        if let override = LivenessRuntime.shared.activeSessionsForTesting {
+            return try await override(client, gatewayID)
+        }
+        return try await client.activeSessions()
+    }
+
+    /// Working with no sid and no durable key — the snapshot cannot address
+    /// this turn. Same bounded wait the per-source walk uses.
+    @discardableResult
+    private func settleUnverifiableWorking(botID: String, now: ContinuousClock.Instant) -> Bool {
+        let liveness = LivenessRuntime.shared
+        guard LiveRuntime.shared.workingBotIDs.contains(botID) else {
+            liveness.unverifiableSince[botID] = nil
+            return false
+        }
+        let chat = chats[botID]
+        let sid = chat?.sessionID.flatMap { $0.isEmpty ? nil : $0 }
+        let key = chat?.storedSessionID.flatMap { $0.isEmpty ? nil : $0 }
+            ?? CanonicalChatRuntime.shared.pins[botID]
+        guard sid == nil, key == nil else { return false }
+        let since = liveness.unverifiableSince[botID] ?? now
+        liveness.unverifiableSince[botID] = since
+        guard now - since >= LivenessRuntime.unverifiableGrace else { return false }
+        clearWorkingState(botID: botID)
+        liveness.unverifiableSince[botID] = nil
+        return true
+    }
+
+    private func applyLivenessSnapshot(
+        _ rows: [LiveSessionRow],
+        bots botIDs: Set<String>,
+        trigger: LivenessTrigger,
+        believedBeforeAsking: Set<String>,
+        boundBeforeAsking: Set<String>,
+        client: GatewayClient,
+        sourceGatewayID: String,
+        now: ContinuousClock.Instant,
+        changed: inout Bool,
+        reattach: inout [String],
+        refresh: inout [(botID: String, runtimeSID: String?, client: GatewayClient)]
+    ) {
+        let liveness = LivenessRuntime.shared
         var byKey: [String: LiveSessionRow] = [:]
         var bySID: [String: LiveSessionRow] = [:]
         for row in rows {
@@ -402,16 +543,7 @@ extension AppModel {
             if !row.sessionID.isEmpty { bySID[row.sessionID] = row }
         }
 
-        let now = ContinuousClock.now
-        var changed = false
-        var reattach: [String] = []
-        var refresh: [(botID: String, runtimeSID: String?)] = []
-
-        // Every bot with a chat, plus any the runtime still believes is
-        // working. `chats[botID]` is read directly rather than through
-        // `chat(for:)`, which would mint a ChatState for every idle bot.
-        let candidates = Set(chats.keys).union(LiveRuntime.shared.workingBotIDs)
-        for botID in candidates {
+        for botID in botIDs {
             let chat = chats[botID]
             let sid = chat?.sessionID.flatMap { $0.isEmpty ? nil : $0 }
             let key = chat?.storedSessionID.flatMap { $0.isEmpty ? nil : $0 }
@@ -427,23 +559,14 @@ extension AppModel {
             // a bounded wait — clearing on a timer alone is the guess this
             // whole file exists to avoid.
             guard sid != nil || key != nil else {
-                if believedWorking {
-                    let since = liveness.unverifiableSince[botID] ?? now
-                    liveness.unverifiableSince[botID] = since
-                    if now - since >= LivenessRuntime.unverifiableGrace {
-                        clearWorkingState(botID: botID)
-                        liveness.unverifiableSince[botID] = nil
-                        changed = true
-                    }
-                } else {
-                    liveness.unverifiableSince[botID] = nil
-                }
+                if settleUnverifiableWorking(botID: botID, now: now) { changed = true }
                 continue
             }
             liveness.unverifiableSince[botID] = nil
 
             // The sid is the precise identity; the durable key finds the same
-            // session after a resume minted a new sid.
+            // session after a resume minted a new sid. Both are judged only
+            // inside this source's registry.
             let row = sid.flatMap { bySID[$0] } ?? key.flatMap { byKey[$0] }
             // The chat on screen is the only place a gap is visible, and once
             // it is open nothing re-hydrates it — `openChat` already ran. So it
@@ -465,7 +588,8 @@ extension AppModel {
                 // its events, so re-attach — and clear the dead sid first, or
                 // `ensureSession` would hand the stale one straight back.
                 if let judgedSID, bySID[judgedSID] == nil {
-                    unbindDeadRuntime(sid: judgedSID, botID: botID)
+                    unbindDeadRuntime(sid: judgedSID, botID: botID,
+                                      sourceGatewayID: sourceGatewayID)
                     reattach.append(botID)
                 } else if sid == nil {
                     reattach.append(botID)
@@ -491,7 +615,7 @@ extension AppModel {
                         clearWorkingState(botID: botID)
                         liveness.settledSince[botID] = nil
                         noteTurnEndedAway(botID: botID, row: row)
-                        refresh.append((botID, row?.sessionID))
+                        refresh.append((botID, row?.sessionID, client))
                         changed = true
                     }
                 } else {
@@ -502,20 +626,24 @@ extension AppModel {
                     // gateway's own tail of this transcript, so a mismatch is
                     // proof the chat on screen has fallen behind.
                     if watching, let row, transcriptFellBehind(chats[botID], row: row) {
-                        refresh.append((botID, row.sessionID))
+                        refresh.append((botID, row.sessionID, client))
                     }
                 }
                 // A sid the registry does not list is dead even when the
                 // session lives on under another one.
                 if let judgedSID, bySID[judgedSID] == nil {
-                    unbindDeadRuntime(sid: judgedSID, botID: botID)
+                    unbindDeadRuntime(sid: judgedSID, botID: botID,
+                                      sourceGatewayID: sourceGatewayID)
                 }
 
             case nil:
                 // Absent from the registry: the gateway tore this session down
                 // when its turn completed and the transport went away
                 // (ws-protocol.md §3).
-                if let judgedSID { unbindDeadRuntime(sid: judgedSID, botID: botID) }
+                if let judgedSID {
+                    unbindDeadRuntime(sid: judgedSID, botID: botID,
+                                      sourceGatewayID: sourceGatewayID)
+                }
                 if believedWorking {
                     // A turn that already existed when we asked and is not in
                     // the answer has ended — no later event can put it back.
@@ -530,36 +658,17 @@ extension AppModel {
                     clearWorkingState(botID: botID)
                     liveness.settledSince[botID] = nil
                     noteTurnEndedAway(botID: botID, row: nil)
-                    refresh.append((botID, nil))
+                    refresh.append((botID, nil, client))
                     changed = true
                 } else if watching {
                     // No row means no preview to compare against, and the
                     // teardown itself says the socket outlived this session.
                     // One read by durable key is the cheapest way to be sure
                     // the open chat is not missing its last exchange.
-                    refresh.append((botID, nil))
+                    refresh.append((botID, nil, client))
                 }
             }
         }
-
-        // Re-attaching hydrates from the resume ack, so a session that advanced
-        // while we were away comes back with its transcript whole rather than
-        // resuming mid-gap.
-        for botID in reattach {
-            guard LiveRuntime.shared.generation == generation else { return }
-            _ = try? await ensureSession(botID: botID, hydrate: true)
-            changed = true
-        }
-
-        // Turns that ENDED while we were away never delivered their last
-        // tokens; pull the tail so the user does not see the conversation stop
-        // mid-thought.
-        for item in refresh {
-            guard LiveRuntime.shared.generation == generation else { return }
-            await rehydrateTranscript(botID: item.botID, runtimeSID: item.runtimeSID)
-        }
-
-        if changed { try? await refreshRoster() }
     }
 }
 
@@ -606,10 +715,24 @@ extension AppModel {
     /// A runtime sid the registry no longer lists. Drop every binding that
     /// names it so the next open or send re-resumes from the durable key —
     /// the same treatment the `session.reclaimed` event gets
-    /// (AppModelLive.swift), and for the same reason.
-    func unbindDeadRuntime(sid: String, botID: String) {
+    /// (AppModelLive.swift), and for the same reason. The owning gateway is
+    /// required: short sids collide across retained Hermes processes, so a
+    /// remote death must not clear `sessionToBot` or orphan a primary card.
+    func unbindDeadRuntime(sid: String, botID: String, sourceGatewayID: String? = nil) {
         let runtime = LiveRuntime.shared
-        runtime.sessionToBot.removeValue(forKey: sid)
+        let gatewayID = sourceGatewayID
+            ?? stateRoute(for: botID)?.gatewayID
+            ?? runtime.gatewayID
+        if let gatewayID, gatewayID == runtime.gatewayID {
+            if runtime.sessionToBot[sid] == botID {
+                runtime.sessionToBot.removeValue(forKey: sid)
+            }
+        } else if let gatewayID {
+            let routed = GatewaySessionRoute(gatewayID: gatewayID, sessionID: sid)
+            if runtime.routedSessionToBot[routed] == botID {
+                runtime.routedSessionToBot.removeValue(forKey: routed)
+            }
+        }
         if chats[botID]?.sessionID == sid {
             // The durable resume that follows must know which runtime binding
             // the unresolved mutation belonged to, even while ChatState is
@@ -620,7 +743,7 @@ extension AppModel {
         // Approval cards bound to a dead runtime cannot be answered: the
         // request id resolves to no session, so both buttons would fail
         // silently. Leaving an unanswerable card up is worse than none.
-        guard let gatewayID = runtime.gatewayID else { return }
+        guard let gatewayID else { return }
         let dead = GatewaySessionRoute(gatewayID: gatewayID, sessionID: sid)
         let orphaned = runtime.approvalTargets.filter { $0.value.session == dead }.map(\.key)
         guard !orphaned.isEmpty else { return }
@@ -654,19 +777,27 @@ extension AppModel {
     /// has no visible gap to close and hydrates on its first open
     /// (AppModelLive+CanonicalChat.swift), so fetching it here would be a round
     /// trip nobody sees.
-    private func rehydrateTranscript(botID: String, runtimeSID: String?) async {
-        guard mode == .live, let client, !isOffline else { return }
+    private func rehydrateTranscript(botID: String, runtimeSID: String?,
+                                    client: GatewayClient) async {
+        guard mode == .live, !isOffline else { return }
         guard let chat = chats[botID], !chat.messages.isEmpty else { return }
+        let profile = GatewayBotRoute(qualifiedID: botID)?.profile ?? botID
 
         var payload: JSONValue?
         // A session still in the registry answers over WS with row ids and the
         // full ancestor lineage; one that has ended is only reachable through
-        // the REST tail page, addressed by its durable key.
+        // the REST tail page, addressed by its durable key. Both go to the
+        // captured client that owns this bot — never a leftover primary.
         if let runtimeSID, !runtimeSID.isEmpty {
-            payload = try? await client.sessionHistory(runtimeSID)
+            if let override = LivenessRuntime.shared.sessionHistoryForTesting {
+                payload = try? await override(client, livenessOwnerGatewayID(for: botID) ?? "",
+                                              runtimeSID)
+            } else {
+                payload = try? await client.sessionHistory(runtimeSID)
+            }
         }
         if payload == nil, let stored = chat.storedSessionID, !stored.isEmpty {
-            payload = try? await client.latestSessionMessages(storedID: stored, profile: botID)
+            payload = try? await client.latestSessionMessages(storedID: stored, profile: profile)
         }
         guard let payload else { return }
 
