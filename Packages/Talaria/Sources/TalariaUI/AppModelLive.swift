@@ -412,7 +412,15 @@ extension AppModel {
             throw CancellationError()
         }
         runtime.eventPump = Task { @MainActor [weak self] in
-            for await event in stream { self?.handle(event: event) }
+            for await event in stream {
+                guard let self else { return }
+                // Event fan-out is installed on the primary GatewayClient and
+                // survives that client's supervised socket replacement. Any
+                // event delivered here is therefore stronger liveness proof
+                // than a stale offline flag published while iOS was suspended.
+                self.noteCurrentPrimaryInboundActivity(from: client)
+                self.handle(event: event)
+            }
         }
 
         do {

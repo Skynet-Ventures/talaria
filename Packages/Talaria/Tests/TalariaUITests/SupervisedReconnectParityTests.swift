@@ -155,6 +155,30 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
+    func testInboundTrafficFromExactCurrentClientClearsStaleOfflinePublication() throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+
+        XCTAssertTrue(fixture.model.isOffline)
+        fixture.model.noteCurrentPrimaryInboundActivity(from: fixture.client)
+
+        XCTAssertFalse(fixture.model.isOffline)
+        XCTAssertEqual(fixture.registry.health[fixture.gateway.id]?.state, .connected)
+    }
+
+    @MainActor
+    func testInboundTrafficFromReplacedClientCannotClearPrimaryOfflinePublication() throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let replaced = GatewayClient(
+            baseURL: fixture.baseURL, credential: fixture.credential)
+
+        fixture.model.noteCurrentPrimaryInboundActivity(from: replaced)
+
+        XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
     func testForegroundHalfOpenPingFailureEntersReconnectBeforeHTTPProbe() async throws {
         let fixture = try fixture()
         defer { cleanup(fixture) }

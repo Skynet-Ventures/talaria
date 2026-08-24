@@ -860,10 +860,29 @@ public actor GatewayClient {
 
         let url = try auth.webSocketURL(credential: credential, ticket: ticket)
         let transport = GatewayTransport(url: url)
-        self.transport = transport
-        try await transport.connect()
 
+        // A supervised reconnect reuses this GatewayClient so its registered
+        // event handlers survive, but the socket itself must not. Replacing
+        // `self.transport` without closing the previous actor leaves the old
+        // receive loop (and TCP connection) alive indefinitely on iOS.
+        let previousTransport = self.transport
         eventsTask?.cancel()
+        eventsTask = nil
+        if let previousTransport {
+            await previousTransport.close()
+        }
+        self.transport = transport
+        do {
+            try await transport.connect()
+        } catch {
+            // A timed-out connect otherwise leaves a `.connecting` transport
+            // installed until the next retry. Publish an unambiguously closed
+            // client between attempts and retire its URLSession task.
+            await transport.close()
+            if self.transport === transport { self.transport = nil }
+            throw error
+        }
+
         eventsTask = Task {
             for await event in transport.events {
                 for handler in self.handlerSnapshot() {
