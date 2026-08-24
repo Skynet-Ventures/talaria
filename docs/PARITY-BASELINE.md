@@ -276,7 +276,12 @@ partial until the unchecked certification gates are recorded.
 - [ ] Finish mobile management for providers, models, profiles, tools, skills,
       MCP, plugins, messaging, learned-memory curation/import/export, auxiliary
       slots, and subagent depth. Routine per-job reasoning effort is implemented
-      but remains live-certification pending.
+      but remains live-certification pending. MCP per-server logs remain
+      fail-closed after the exact `e400e008` audit: `/api/logs` has no
+      authoritative profile/server identity or safe bounded/redacted row
+      contract, and Desktop's marker/substr filtering is not portable
+      authority. See `HERMES-CURRENT-AUDIT.md` for the upstream contract needed
+      before implementing a phone surface.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source
       discovery, explicit bounded/stale/failure state, and conditionally locked
       retained-body reads are implemented. Gateways returning `locked_root: nil`
