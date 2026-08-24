@@ -498,10 +498,7 @@ public struct ModelEffortSheet: View {
                 }
                 Spacer(minLength: 6)
                 if let price, !price.isEmpty {
-                    Text(price.compact)
-                        .font(theme.mono(9))
-                        .foregroundStyle(price.free ? theme.ok : theme.faint)
-                        .monospacedDigit()
+                    ModelPricePresentation(price: price, theme: theme, copy: copy)
                 }
                 if locked {
                     Text(copy.modelsProBadge(theme.id))
@@ -908,6 +905,36 @@ public struct ModelEffortSheet: View {
     }
 }
 
+/// Price and sale chrome are deliberately a vertical trailing group. A sale
+/// must add context without replacing the provider, effort, price, lock, or
+/// current-selection state already carried by the row.
+struct ModelPricePresentation: View {
+    let price: ModelPriceTag
+    let theme: ThemePack
+    let copy: CopyPack
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(price.compact)
+                .font(theme.mono(9))
+                .foregroundStyle(price.free ? theme.ok : theme.faint)
+                .monospacedDigit()
+            if let percent = price.boundedDiscountPercent {
+                Text(copy.modelsDiscountBadge(theme.id, percent: percent))
+                    .font(theme.mono(8.5, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.warn)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(theme.warn.opacity(0.1), in: Capsule())
+                    .accessibilityLabel(Text(
+                        copy.modelsDiscountAccessibility(theme.id, percent: percent)))
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
 // MARK: - Row chrome
 
 /// Floating card in soft, bordered terminal panel in control, ruled ledger line
@@ -1086,6 +1113,24 @@ public extension CopyPack {
         case .soft: "Pro"
         case .control: "PRO"
         case .ink: "sealed"
+        }
+    }
+
+    /// Compact visual sale marker. The fuller VoiceOver label below keeps a
+    /// percent glyph from being read as an ambiguous piece of model identity.
+    func modelsDiscountBadge(_ t: ThemeID, percent: Int) -> String {
+        switch t {
+        case .soft: "−\(percent)%"
+        case .control: "−\(percent)%"
+        case .ink: "−\(percent)%"
+        }
+    }
+
+    func modelsDiscountAccessibility(_ t: ThemeID, percent: Int) -> String {
+        switch t {
+        case .soft: "\(percent) percent off list price"
+        case .control: "\(percent) PERCENT OFF LIST PRICE"
+        case .ink: "\(percent) percent below the listed price"
         }
     }
 
