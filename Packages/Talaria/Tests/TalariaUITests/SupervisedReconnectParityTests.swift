@@ -160,7 +160,8 @@ final class SupervisedReconnectParityTests: XCTestCase {
         defer { cleanup(fixture) }
 
         XCTAssertTrue(fixture.model.isOffline)
-        fixture.model.noteCurrentPrimaryInboundActivity(from: fixture.client)
+        fixture.model.noteCurrentPrimaryInboundActivity(
+            from: fixture.client, transportIsCurrentAndReady: true)
 
         XCTAssertFalse(fixture.model.isOffline)
         XCTAssertEqual(fixture.registry.health[fixture.gateway.id]?.state, .connected)
@@ -173,7 +174,19 @@ final class SupervisedReconnectParityTests: XCTestCase {
         let replaced = GatewayClient(
             baseURL: fixture.baseURL, credential: fixture.credential)
 
-        fixture.model.noteCurrentPrimaryInboundActivity(from: replaced)
+        fixture.model.noteCurrentPrimaryInboundActivity(
+            from: replaced, transportIsCurrentAndReady: true)
+
+        XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
+    func testBufferedInboundTrafficFromNoncurrentTransportCannotClearOffline() throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+
+        fixture.model.noteCurrentPrimaryInboundActivity(
+            from: fixture.client, transportIsCurrentAndReady: false)
 
         XCTAssertTrue(fixture.model.isOffline)
     }

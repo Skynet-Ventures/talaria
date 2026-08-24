@@ -1,6 +1,11 @@
 import Foundation
 import TalariaKit
 
+private struct PrimaryGatewayEventDelivery: Sendable {
+    let event: GatewayEvent
+    let transportEpoch: UInt64
+}
+
 /// Failed-turn evidence can arrive twice: first on the live terminal frame,
 /// then again in `session.resume.inflight` when the socket died around that
 /// frame. Keep the evidence on one assistant row and only make it more
@@ -404,22 +409,29 @@ extension AppModel {
         // Events fan out of the client on its own actor; funnel them through
         // one AsyncStream so MainActor delivery preserves wire order (deltas
         // arrive in ~30 fps bursts and must append in order).
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
-        _ = await client.addEventHandler { continuation.yield($0) }
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: PrimaryGatewayEventDelivery.self)
+        _ = await client.addEpochEventHandler { event, transportEpoch in
+            continuation.yield(PrimaryGatewayEventDelivery(
+                event: event, transportEpoch: transportEpoch))
+        }
         guard isCurrentConnectionAttempt(authority), !Task.isCancelled else {
             continuation.finish()
             await disconnectCapturedClientIfUnowned(authority)
             throw CancellationError()
         }
         runtime.eventPump = Task { @MainActor [weak self] in
-            for await event in stream {
+            for await delivery in stream {
                 guard let self else { return }
-                // Event fan-out is installed on the primary GatewayClient and
-                // survives that client's supervised socket replacement. Any
-                // event delivered here is therefore stronger liveness proof
-                // than a stale offline flag published while iOS was suspended.
-                self.noteCurrentPrimaryInboundActivity(from: client)
-                self.handle(event: event)
+                // The client actor survives reconnect, so identity alone is
+                // insufficient: reject a buffered event from an old transport
+                // or one whose replacement dial has already failed.
+                let transportIsCurrentAndReady = await client.isCurrentReadyTransport(
+                    epoch: delivery.transportEpoch)
+                self.noteCurrentPrimaryInboundActivity(
+                    from: client,
+                    transportIsCurrentAndReady: transportIsCurrentAndReady)
+                self.handle(event: delivery.event)
             }
         }
 

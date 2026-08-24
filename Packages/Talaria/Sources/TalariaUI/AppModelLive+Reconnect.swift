@@ -265,8 +265,12 @@ extension AppModel {
     /// the exact current primary client. This is deliberately source-fenced:
     /// a late event from a replaced client or a secondary gateway can never
     /// make the primary banner healthy.
-    func noteCurrentPrimaryInboundActivity(from sourceClient: GatewayClient) {
-        guard mode == .live, client === sourceClient, isOffline else { return }
+    func noteCurrentPrimaryInboundActivity(
+        from sourceClient: GatewayClient,
+        transportIsCurrentAndReady: Bool
+    ) {
+        guard transportIsCurrentAndReady,
+              mode == .live, client === sourceClient, isOffline else { return }
         isOffline = false
         if let base = LiveRuntime.shared.baseURL {
             ConnectionRegistry.shared.noteState(.connected, forURL: base)

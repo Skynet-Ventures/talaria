@@ -693,6 +693,12 @@ public actor GatewayClient {
     /// Re-published stream of all events from the current transport.
     public private(set) var eventsTask: Task<Void, Never>?
     private var eventHandlers: [UUID: @Sendable (GatewayEvent) -> Void] = [:]
+    private var epochEventHandlers:
+        [UUID: @Sendable (GatewayEvent, UInt64) -> Void] = [:]
+    /// Monotonic identity for each installed transport attempt. A reconnect
+    /// deliberately reuses this client actor, so object identity alone cannot
+    /// distinguish buffered delivery from a superseded socket.
+    private var transportEpoch: UInt64 = 0
 
     public init(baseURL: URL, credential: GatewayCredential,
                 keychain: KeychainStore = KeychainStore()) {
@@ -739,14 +745,27 @@ public actor GatewayClient {
         return id
     }
 
+    /// Event delivery carrying the exact transport attempt that received it.
+    /// Consumers that publish link health must pair this with
+    /// `isCurrentReadyTransport(epoch:)` after crossing their actor boundary.
+    public func addEpochEventHandler(
+        _ handler: @escaping @Sendable (GatewayEvent, UInt64) -> Void
+    ) -> UUID {
+        let id = UUID()
+        epochEventHandlers[id] = handler
+        return id
+    }
+
     public func removeEventHandler(_ id: UUID) {
         eventHandlers.removeValue(forKey: id)
+        epochEventHandlers.removeValue(forKey: id)
     }
 
     /// Deterministic package-test seam for event/snapshot ordering. Production
     /// delivery still comes exclusively from the transport event task.
     func emitEventForTesting(_ event: GatewayEvent) {
         for handler in handlerSnapshot() { handler(event) }
+        for handler in epochHandlerSnapshot() { handler(event, transportEpoch) }
     }
 
     /// Install or clear the deterministic RPC seam used by package tests.
@@ -787,6 +806,19 @@ public actor GatewayClient {
             guard let transport else { return false }
             return await transport.state == .ready
         }
+    }
+
+    /// True only while `epoch` still names the installed ready transport.
+    /// This closes the reconnect race where an event already buffered by the
+    /// prior socket reaches a UI actor after the same GatewayClient has dialed
+    /// (or failed to dial) a replacement.
+    public func isCurrentReadyTransport(epoch: UInt64) async -> Bool {
+        guard epoch == transportEpoch else { return false }
+        if let foregroundReadinessForTesting {
+            return foregroundReadinessForTesting
+        }
+        guard let transport else { return false }
+        return await transport.state == .ready
     }
 
     /// Validate a socket immediately after iOS foregrounds the app. This is a
@@ -871,6 +903,8 @@ public actor GatewayClient {
         if let previousTransport {
             await previousTransport.close()
         }
+        transportEpoch &+= 1
+        let installedEpoch = transportEpoch
         self.transport = transport
         do {
             try await transport.connect()
@@ -888,12 +922,20 @@ public actor GatewayClient {
                 for handler in self.handlerSnapshot() {
                     handler(event)
                 }
+                for handler in self.epochHandlerSnapshot() {
+                    handler(event, installedEpoch)
+                }
             }
         }
     }
 
     private func handlerSnapshot() -> [@Sendable (GatewayEvent) -> Void] {
         Array(eventHandlers.values)
+    }
+
+    private func epochHandlerSnapshot()
+        -> [@Sendable (GatewayEvent, UInt64) -> Void] {
+        Array(epochEventHandlers.values)
     }
 
     public func disconnect() async {
