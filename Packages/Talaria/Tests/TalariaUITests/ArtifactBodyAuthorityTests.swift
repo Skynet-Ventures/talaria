@@ -762,6 +762,11 @@ final class ArtifactBodyAuthorityTests: XCTestCase {
         } catch let error as GatewayError {
             XCTAssertEqual(error.code, 413)
         }
+        let declaredStopped = await artifactBodyEventually {
+            ArtifactBodyBoundedURLProtocol.state().stopped
+        }
+        XCTAssertTrue(declaredStopped,
+                      "declared oversize cancellation must reach URLProtocol.stopLoading")
         let declared = ArtifactBodyBoundedURLProtocol.state()
         XCTAssertTrue(declared.stopped)
         XCTAssertEqual(declared.delivered, 0,
@@ -779,6 +784,11 @@ final class ArtifactBodyAuthorityTests: XCTestCase {
         } catch let error as GatewayError {
             XCTAssertEqual(error.code, 413)
         }
+        let cumulativeStopped = await artifactBodyEventually {
+            ArtifactBodyBoundedURLProtocol.state().stopped
+        }
+        XCTAssertTrue(cumulativeStopped,
+                      "cumulative oversize cancellation must reach URLProtocol.stopLoading")
         let cumulative = ArtifactBodyBoundedURLProtocol.state()
         XCTAssertTrue(cumulative.stopped)
         XCTAssertEqual(cumulative.delivered, 2,

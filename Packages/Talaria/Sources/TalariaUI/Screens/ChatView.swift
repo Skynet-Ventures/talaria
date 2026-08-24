@@ -96,6 +96,8 @@ public struct ChatView: View {
     @State private var followingLatest = true
     @State private var jumpToLatestToken = 0
     @State private var transcriptGeometry = TranscriptGeometryReadiness()
+    @State private var visibleTranscriptAnchorID: String?
+    @State private var pendingTranscriptPrepend: TranscriptPrependAnchor?
     @State private var transcriptFindPresented = false
     @State private var transcriptFindQuery = ""
     @State private var transcriptFindIndex = TranscriptFindIndex()
@@ -137,6 +139,9 @@ public struct ChatView: View {
     private var botColor: Color { theme.color(for: bot.hue) }
     private var chat: ChatState? { model.chats[botID] }
     private var messages: [ChatMessage] { chat?.messages ?? [] }
+    private var transcriptBackfill: TranscriptBackfillPresentation {
+        chat?.transcriptBackfill ?? TranscriptBackfillPresentation()
+    }
     /// The canonical transcript remains the source for runtime actions. This
     /// projection is presentation/find-only and may substitute one selected
     /// local response snapshot in place.
@@ -379,6 +384,7 @@ public struct ChatView: View {
         .onDisappear {
             cancelQueuedPromptEdit()
             closeTranscriptFind()
+            model.cancelTranscriptBackfillRead(botID: botID)
         }
     }
 
@@ -848,6 +854,11 @@ public struct ChatView: View {
                 transcriptGeometry.recordViewport(height: height)
                 refreshFollowingLatest()
             }
+            .onPreferenceChange(TranscriptRowFramesKey.self) { frames in
+                visibleTranscriptAnchorID = TranscriptPrependAnchorPolicy.anchor(
+                    in: frames,
+                    fallback: transcriptMessages.first.map { $0.id.uuidString })
+            }
             .task(id: initialTranscriptAnchorKey) {
                 guard TranscriptFindPolicy.allowsInitialAnchor(
                     isFindOwningScroll: transcriptFindOwnsScroll) else { return }
@@ -864,6 +875,11 @@ public struct ChatView: View {
                 followingLatest = true
             }
             .onChange(of: messages.count) {
+                // A raw backfill can insert hundreds of rows above the
+                // reader. Its own completion restores the visible row anchor;
+                // never let the ordinary live-tail follow rule race it down to
+                // the bottom first.
+                if pendingTranscriptPrepend != nil { return }
                 guard TranscriptFindPolicy.allowsAutomaticFollow(
                     hasSelection: transcriptFindOwnsScroll),
                     initialTranscriptAnchor.isSettled(for: botID), followingLatest else { return }
@@ -872,6 +888,28 @@ public struct ChatView: View {
                 )) {
                     proxy.scrollTo(transcriptAnchorID, anchor: .bottom)
                 }
+            }
+            .onChange(of: transcriptBackfill.prependGeneration) {
+                guard let pending = pendingTranscriptPrepend,
+                      pending.botID == botID,
+                      transcriptBackfill.prependGeneration > pending.prependGeneration,
+                      (pending.anchorID == ChatTranscriptLayoutPolicy.emptyAnchorID
+                        || transcriptMessages.contains(where: {
+                            $0.id.uuidString == pending.anchorID
+                        })) else {
+                    if pendingTranscriptPrepend?.botID == botID,
+                       transcriptBackfill.prependGeneration
+                            > (pendingTranscriptPrepend?.prependGeneration ?? .max) {
+                        pendingTranscriptPrepend = nil
+                    }
+                    return
+                }
+                // This is a reader-anchor restoration, not an instruction to
+                // follow the newest message. In particular it remains
+                // unanimated so a manual reader does not see a second motion
+                // after tapping the control at the top.
+                proxy.scrollTo(pending.anchorID, anchor: .top)
+                pendingTranscriptPrepend = nil
             }
             .onChange(of: chat?.isTyping ?? false) {
                 guard TranscriptFindPolicy.allowsAutomaticFollow(
@@ -905,6 +943,10 @@ public struct ChatView: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { _ in
+                        // If the user moves while a page is in flight, their
+                        // drag owns the reader. A late completion may update
+                        // rows but must not scroll them back to our old anchor.
+                        pendingTranscriptPrepend = nil
                         guard initialTranscriptAnchor.userDeparted(
                             botID: botID, messageCount: messages.count
                         ) else { return }
@@ -961,9 +1003,23 @@ public struct ChatView: View {
 
     @ViewBuilder private var transcriptRows: some View {
         let placements = responseAlternativeControlPlacements
+        if transcriptBackfill.status != .unavailable {
+            earlierTranscriptControl
+                .id("chat-show-earlier")
+        }
         ForEach(transcriptMessages) { message in
+            let messageID = message.id.uuidString
             messageRow(message)
-                .id(message.id.uuidString)
+                .id(messageID)
+                .background(
+                    GeometryReader { geo in
+                        let frame = geo.frame(in: .named("talaria.chat.transcript"))
+                        Color.clear.preference(
+                            key: TranscriptRowFramesKey.self,
+                            value: [TranscriptRowFrame(
+                                id: messageID, minY: frame.minY, maxY: frame.maxY)])
+                    }
+                )
             if let placement = placements.first(where: {
                 $0.botMessageID == message.id
             }) {
@@ -985,6 +1041,77 @@ public struct ChatView: View {
                         value: frame.minY)
                 }
             )
+    }
+
+    @ViewBuilder private var earlierTranscriptControl: some View {
+        VStack(spacing: 5) {
+            if transcriptBackfill.status == .exhausted
+                || transcriptBackfill.status == .limited {
+                Text(transcriptBackfill.controlTitle)
+                    .font(theme.id == .control ? theme.mono(10, weight: .semibold)
+                          : theme.body(12, weight: .semibold))
+                    .foregroundStyle(theme.faint)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .accessibilityLabel(Text(transcriptBackfill.controlTitle))
+            } else {
+                Button(action: requestEarlierTranscript) {
+                    HStack(spacing: 7) {
+                        if transcriptBackfill.status == .loading {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        Text(transcriptBackfill.controlTitle)
+                            .font(theme.id == .control ? theme.mono(11, weight: .semibold)
+                                  : theme.body(13, weight: .semibold))
+                    }
+                    .foregroundStyle(theme.id == .ink ? theme.ink : theme.accent)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!transcriptBackfill.canLoadEarlier)
+                .accessibilityLabel(Text(transcriptBackfill.controlTitle))
+                .accessibilityHint(Text(transcriptBackfill.controlDetail
+                    ?? "Load an older, bounded page of this conversation."))
+            }
+            if let detail = transcriptBackfill.controlDetail {
+                Text(detail)
+                    .font(theme.id == .control ? theme.mono(9) : theme.body(11))
+                    .foregroundStyle(transcriptBackfill.status == .failed ? theme.accent : theme.faint)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel(Text(detail))
+            }
+        }
+        .padding(.vertical, 4)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(theme.line.opacity(0.45)).frame(height: 1)
+        }
+    }
+
+    private func requestEarlierTranscript() {
+        guard transcriptBackfill.canLoadEarlier else { return }
+        let fallback = transcriptMessages.first.map { $0.id.uuidString }
+            ?? ChatTranscriptLayoutPolicy.emptyAnchorID
+        let anchorID = visibleTranscriptAnchorID ?? fallback
+        pendingTranscriptPrepend = TranscriptPrependAnchor(
+            botID: botID, anchorID: anchorID,
+            prependGeneration: transcriptBackfill.prependGeneration)
+        // The user intentionally asked for the top control. This interaction
+        // owns the reader just like a drag/find result; none of the initial or
+        // automatic live-tail anchors may pull it back to the bottom.
+        _ = initialTranscriptAnchor.userDeparted(botID: botID, messageCount: messages.count)
+        followingLatest = false
+        Task { @MainActor in
+            let accepted = await model.loadEarlierTranscript(botID: botID)
+            // Successful completions advance `prependGeneration`, which the
+            // ScrollViewReader handler above consumes. An error/cancellation
+            // has no row insertion and must release this pending anchor.
+            if !accepted { pendingTranscriptPrepend = nil }
+        }
     }
 
     @ViewBuilder private func assistantResponseControls(
@@ -2864,6 +2991,35 @@ struct TranscriptGeometryReadiness: Equatable {
     }
 }
 
+/// One rendered message row in the scroll-view coordinate space. The top
+/// control captures the first row that intersects the viewport before a raw
+/// page is prepended, then restores that row after layout. It intentionally
+/// uses the stable view/message id rather than a text snippet.
+struct TranscriptRowFrame: Equatable {
+    let id: String
+    let minY: CGFloat
+    let maxY: CGFloat
+}
+
+/// A small, testable policy for the only scroll movement a prepend is allowed
+/// to make. A partially visible bubble is preferred because it is exactly what
+/// a reader was looking at; if layout has not reported frames yet, the caller's
+/// existing first-row fallback remains stable across a prepend.
+enum TranscriptPrependAnchorPolicy {
+    static func anchor(in frames: [TranscriptRowFrame], fallback: String?) -> String? {
+        let ordered = frames.sorted { lhs, rhs in
+            lhs.minY == rhs.minY ? lhs.id < rhs.id : lhs.minY < rhs.minY
+        }
+        return ordered.first(where: { $0.maxY > 0 })?.id ?? fallback
+    }
+}
+
+struct TranscriptPrependAnchor: Equatable {
+    let botID: String
+    let anchorID: String
+    let prependGeneration: UInt
+}
+
 /// One initial-anchor attempt belongs to the bot and to the user-interaction
 /// generation in which it began. A drag settles that bot without completing
 /// the attempt, invalidating every delayed pass while leaving the user's
@@ -2915,6 +3071,14 @@ private struct TranscriptBottomInsetKey: PreferenceKey {
     static var defaultValue: CGFloat?
     static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
         value = nextValue() ?? value
+    }
+}
+
+private struct TranscriptRowFramesKey: PreferenceKey {
+    static var defaultValue: [TranscriptRowFrame] = []
+    static func reduce(value: inout [TranscriptRowFrame],
+                       nextValue: () -> [TranscriptRowFrame]) {
+        value.append(contentsOf: nextValue())
     }
 }
 
