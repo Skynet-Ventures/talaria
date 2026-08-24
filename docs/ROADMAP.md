@@ -381,12 +381,12 @@ resume cannot reconstruct them. The separate `session.branch` durable child
 contract is already implemented. Talaria now retains bounded current-ChatState
 alternatives only after an accepted receipt or exact effect proof, renders the
 selected local response inertly, and keeps the newest durable model context.
-Live gateway and physical-device certification remain open. Separate durable session-tree presentation is blocked
-until Hermes `session.list` returns normalized branch-parent lineage: its current
-JSON-RPC rows drop all parent/root fields, and an exact intermediate compression
-tip is not enough to keep the branch attached after that parent compresses again.
-Other remaining depth includes persistent multimodal parts, grouped generic tool runs,
-math/diagram presentation, per-message TTS, whole-turn timing, tours, and
+Live gateway and physical-device certification remain open. The open dependency
+stack now adds normalized durable session-tree presentation and bounded ordered
+multimodal/tool parts. Both consume explicit Hermes producer contracts rather
+than inferring identity or order; the corresponding upstream Hermes PRs must
+land before release certification. Other remaining depth includes math/diagram
+presentation, per-message TTS, whole-turn timing, tours, and
 transcript-wide activity. Bounded diff, ANSI terminal, web-search, generated-
 image lightbox/share, and explicit assistant image/audio/video/file cards are
 implemented on the open transcript stack. The explicit durable composer queue is now a separate,

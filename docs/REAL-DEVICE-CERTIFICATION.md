@@ -41,6 +41,8 @@ only as redacted hashes or suffixes.
 |---|---|---|---|---|
 | `DEV-THREAD-001` | Long transcript | NOT RUN | TODO | |
 | `DEV-TOOL-001` | Retained/live specialist tool transcripts | NOT RUN | TODO | |
+| `DEV-PARTS-001` | Ordered multimodal/tool transcript parts | NOT RUN | TODO | upstream producer required |
+| `DEV-LINEAGE-001` | Durable session lineage and compression | NOT RUN | TODO | upstream producer required |
 | `DEV-FIND-001` | Transcript find navigation and mutation | NOT RUN | TODO | |
 | `DEV-ALT-001` | Regenerate response alternatives N/M | NOT RUN | TODO | |
 | `DEV-MEDIA-001` | Generated image transcript cards | NOT RUN | TODO | |
@@ -97,6 +99,36 @@ only as redacted hashes or suffixes.
    mutation cannot publish stale specialist state, and Quiet/Advanced mode does
    not hide meaningful failures. Retain raw redacted event order, stored rows,
    screenshots, and source/session identifiers.
+
+### `DEV-PARTS-001` — ordered multimodal/tool transcript parts
+
+1. Against a gateway containing the reviewed ordered-parts producer, run one
+   logical turn with reasoning, prose, an exact tool call/result, an internal
+   continuation nudge, image/file evidence, and terminal prose. Retain the turn,
+   reconnect, and reopen it after app relaunch.
+2. Repeat with append, seal, and terminal replace frames; then inject clipped,
+   malformed, oversized, unknown-kind, duplicate-tool, cross-source, signed-URL,
+   inline-data, and local-path evidence.
+3. Pass only if live and retained views preserve the same source order and exact
+   tool identity, the terminal replacement never erases earlier commentary,
+   clipped/malformed replacements preserve prior evidence, legacy copy/find/media
+   projections stay compatible, references remain inert until an authorized
+   action, and a foreign gateway cannot publish. Retain redacted raw frames,
+   stored rows, screenshots, source/session ids, and the exact producer commit.
+
+### `DEV-LINEAGE-001` — durable session lineage and compression
+
+1. Against a gateway containing the reviewed normalized-lineage producer,
+   create a root, branch from an intermediate turn, compress the parent, branch
+   again, compress the rotated parent tip, and page the session list across the
+   lineage rows.
+2. Open every row from Talaria, switch gateways with colliding profile/session
+   titles, reconnect, relaunch, and repeat while one page is delayed.
+3. Pass only if the UI groups by durable root/parent identity without title or
+   recency inference, preserves branch attachment across repeated compression,
+   opens the exact source-qualified stored session, rejects stale/foreign pages,
+   and represents incomplete/saturated paging honestly. Retain normalized RPC
+   rows, screenshots, exact ids, gateway labels, and the producer commit.
 
 ### `DEV-FIND-001` — transcript find
 
