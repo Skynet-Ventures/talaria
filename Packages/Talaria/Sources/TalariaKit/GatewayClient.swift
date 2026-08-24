@@ -333,6 +333,10 @@ public struct LiveSession: Sendable {
     public var messages: [JSONValue]
     public var info: SessionInfo
     public var running: Bool
+    /// Epoch seconds for the current turn, when Hermes can prove it. This is
+    /// absent for idle and legacy resumes; consumers validate it against their
+    /// current clock before presentation.
+    public var turnStartedAtEpochSeconds: Double?
     /// Partial in-flight turn replayed after a reconnect.
     public var inflight: JSONValue?
     /// Typed retained-turn projection. `nil` covers absent/null and malformed
@@ -356,6 +360,8 @@ public struct LiveSession: Sendable {
         messages = v["messages"]?.arrayValue ?? []
         info = SessionInfo(v["info"])
         running = v["running"]?.boolValue ?? false
+        turnStartedAtEpochSeconds = TurnElapsedTimingPolicy.admittedEpochSeconds(
+            v["turn_started_at"]?.doubleValue)
         inflight = v["inflight"]
         retainedInflightAdmission = RetainedInflightTurnAdmission.admit(v["inflight"])
         pendingApproval = v["pending_approval"].flatMap {

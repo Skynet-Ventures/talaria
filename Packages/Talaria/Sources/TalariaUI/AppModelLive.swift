@@ -1008,6 +1008,7 @@ extension AppModel {
         // orphaned by the nil gap.
         let oldSessionID = chat.sessionID ?? runtime.reconnectParkedSessionIDs[botID]
         let oldStoredID = chat.storedSessionID
+        let priorTurnStartedAt = chat.turnStartedAt
         let oldRoute = gatewayRoute(for: botID) ?? stateRoute(for: botID)
         let newStoredID = live.storedSessionID.isEmpty ? nil : live.storedSessionID
         let durableID = newStoredID ?? chat.storedSessionID
@@ -1100,6 +1101,10 @@ extension AppModel {
 
         chat.sessionID = live.sessionID
         if let newStoredID { chat.storedSessionID = newStoredID }
+        adoptTurnTiming(
+            from: live, in: chat,
+            priorRuntimeSessionID: oldSessionID,
+            priorLocalStart: priorTurnStartedAt)
         if gatewayID == runtime.gatewayID {
             runtime.sessionToBot[live.sessionID] = botID
         } else if let gatewayID {
@@ -1892,6 +1897,8 @@ extension AppModel {
                 botID: botID, sessionID: event.sessionID,
                 sourceGatewayID: sourceGatewayID) {
                 let chat = chat(for: botID)
+                chat.beginTurnTiming(
+                    at: Date(), replacingExisting: !(chat.isRunning || chat.isTyping))
                 chat.isTyping = true
                 ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)] = nil
                 ChatRuntime.shared.dismissedFailures[ObjectIdentifier(chat)] = nil
@@ -2080,6 +2087,7 @@ extension AppModel {
                         Set(chat.messages[start...end].map(\.id))
                 }
             }
+            _ = settleTurnTiming(in: chat, botID: botID)
             chat.usage = payload.usage
             pruneApprovals(sessionID: event.sessionID, sourceGatewayID: sourceGatewayID)
             setWorking(botID, false)
@@ -2099,6 +2107,7 @@ extension AppModel {
         case .sessionInfo(let info):
             guard let botID else { return }
             let chat = chat(for: botID)
+            observeTurnTiming(from: info, in: chat)
             chat.yolo = info.yolo
             if chat.storedSessionID == nil, !info.storedSessionID.isEmpty {
                 chat.storedSessionID = info.storedSessionID
@@ -2126,7 +2135,9 @@ extension AppModel {
 
         case .errorEvent(let message):
             if let botID, !message.isEmpty {
-                chat(for: botID).messages.append(ChatMessage(author: .system, text: message))
+                let chat = chat(for: botID)
+                _ = settleTurnTiming(in: chat, botID: botID)
+                chat.messages.append(ChatMessage(author: .system, text: message))
                 setWorking(botID, false)
                 LiveActivityController.shared.endAllOperationalWork(botID: botID)
                 requestComposeQueueFlush()

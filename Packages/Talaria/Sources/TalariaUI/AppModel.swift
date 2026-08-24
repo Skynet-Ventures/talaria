@@ -26,13 +26,22 @@ public final class ChatState {
     /// Runtime session id (live mode).
     public var sessionID: String? {
         didSet {
-            if oldValue != sessionID { clearAssistantResponseAlternatives() }
+            if oldValue != sessionID {
+                clearAssistantResponseAlternatives()
+                // nil -> concrete is the normal first-submit bind and keeps
+                // its locally observed origin. Any established binding moving
+                // elsewhere must wait for new live/resume timing evidence.
+                if oldValue != nil { turnStartedAt = nil }
+            }
         }
     }
     /// Durable session key for resume-after-reconnect.
     public var storedSessionID: String? {
         didSet {
-            if oldValue != storedSessionID { clearAssistantResponseAlternatives() }
+            if oldValue != storedSessionID {
+                clearAssistantResponseAlternatives()
+                if oldValue != nil { turnStartedAt = nil }
+            }
         }
     }
     public var usage: Usage?
@@ -41,6 +50,10 @@ public final class ChatState {
     public var reasoningEffort: String = ""
     /// A turn is in flight — the composer's send button becomes stop.
     public var isRunning: Bool = false
+    /// Current-process live timing evidence. It is never hydrated from a
+    /// historical transcript row; a current Hermes resume may seed it from
+    /// `turn_started_at` after bounded clock validation.
+    public var turnStartedAt: Date?
     /// A failed-turn retry owns this chat's composer, including while its
     /// authoritative preflight is suspended before any turn is running.
     public var hasUnresolvedRetry: Bool = false

@@ -1168,6 +1168,8 @@ extension AppModel {
             noteQueuedPromptStart(botID: botID, sessionID: event.sessionID)
             drainStartedQueuedPrompt(botID: botID, sessionID: event.sessionID)
             clearWatchdog(botID)
+            chat.beginTurnTiming(
+                at: Date(), replacingExisting: !(chat.isRunning || chat.isTyping))
             chat.isRunning = true
             ChatRuntime.shared.turnFloor[botID] = chat.messages.indices.last(where: {
                 chat.messages[$0].author == .bot && chat.messages[$0].isStreaming
@@ -1197,8 +1199,10 @@ extension AppModel {
             // submit and message.start must not pull the stop control out from
             // under a turn that is visibly streaming.
             if info.running {
+                observeTurnTiming(from: info, in: chat)
                 chat.isRunning = true
             } else if chat.messages.last?.isStreaming != true {
+                observeTurnTiming(from: info, in: chat)
                 chat.isRunning = false
             }
 
@@ -1790,6 +1794,9 @@ extension AppModel {
                                     routeAvailable: routeAvailable)
                 } else {
                     ChatRuntime.shared.turnFloor[botID] = chat.messages.count + 1
+                    if routeAvailable {
+                        chat.beginTurnTiming(at: Date(), replacingExisting: true)
+                    }
                     chat.isRunning = routeAvailable
                     send(text: prompt, to: botID)
                     if routeAvailable { startWatchdog(botID) }
@@ -2451,6 +2458,9 @@ extension AppModel {
                                  optimisticID: optimistic.id)
                 } else {
                     ChatRuntime.shared.turnFloor[botID] = chat.messages.count
+                    if routeAvailable {
+                        chat.beginTurnTiming(at: Date(), replacingExisting: true)
+                    }
                     chat.isRunning = routeAvailable
                     liveSend(text: text, botID: botID, chat: chat,
                              optimisticID: optimistic.id)
@@ -2563,8 +2573,10 @@ extension AppModel {
     private func startDemoTurn(botID: String, chat: ChatState) {
         let runtime = ChatRuntime.shared
         runtime.demoTurns[botID]?.cancel()
+        runtime.turnFloor[botID] = chat.messages.count
         chat.isTyping = true
         chat.isRunning = true
+        chat.beginTurnTiming(at: Date(), replacingExisting: true)
         runtime.demoTurns[botID] = Task { @MainActor in
             try? await Task.sleep(for: .seconds(Double.random(in: 0.9...1.8)))
             guard !Task.isCancelled else { return }
@@ -2574,6 +2586,7 @@ extension AppModel {
                 ?? DemoData.cannedReplies["default"]
                 ?? "On it. I’ll report back here when it’s done."
             chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(), text: reply))
+            self.settleTurnTiming(in: chat, botID: botID)
             ChatRuntime.shared.demoTurns[botID] = nil
         }
     }
@@ -2587,7 +2600,10 @@ extension AppModel {
             try? await Task.sleep(for: .seconds(45))
             guard !Task.isCancelled, let self else { return }
             let chat = self.chat(for: botID)
-            if chat.messages.last?.isStreaming != true { chat.isRunning = false }
+            if chat.messages.last?.isStreaming != true {
+                chat.isRunning = false
+                chat.clearTurnTiming()
+            }
             ChatRuntime.shared.submitWatchdogs[botID] = nil
             if ChatRuntime.shared.failedRetryRows[botID]?.phase == .submitting {
                 self.scheduleRetainedMutationReconciliation(botID: botID)
@@ -2765,6 +2781,7 @@ extension AppModel {
         lease.phase = .submitting
         ChatRuntime.shared.failedRetryRows[botID] = lease
         if let chat = chats[botID], ObjectIdentifier(chat) == request.chatID {
+            chat.beginTurnTiming(at: Date(), replacingExisting: true)
             chat.isRunning = true
         }
         startWatchdog(botID)
@@ -2832,6 +2849,7 @@ extension AppModel {
         ChatRuntime.shared.failedRetryRows[botID] = nil
         chat.hasUnresolvedRetry = false
         chat.isRunning = false
+        chat.clearTurnTiming()
         clearWatchdog(botID)
     }
 
@@ -2841,6 +2859,7 @@ extension AppModel {
         ChatRuntime.shared.failedRetryRows[botID] = nil
         chat.hasUnresolvedRetry = false
         chat.isRunning = false
+        chat.clearTurnTiming()
         clearWatchdog(botID)
     }
 
@@ -2918,6 +2937,7 @@ extension AppModel {
                             .filter { $0.author == .user }.map(\.id)),
                     previousAssistantRun: plan.previousAssistantRun)
         }
+        chat.beginTurnTiming(at: Date(), replacingExisting: true)
         chat.isRunning = true
         let lease = TranscriptActionLease(
             id: operationID, botID: botID, sessionID: sid, storedID: storedID,
@@ -3527,6 +3547,7 @@ extension AppModel {
         guard mode == .live else {
             chat.isRunning = false
             chat.isTyping = false
+            chat.clearTurnTiming()
             clearWatchdog(botID)
             finishRunningTools(in: chat, interrupted: true)
             chat.messages.append(ChatMessage(author: .system, text: note))
@@ -3785,6 +3806,7 @@ extension AppModel {
         clearWatchdog(cleanupLease.botID)
         chat.isRunning = false
         chat.isTyping = false
+        chat.clearTurnTiming()
         finishRunningTools(in: chat, interrupted: true)
         chat.messages.append(ChatMessage(author: .system, text: note))
     }

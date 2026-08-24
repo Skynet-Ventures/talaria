@@ -498,6 +498,9 @@ public struct SessionInfo: Sendable, Equatable {
     public var approvalMode: String
     public var cwd: String
     public var running: Bool
+    /// Epoch seconds for the active turn. Nil means idle, omitted, or
+    /// malformed; it is never synthesized from unrelated session activity.
+    public var turnStartedAtEpochSeconds: Double?
     public var title: String
     public var storedSessionID: String
     public var desktopContract: Int
@@ -512,6 +515,8 @@ public struct SessionInfo: Sendable, Equatable {
         approvalMode = v?["approval_mode"]?.stringValue ?? "manual"
         cwd = v?["cwd"]?.stringValue ?? ""
         running = v?["running"]?.boolValue ?? false
+        turnStartedAtEpochSeconds = TurnElapsedTimingPolicy.admittedEpochSeconds(
+            v?["turn_started_at"]?.doubleValue)
         title = v?["title"]?.stringValue ?? ""
         storedSessionID = v?["stored_session_id"]?.stringValue ?? ""
         desktopContract = v?["desktop_contract"]?.intValue ?? 0
