@@ -1,0 +1,681 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
+  "targetCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "scopePaths": [
+    "agent/agent_runtime_helpers.py",
+    "agent/background_review.py",
+    "agent/codex_runtime.py",
+    "agent/context_compressor.py",
+    "agent/conversation_compression.py",
+    "agent/conversation_loop.py",
+    "agent/error_classifier.py",
+    "agent/error_surface.py",
+    "agent/gemini_native_adapter.py",
+    "agent/interrupt_compat.py",
+    "agent/message_sanitization.py",
+    "agent/native_compaction.py",
+    "agent/review_engine.py",
+    "agent/subagent_lifecycle.py",
+    "agent/tool_dispatch_helpers.py",
+    "agent/tool_executor.py",
+    "agent/turn_context.py",
+    "agent/turn_finalizer.py",
+    "cron/jobs.py",
+    "cron/scheduler.py",
+    "cron/scheduler_provider.py",
+    "run_agent.py",
+    "tools/code_execution_tool.py",
+    "tools/cronjob_tools.py",
+    "tools/delegate_tool.py",
+    "tools/interrupt.py",
+    "tools/mcp_tool.py",
+    "tools/process_registry.py",
+    "tools/registry.py",
+    "tools/terminal_tool.py"
+  ],
+  "scopeCorrection": {
+    "reportedPathCount": 31,
+    "actualPathCount": 30,
+    "reason": "The original arithmetic reported 31, but the manifest is 18 agent paths + 3 cron paths + 8 tool paths + run_agent.py = 30. No path was broadened to preserve the exact 112-commit audit."
+  },
+  "scopedCommitCount": 112,
+  "entryCount": 94,
+  "entriesFile": "hermes-core-runtime-delta-40643cba-057dcdf.tsv",
+  "clusterCounts": {
+    "R09-merge-parent-integration": 13,
+    "R07-provider-and-host-runtime": 8,
+    "R05-cron-execution-and-retirement": 18,
+    "R02-review-and-subagent-lifecycle": 10,
+    "R01-compaction-and-transcript-continuity": 14,
+    "R04-failure-retry-and-interrupt": 7,
+    "R06-terminal-process-and-host-lifecycle": 10,
+    "R03-tool-turn-and-provider-settlement": 14
+  },
+  "classificationCounts": {
+    "merge-integration": 13,
+    "gateway-host-runtime": 22,
+    "portable-mobile-runtime": 53,
+    "test-only": 2,
+    "desktop-host-runtime": 1,
+    "upstream-contract": 3
+  },
+  "dispositionCounts": {
+    "merge-integration": 13,
+    "host-only": 21,
+    "superseded": 1,
+    "covered-by-open-slice": 53,
+    "test-only": 2,
+    "desktop-only": 1,
+    "upstream-contract-blocked": 3
+  },
+  "historyPathUnion": [
+    "agent/agent_runtime_helpers.py",
+    "agent/background_review.py",
+    "agent/codex_runtime.py",
+    "agent/context_compressor.py",
+    "agent/conversation_compression.py",
+    "agent/conversation_loop.py",
+    "agent/error_classifier.py",
+    "agent/error_surface.py",
+    "agent/gemini_native_adapter.py",
+    "agent/interrupt_compat.py",
+    "agent/message_sanitization.py",
+    "agent/native_compaction.py",
+    "agent/review_engine.py",
+    "agent/subagent_lifecycle.py",
+    "agent/tool_dispatch_helpers.py",
+    "agent/tool_executor.py",
+    "agent/turn_context.py",
+    "agent/turn_finalizer.py",
+    "cron/jobs.py",
+    "cron/scheduler.py",
+    "cron/scheduler_provider.py",
+    "run_agent.py",
+    "tools/code_execution_tool.py",
+    "tools/cronjob_tools.py",
+    "tools/delegate_tool.py",
+    "tools/interrupt.py",
+    "tools/mcp_tool.py",
+    "tools/process_registry.py",
+    "tools/registry.py",
+    "tools/terminal_tool.py"
+  ],
+  "finalNetFiles": [
+    {
+      "path": "agent/agent_runtime_helpers.py",
+      "baseSha256": "6a3d34eef57590c639df0efd744c375cbe4962d5fdb6e3aa851d3c95a2a27a6a",
+      "targetSha256": "8626a5d68688194bb68f6a591beac9050df7ef167d745469627cb25eece4db1d"
+    },
+    {
+      "path": "agent/background_review.py",
+      "baseSha256": "18cd46ef8649771447e6afd1dd396cc078195a50b9c4b3880bf4632946c2556c",
+      "targetSha256": "46f406b069471a3e7523d48dacfafcd658849e8a8af240e45e18682a938a8810"
+    },
+    {
+      "path": "agent/codex_runtime.py",
+      "baseSha256": "cae3abcfd43a833f1ee469270b107ce0149552e8fddfae304a601596fa8dbf79",
+      "targetSha256": "7e62005b1c959f11af982a1de69691f80b0c30e71d83242b5e4b57c1da73fc23"
+    },
+    {
+      "path": "agent/context_compressor.py",
+      "baseSha256": "4f2057709866ba72bc73e18b8697fc3b8c421df26d81ad8fc64e72336425e476",
+      "targetSha256": "b9cce6d3a8ec7b441a524a1bfc15d6ef3b7e87bc444207361364913bad9e30b8"
+    },
+    {
+      "path": "agent/conversation_compression.py",
+      "baseSha256": "1c75c79d6a940e4f88affa8a6d25f0bc7976a42d9e542aac390511bc7b255449",
+      "targetSha256": "fe2382c8196ecf3e8f9b4414629a8448711b2434aa46c2946ab74c704fed9a07"
+    },
+    {
+      "path": "agent/conversation_loop.py",
+      "baseSha256": "626fe188208dbd790712e4470f6933d8a21f010644bcec9a165999aefd150536",
+      "targetSha256": "fdebc30e22227ac5d368bba1b4cac35e61ca39cf50c8af0d116dcaecf7903a67"
+    },
+    {
+      "path": "agent/error_classifier.py",
+      "baseSha256": "7bfb6f2ce2e09bf1bcc2ee200a4fd325832f073f35cd9753c3773d3ff2ca579a",
+      "targetSha256": "18abd29a01665035abde3dd6ac6d9ca7950f5acf1c9d36065bdda0beb38e3e02"
+    },
+    {
+      "path": "agent/error_surface.py",
+      "baseSha256": "absent",
+      "targetSha256": "0e9fba42967815696182cc17fe057eeb859c7f008587a00659ef1eab4b95931b"
+    },
+    {
+      "path": "agent/gemini_native_adapter.py",
+      "baseSha256": "1d43429e2b5595c74056624f4ceb933536636a8249981f93abe2f2e3cd517887",
+      "targetSha256": "5d4f4c8c30135d42e620b4b3612ad92c6c250e0566bb4b7c7dd848d772772428"
+    },
+    {
+      "path": "agent/interrupt_compat.py",
+      "baseSha256": "a002d94b11599fd0af4247311f3e5ff92ec14b642fcdd90cfebf576693cdd314",
+      "targetSha256": "f10ecfe97b6be6d150c3e41d5d377a9ca845e74d454240f2d6506f753dc23441"
+    },
+    {
+      "path": "agent/message_sanitization.py",
+      "baseSha256": "36f19be833ee0fbd290bed541c64ed95b7d6e6b34f0fa8a88078e8656c640aa1",
+      "targetSha256": "477b947e8c032450cb8e504ca15106d979bc4b88ca3aa3f17a5b525f6dddacf0"
+    },
+    {
+      "path": "agent/native_compaction.py",
+      "baseSha256": "2462972e81502c47c93da6c71017999967ff496e57227a356647a1e052b7f46f",
+      "targetSha256": "9f4ed100f6e9a381537bf559289ddd56275b903c9cacda2b66a655d77797fce0"
+    },
+    {
+      "path": "agent/review_engine.py",
+      "baseSha256": "absent",
+      "targetSha256": "3210f315ec115c8f12ba2c8d48ab8b5b8b12a472ed67dec73523a5dee96e1bcd"
+    },
+    {
+      "path": "agent/subagent_lifecycle.py",
+      "baseSha256": "d0c657d6bf6cfe18d23d97d85e1fea9b79ade79a4a63a6dd8acf58a6e22590f0",
+      "targetSha256": "2f7068fc7523ff9f025d883abc8a8817a275803fa70774da3f5514271a1625a1"
+    },
+    {
+      "path": "agent/tool_dispatch_helpers.py",
+      "baseSha256": "5745840851e82e4277a85d4987f9c879978b7abe2f50e9b15f9aaf8139fcb6b0",
+      "targetSha256": "8514bb388f781453d2ed2405b1500dc1946396fcfb585ced5f36f761714cfc31"
+    },
+    {
+      "path": "agent/tool_executor.py",
+      "baseSha256": "f22b01a501e7c89347db73f997890cbf04a376b3686caf5ea4124ee87881a80e",
+      "targetSha256": "dccf0a72d9d82659fec958269dd26e8136962b0eadd7aa7cb28c7e4bc7efc6b7"
+    },
+    {
+      "path": "agent/turn_context.py",
+      "baseSha256": "fbaa02f8b569c866c044514f700c463af5391e43d92edf92f43ac05c57698b36",
+      "targetSha256": "8afeaf98642fa26e677c0ebb3ca98421342204de53d85ab9434e0749df29bdc1"
+    },
+    {
+      "path": "agent/turn_finalizer.py",
+      "baseSha256": "8c6157b55abf936d6f413c3722c919e2a8a0f02439b3c99ba13f6b22063cab7f",
+      "targetSha256": "6d1c2b29be07ea4b7570add814cc85c3171211259eef2a60b07452e9cfe3a4bd"
+    },
+    {
+      "path": "cron/jobs.py",
+      "baseSha256": "edf2469d61286ba7ec13ffabddfaef2a9b5e7f51b2ac08c3494eb5ea4aa7177b",
+      "targetSha256": "dd5c7c601e23e5058e93d824b17ff426ed2cc5113c20d431ea4937274be59923"
+    },
+    {
+      "path": "cron/scheduler.py",
+      "baseSha256": "b0b897e8fc9768e06619a61859481daed0e244a32ae5700e7dffffc914f71804",
+      "targetSha256": "a245f7513370c90775bed565fe9bbe9c0627605a232c77087ee4fba163f24299"
+    },
+    {
+      "path": "cron/scheduler_provider.py",
+      "baseSha256": "315a9234621b2dafb87e2208e9426e95f2948d7bc4077e1f210bf25297de7d07",
+      "targetSha256": "5950abcbcfac1d807019eb54e4a5f041d4b8080cb108ec6b84c5817cd41fbe6b"
+    },
+    {
+      "path": "run_agent.py",
+      "baseSha256": "8a47a0719421f31e6c864da5873e4ddcdf2227ad6e9ef711bc89acd567c1e8db",
+      "targetSha256": "7e4ae8542cdf9f9a47c46dfeb7660150bbbf26946fde02945420725bb1e0b6bc"
+    },
+    {
+      "path": "tools/code_execution_tool.py",
+      "baseSha256": "19296dd4bc1fdff513a7380493d1d1ceaac66bfb86a9efd9d35f3c5540846eca",
+      "targetSha256": "0625ac1af73634b365863b0ef56b289e8ded5e3492764ff93faba2f0bc9fd590"
+    },
+    {
+      "path": "tools/cronjob_tools.py",
+      "baseSha256": "5784399eda975a8d9b74d6e2a0255ebfe1d6b047635c2067553b22d52eaf4389",
+      "targetSha256": "0394d9f7779c8d5394b4a4b809f6e74390ca2f7a90c10b5f052cfee5b00feadd"
+    },
+    {
+      "path": "tools/delegate_tool.py",
+      "baseSha256": "9559ddd8d407cf8d321b8751c714a9f221dd8bd7f09cd016274c5b830940f385",
+      "targetSha256": "d2086d1ae04b006a3956c5e190b47107f3e4e28730d2cdb3df086beeea25fca3"
+    },
+    {
+      "path": "tools/interrupt.py",
+      "baseSha256": "32baefbf01cf4e33ecf7d3659c79dbb57f57da9f1434b79179a78657d0817db8",
+      "targetSha256": "22a5ffc76bbd93dc09b58e141f61f80ec74a29237c9a77066a430ba3cb526f36"
+    },
+    {
+      "path": "tools/mcp_tool.py",
+      "baseSha256": "1ed7ba9edd353ff6c1351efd8d766bf814cb1e6505926c01d50ef029008e04f8",
+      "targetSha256": "4d5e32ab330b3ff80062c639d66de53467e39acf41d2aaac9c4524494732f327"
+    },
+    {
+      "path": "tools/process_registry.py",
+      "baseSha256": "5eace294ba298a08ff2a5e0503a75720f5eb2bf9c3117e2588746f207ab915a9",
+      "targetSha256": "66b93eff6024b943b75a2afbfd893944b362af16ca73525f71f46d2d52e8d0c3"
+    },
+    {
+      "path": "tools/registry.py",
+      "baseSha256": "b45e8c80fafe7101909248ef53a5cc87a3337c2dc1e605a45c95bc054e2b4fe2",
+      "targetSha256": "f95d011cae75f0426dd77cb1e25df6bebb61a067d795312df297cb877dd616f5"
+    },
+    {
+      "path": "tools/terminal_tool.py",
+      "baseSha256": "59a0f637caec97c0a87aed5c667267c537d8747dcab91b408850e34c9eeba64a",
+      "targetSha256": "fcd8b0d41b977a779d197787f5f75ef89b77231faf620127ba7f121482de0349"
+    }
+  ],
+  "crossReferenceHeads": {
+    "authority": {
+      "ledgerFile": "parity/hermes-authority-delta-40643cba-057dcdf.tsv",
+      "head": "879078e3ef54d1af2d6e0208105c0cf93c71979c"
+    },
+    "client-wire": {
+      "ledgerFile": "parity/hermes-client-wire-delta-40643cba-057dcdf.tsv",
+      "head": "69d066bd3c213b8de69fa78735f20327f05f7123"
+    }
+  },
+  "crossReferenceCounts": {
+    "authority": 7,
+    "client-wire": 11
+  },
+  "crossReferences": [
+    {
+      "commit": "0404020f7b944398db529a0d09726a0e5f3c06a4",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/background_review.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/conversation_loop.py",
+        "agent/error_classifier.py",
+        "agent/error_surface.py",
+        "agent/native_compaction.py",
+        "agent/tool_executor.py",
+        "agent/turn_context.py",
+        "cron/jobs.py",
+        "cron/scheduler.py",
+        "run_agent.py",
+        "tools/cronjob_tools.py",
+        "tools/registry.py",
+        "tools/terminal_tool.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C01-canonical-routing",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr85-crossref"
+    },
+    {
+      "commit": "052513f65b6db0b6328dfe8d2c7efb21849fdc3f",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/codex_runtime.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/conversation_loop.py",
+        "agent/tool_dispatch_helpers.py",
+        "agent/tool_executor.py",
+        "agent/turn_context.py",
+        "cron/scheduler.py",
+        "run_agent.py",
+        "tools/cronjob_tools.py",
+        "tools/mcp_tool.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C01-canonical-routing",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr85-crossref"
+    },
+    {
+      "commit": "12395e57b4a3e7fa3610408c043011ec7ba2f8ad",
+      "paths": [
+        "agent/review_engine.py",
+        "tools/delegate_tool.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W07-approval-review",
+      "classification": "portable-mobile-runtime",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "1a95d0d58e59669f8dc1b0b955e372411f6be410",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/background_review.py",
+        "agent/codex_runtime.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/conversation_loop.py",
+        "agent/error_classifier.py",
+        "agent/gemini_native_adapter.py",
+        "agent/interrupt_compat.py",
+        "agent/message_sanitization.py",
+        "agent/review_engine.py",
+        "agent/subagent_lifecycle.py",
+        "agent/tool_dispatch_helpers.py",
+        "agent/tool_executor.py",
+        "agent/turn_context.py",
+        "agent/turn_finalizer.py",
+        "cron/jobs.py",
+        "cron/scheduler.py",
+        "cron/scheduler_provider.py",
+        "run_agent.py",
+        "tools/code_execution_tool.py",
+        "tools/delegate_tool.py",
+        "tools/interrupt.py",
+        "tools/process_registry.py",
+        "tools/terminal_tool.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "334bcbac93b044d29da88507af4ee8d6415d5c2b",
+      "paths": [
+        "agent/conversation_loop.py",
+        "agent/error_surface.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C08-failed-turn-diagnostics",
+      "classification": "desktop-host-runtime",
+      "disposition": "covered-by-pr85-crossref"
+    },
+    {
+      "commit": "3e5e4c5d20006e0f29f5389224ee0265e444dd3f",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/context_compressor.py",
+        "agent/turn_context.py",
+        "run_agent.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "portable-mobile-runtime",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "3f075d41dd593191b4bcf11fb608b72d698c3d3e",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/codex_runtime.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/conversation_loop.py",
+        "agent/error_classifier.py",
+        "agent/message_sanitization.py",
+        "agent/tool_dispatch_helpers.py",
+        "agent/tool_executor.py",
+        "agent/turn_context.py",
+        "agent/turn_finalizer.py",
+        "cron/jobs.py",
+        "cron/scheduler.py",
+        "cron/scheduler_provider.py",
+        "run_agent.py",
+        "tools/cronjob_tools.py",
+        "tools/delegate_tool.py",
+        "tools/process_registry.py",
+        "tools/terminal_tool.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "723dbda0414ce2d8fdc86283b76302537d91b724",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/tool_executor.py",
+        "run_agent.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C01-canonical-routing",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr85-crossref"
+    },
+    {
+      "commit": "7ca19874593becb81aa742aae5800eac8c9088d2",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/conversation_loop.py",
+        "agent/gemini_native_adapter.py",
+        "agent/tool_executor.py",
+        "agent/turn_context.py",
+        "agent/turn_finalizer.py",
+        "run_agent.py",
+        "tools/mcp_tool.py",
+        "tools/terminal_tool.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "98f6fc549a338b3903b6e86e31b8b0210671b991",
+      "paths": [
+        "agent/error_surface.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C08-failed-turn-diagnostics",
+      "classification": "desktop-host-runtime",
+      "disposition": "covered-by-pr85-crossref"
+    },
+    {
+      "commit": "a2da0ab797edf5e7ca7d3f64591facbbc37ec7f2",
+      "paths": [
+        "cron/scheduler.py",
+        "tools/cronjob_tools.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C02-a2a-cron",
+      "classification": "portable-mobile-runtime",
+      "disposition": "covered-by-pr85-crossref"
+    },
+    {
+      "commit": "a5b326a471d2e5cdf6741fbfd0913c85f6866aaa",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/conversation_loop.py",
+        "agent/error_classifier.py",
+        "agent/error_surface.py",
+        "agent/tool_executor.py",
+        "agent/turn_context.py",
+        "cron/scheduler.py",
+        "run_agent.py",
+        "tools/cronjob_tools.py",
+        "tools/registry.py",
+        "tools/terminal_tool.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "abf87e7248b0218a56fb7f05be8379c7d19dfa7f",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/background_review.py",
+        "agent/codex_runtime.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/conversation_loop.py",
+        "agent/error_classifier.py",
+        "agent/gemini_native_adapter.py",
+        "agent/tool_dispatch_helpers.py",
+        "agent/tool_executor.py",
+        "agent/turn_context.py",
+        "agent/turn_finalizer.py",
+        "cron/jobs.py",
+        "cron/scheduler.py",
+        "cron/scheduler_provider.py",
+        "run_agent.py",
+        "tools/code_execution_tool.py",
+        "tools/cronjob_tools.py",
+        "tools/delegate_tool.py",
+        "tools/mcp_tool.py",
+        "tools/process_registry.py",
+        "tools/registry.py",
+        "tools/terminal_tool.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "d524cc9a16e13be42762984d21c1e4d19fbce24e",
+      "paths": [
+        "tools/registry.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W02-browser-controller",
+      "classification": "desktop-only",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "d65b7d0760235210f5cf29c0eaaf98fe10078546",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/context_compressor.py",
+        "agent/conversation_compression.py",
+        "agent/turn_context.py",
+        "cron/scheduler.py",
+        "run_agent.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "e26d91dc11ea32f2f1af2c9778d424172f834431",
+      "paths": [
+        "agent/tool_executor.py",
+        "agent/turn_context.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C02-a2a-cron",
+      "classification": "portable-mobile-runtime",
+      "disposition": "covered-by-pr85-crossref"
+    },
+    {
+      "commit": "ec5e369fe68f4abb3188767c751d6166d2139f0a",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/context_compressor.py",
+        "agent/turn_context.py",
+        "cron/jobs.py",
+        "cron/scheduler.py",
+        "run_agent.py",
+        "tools/cronjob_tools.py",
+        "tools/process_registry.py",
+        "tools/terminal_tool.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    },
+    {
+      "commit": "fcea2175e23fdeb95f7e615f0cc7d6e5f3f485b0",
+      "paths": [
+        "agent/agent_runtime_helpers.py",
+        "agent/context_compressor.py",
+        "agent/turn_context.py",
+        "run_agent.py",
+        "tools/cronjob_tools.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "merge-integration",
+      "disposition": "covered-by-pr90-crossref"
+    }
+  ],
+  "openTalariaSlices": [
+    {
+      "id": "rich-transcript-hydration",
+      "branch": "codex/rich-transcript-hydration",
+      "head": "d5bad705f1c19d716eea4abb8de1ba4206659dde",
+      "coverage": [
+        "R01-compaction-and-transcript-continuity"
+      ]
+    },
+    {
+      "id": "rich-transcript-structured-output",
+      "branch": "codex/rich-transcript-structured-output",
+      "head": "fdee839fdc1fda8a4a8233ff5e459795d09752b0",
+      "coverage": [
+        "R03-tool-turn-and-provider-settlement"
+      ]
+    },
+    {
+      "id": "subagent-live-presentation",
+      "branch": "codex/subagent-live-presentation",
+      "head": "07e3c68c6d2010edb00fd63414b31c878af2b8d2",
+      "coverage": [
+        "R02-review-and-subagent-lifecycle"
+      ]
+    },
+    {
+      "id": "error-surface-v2",
+      "branch": "codex/current-hermes-error-surface-v2",
+      "head": "928205afd3e5f9a708f462a55b2613ee6633f3ae",
+      "coverage": [
+        "R04-failure-retry-and-interrupt"
+      ]
+    },
+    {
+      "id": "cron-push-isolation",
+      "branch": "codex/current-hermes-cron-push-isolation",
+      "head": "28e9f713e4aa46fc78fbaa1ef19abf0892ff3c8e",
+      "coverage": [
+        "R05-cron-execution-and-retirement"
+      ]
+    },
+    {
+      "id": "mobile-gateway-pty",
+      "branch": "codex/mobile-gateway-pty",
+      "head": "c7f64a6462d7e2c19a6714eca7d0fe8c5de4f699",
+      "coverage": [
+        "R06-terminal-process-and-host-lifecycle"
+      ]
+    }
+  ],
+  "sourceAssertions": [
+    {
+      "path": "cron/jobs.py",
+      "contains": "def _write_missed_oneshot_diagnostic",
+      "description": "The target defines only a best-effort missed-one-shot output diagnostic."
+    },
+    {
+      "path": "cron/jobs.py",
+      "contains": "save_job_output(job.get(\"id\", \"\"), text)",
+      "description": "The diagnostic is stored as job output rather than emitted as a typed gateway retirement event."
+    },
+    {
+      "path": "cron/jobs.py",
+      "contains": "raw_jobs.remove(rj)",
+      "description": "The due scan removes the retired job record after writing the best-effort diagnostic."
+    },
+    {
+      "path": "cron/scheduler_provider.py",
+      "contains": "outside the %ss one-shot grace",
+      "description": "The provider misfire path logs and skips the same out-of-grace one-shot without a mobile contract."
+    }
+  ]
+}
