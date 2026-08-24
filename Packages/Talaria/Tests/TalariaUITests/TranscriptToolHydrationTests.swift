@@ -349,7 +349,7 @@ final class TranscriptToolHydrationTests: XCTestCase {
         ]])
         let fetched = AppModel.mergeRawToolSupplement(display: display, raw: raw)
         XCTAssertEqual(fetched.count, 2)
-        XCTAssertEqual(fetched.flatMap(\.toolCalls).first?.result?.json?["stdout"]?.stringValue,
+        XCTAssertEqual(fetched.flatMap(\.toolCalls).first?.structuredOutput?.stdout?.plainText,
                        "ok")
 
         // No row in the fetched page matches the local failure, and the page
@@ -470,7 +470,7 @@ final class TranscriptToolHydrationTests: XCTestCase {
         XCTAssertEqual(callsFromDuplicateCalls.filter { $0.provenance == .malformed }.count, 3)
         XCTAssertEqual(callsFromDuplicateCalls.prefix(2).map { $0.result?.kind },
                        [.unavailable, .unavailable])
-        XCTAssertEqual(callsFromDuplicateCalls.last?.result?.json?["stdout"]?.stringValue,
+        XCTAssertEqual(callsFromDuplicateCalls.last?.structuredOutput?.stdout?.plainText,
                        "should-not-pair")
 
         let duplicateResults: JSONValue = ["messages": [
