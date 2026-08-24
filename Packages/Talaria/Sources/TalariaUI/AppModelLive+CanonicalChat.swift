@@ -1562,39 +1562,11 @@ extension GatewayClient {
 
 
 extension AppModel {
-    /// Reconcile every Bot Mode-owned stored session onto `hidden:true`
-    /// (plugin.js:setHideBotChats). Canonical pins plus room member sessions
-    /// stay out of shared recents; the per-bot Sessions sheet still lists them
-    /// via `include_hidden`. Older gateways reject `session.set_hidden`; that
-    /// is unsupported, not a toast.
+    /// Repair visible exact-owned canonical/room plumbing, then reconcile only
+    /// proven-old unowned Bot Mode plumbing. Partial inventories and authority
+    /// races are non-destructive.
     func hideOwnedBotSessions() async {
-        guard mode == .live else { return }
-        var grouped: [String: Set<String>] = [:]
-        func add(_ gatewayID: String?, _ sessionID: String) {
-            let sid = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let gatewayID, !gatewayID.isEmpty, !sid.isEmpty else { return }
-            grouped[gatewayID, default: []].insert(sid)
-        }
-        let fallback = LiveRuntime.shared.gatewayID
-        for (botID, summary) in LiveRuntime.shared.canonicalSessionByBot {
-            add(gatewayRoute(for: botID)?.gatewayID ?? fallback, summary.id)
-        }
-        for room in rooms {
-            for (memberID, sessionID) in room.memberSessions {
-                add(gatewayRoute(for: memberID)?.gatewayID ?? fallback, sessionID)
-            }
-        }
-        for (gatewayID, ids) in grouped {
-            do {
-                let client = try await routedClient(gatewayID: gatewayID)
-                for sid in ids {
-                    do { _ = try await client.setSessionHidden(sid, hidden: true) }
-                    catch { OwnedSessionHidingFailure.record(error, gatewayID: gatewayID) }
-                }
-            } catch {
-                OwnedSessionHidingFailure.record(error, gatewayID: gatewayID)
-            }
-        }
+        await reconcileStaleBotSessions()
     }
 
     /// Desktop's "New chat with this agent": a scratch session on this
