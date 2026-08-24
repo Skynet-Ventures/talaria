@@ -403,6 +403,140 @@ window/compositor behavior with no portable iOS management surface. The final
 `057dcdf23` commit is their merge plus the MCP timeout change. The auxiliary
 API, secret exposure, task-list split, and revision gaps above are unchanged.
 
+## Targeted MoA administration audit at `057dcdf23`
+
+Mixture-of-Agents preset administration and its separate chat-time invocation
+paths were audited directly against exact Hermes source
+`057dcdf236f8a6a26721c10fcc6ccb72726e272a`, on serialized Talaria management
+head `ebc1c577887c1f98e992a9900cbb43a4f95fe6e9`. The current administration
+contract is **blocked upstream**, so no phone preset editor, automatic MoA
+execution, live model call, config mutation, or restart is added.
+
+Talaria already consumes one safe invocation projection: the gateway-driven
+`model.options` catalog can include a virtual `moa` provider whose models are
+the configured preset names. Talaria renders those names separately and a user
+can explicitly select one for the current session; it deliberately never
+persists a MoA selection as the profile default. That is not preset
+administration. Hermes also has a `/moa <prompt>` one-shot command that swaps
+the live session to the default preset for one turn and then restores the
+prior model. This slice does not add a shortcut, background trigger, or any
+other automatic invocation of that cost-bearing command.
+
+### Dedicated REST contract
+
+Hermes exposes `GET /api/model/moa?profile=...` and
+`PUT /api/model/moa`. The write takes a profile in the body with precedence
+over the query. Both enter the requested profile scope, and the dedicated
+payload contains no API keys: reference and aggregator credentials resolve
+through the separately configured providers. The write validator correctly
+rejects incomplete slots, a preset with no complete reference, and recursive
+use of the virtual `moa` provider. `reference_timeout` rejects booleans,
+non-finite values, zero, and negative values, and degraded-reference policy is
+typed as `loud` or `silent`.
+
+Those positives do not supply concurrency-safe authority. Reads and writes
+echo neither the canonical resolved profile nor a config/preset revision.
+Writes replace the submitted preset map inside the profile config with no
+expected revision, 409 conflict, mutation receipt, or independent read-back
+postcondition. Two phones, Desktop, CLI, or an active agent can therefore lose
+one another's preset changes. There is no `moa.changed` event; an unrevisioned
+manual reread cannot reconcile an ambiguous write.
+
+### Options, bounds, and cost controls
+
+The REST snapshot does not declare allowed reference/aggregator provider-model
+pairs. The CLI's slot picker separately asks the live inventory for configured
+providers and at most 200 models, while `/api/model/options` exposes MoA
+**preset names** in its virtual row—not a revision-bound worker-slot option
+set. The MoA write accepts arbitrary provider/model strings without proving
+that they were admitted by the same profile snapshot.
+
+Preset count, preset-name length, reference count, and provider/model text have
+no declared request or response bounds. Runtime parallelism is capped by the
+private `_MAX_REFERENCE_WORKERS = 8` constant, but an unbounded reference list
+is still fully queued and billed; neither the cap nor a maximum admitted
+reference count is returned as API metadata. `fanout="per_iteration"` can
+repeat the entire advisor set on every tool-loop iteration, and `every_n:<N>`
+has no declared upper bound. The API provides no aggregate price estimate,
+maximum call multiplier, or risk fact tying references, cadence, and the
+acting aggregator together.
+
+Numeric controls are also not a declared safe range. Reference and aggregator
+temperatures accept arbitrary floats without a finite/range validator.
+`reference_timeout` is finite and positive but unbounded above.
+`reference_max_tokens` and per-reference token caps normalize only to positive
+integers with no maximum; preset `max_tokens` accepts negative or arbitrarily
+large integers. The acting MoA runtime does not in fact consult that preset
+`max_tokens` field—the aggregator uses the normal acting request's token
+behavior—so presenting it as an authoritative aggregator cap would be false.
+Reasoning effort accepts an arbitrary string at the request model and silently
+drops an unrecognized value during normalization instead of rejecting it.
+
+### Lossy round trips and privacy risk
+
+The dedicated types cannot faithfully round-trip the normalized read:
+
+- normalized reference slots may contain a per-slot `max_tokens`, but
+  `MoaModelSlot` does not declare that field, so Pydantic strips it on PUT and
+  a whole-preset save silently loses the cap;
+- the normalized GET returns top-level `privacy_filter`, but
+  `MoaConfigPayload` does not accept it. Every PUT constructs a raw object
+  without that key, normalization supplies the empty/off default, and
+  `cfg["moa"].update(normalized)` overwrites an existing `display` or `full`
+  privacy filter with off; and
+- `save_traces` and `trace_dir` are omitted from the normalized response and
+  payload. The current merge preserves those hidden keys, but a phone cannot
+  disclose that full prompts, advisor outputs, usage, and aggregator data may
+  be written to server JSONL traces or safely manage that high-risk state.
+
+This matters beyond configuration polish. Advisors may receive conversation
+content across several external providers. `privacy_filter="display"` still
+passes raw advisor text to the aggregator, `full` additionally redacts that
+injected text, and the default is off. `degraded_reference_policy="silent"`
+can suppress failed-advisor disclosure. A mobile editor must show these data-
+movement, trace, degraded-result, fanout, latency, and cost consequences before
+enabling or broadening a preset; the current response cannot support an honest
+summary and its write actively weakens an existing privacy setting.
+
+Configuration and execution also have different freshness semantics. An MoA
+facade reloads its named preset after the config file's modification stamp
+changes, so a preset save may affect the next call of a session already using
+that preset. The REST route itself does not invoke a model and does not require
+or trigger a gateway restart, but “configuration only” does not mean “future
+new sessions only.” A safe postcondition must state which revision active
+sessions will observe.
+
+### Required portable contract
+
+Mobile MoA administration can resume only after Hermes provides:
+
+- a bounded profile-scoped snapshot that echoes canonical profile and one
+  config revision, declares finite preset/reference/name/text limits, and
+  round-trips every manageable field without erasing hidden settings;
+- bounded gateway-declared reference and aggregator provider/model options,
+  capabilities, availability, and pricing tied to that snapshot or a stable
+  catalog revision—never a static phone catalog;
+- declared finite ranges/options for temperature, timeouts, token caps,
+  reasoning effort, reference count, worker concurrency, and fanout cadence,
+  with invalid input rejected rather than silently normalized;
+- exact profile plus expected-revision writes, 409 conflicts, and a canonical
+  revisioned postcondition. Preset delete/default/active changes need explicit
+  operations or an equally precise atomic mutation set rather than an
+  unqualified whole-map replacement;
+- faithful privacy/tracing facts and mutations, with protected trace location
+  handling and explicit confirmation for enabling raw traces, weakening
+  privacy, hiding degraded advisors, adding providers/references, or increasing
+  fanout/cost; and
+- a server-calculated bounded execution-risk summary (maximum parallelism and
+  call multiplier plus available price facts) and an exact-source change event
+  or explicit revisioned manual-refresh contract.
+
+Talaria can then hold its exact gateway/client/pool-generation/profile-
+lifecycle leases across discovery and writes, admit only snapshot-declared
+identities and ranges, revalidate revision and source before/after every await,
+and keep administration separate from the existing explicit, session-only MoA
+invocation path.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit
@@ -574,7 +708,7 @@ therefore never inferred as removal.
 | Unknown explicit Project profile | Hermes currently falls back to the launch profile. Talaria revalidates the selected route immediately before writes and fails closed, but Hermes should reject an explicit unknown profile. |
 | Cron per-job reasoning effort | Implemented as an explicitly authorized mobile REST mutation. Talaria decodes and displays the raw field, preserves unknown values on unrelated edits, and sends only canonical/clear values through the exact REST PUT normalizer, which delegates to Hermes' canonical `cron.jobs.update_job` validation. The model tool remains read-only and cannot set this job-owned field. Live certification remains open. |
 | Rich transcript parity | Partial: markdown, tables, code, working avatar, transcript actions, jump-to-bottom, exact-source message-level child creation, and bounded typed tool-history hydration now exist. The mobile generic fallback groups larger runs and discloses status, arguments, result, provenance, and diagnostics without name/prose pairing. Explicit file-edit diffs now hydrate and overlay only by exact tool id, then render as bounded, sanitized, selectable mobile disclosures with +/- counts; live gateway/device proof remains open. Persistent multimodal parts, generated images/lightbox, specialist ANSI/search/math/diagram renderers, per-message TTS, whole-turn timing, the N/M alternative-branch picker, lineage presentation, and tour/activity remain. |
-| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, MCP per-server logs, auxiliary model administration, and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. Profile import/export is also explicitly blocked: Desktop exchanges host paths, export has no bounded credential-free byte receipt/download, and import has no bounded preview/prepare/revision contract. Existing duplicate and whole-backup flows do not supply that authority. Learned-memory curation/import/export is explicitly blocked by the targeted audit above: memory ids are positional, mutations rewrite whole files without CAS, graph/detail payloads are unpaginated or unbounded, and the Star Map share code is visualization-only. Auxiliary administration is explicitly blocked by the exact `057dcdf23` audit above: the dedicated endpoint exposes only 12 revisionless slots and omits goal judge, while the generic config route returns raw nested API keys and has no allowlist, bounds, CAS, conflict, or postcondition. |
+| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, MCP per-server logs, auxiliary model administration, and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. Profile import/export is also explicitly blocked: Desktop exchanges host paths, export has no bounded credential-free byte receipt/download, and import has no bounded preview/prepare/revision contract. Existing duplicate and whole-backup flows do not supply that authority. Learned-memory curation/import/export is explicitly blocked by the targeted audit above: memory ids are positional, mutations rewrite whole files without CAS, graph/detail payloads are unpaginated or unbounded, and the Star Map share code is visualization-only. Auxiliary administration is explicitly blocked by the exact `057dcdf23` audit above: the dedicated endpoint exposes only 12 revisionless slots and omits goal judge, while the generic config route returns raw nested API keys and has no allowlist, bounds, CAS, conflict, or postcondition. MoA administration is also explicitly blocked by the targeted `057dcdf23` audit: the revisionless whole-preset write has unbounded reference/cost controls and lossy round trips that erase per-slot token caps and disable an existing privacy filter. Talaria's gateway-declared session-only MoA preset selection remains invocation, not administration. |
 | Git/System depth | Partial: core review and guarded mutations exist. Base/commit/ship context, dirty-worktree recovery, worktree-session integration, usage periods/daily/model/skill detail, and multi-gateway backend update orchestration remain. |
 | Artifact completeness | Exact retained-source discovery is implemented with atomic no-dial snapshots, sequential reads, compacted rows, collision isolation, and explicit bounded/stale/failure state. Retained bodies use the exact captured client only after `/api/files` proves one canonical locked root; root and body responses are wire-bounded, authority is rechecked after awaits, and sign-out purges source-owned bytes. Hermes `session.list` still has no global continuation, transcript offsets remain informational under Talaria's 150-item cap, and gateways returning `locked_root: nil` remain fail-closed. Live certification remains open. |
 
