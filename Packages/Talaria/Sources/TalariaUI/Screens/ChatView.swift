@@ -182,6 +182,13 @@ public struct ChatView: View {
     }
 
     public var body: some View {
+        dialogContent
+    }
+
+    /// Keep the compiler-facing SwiftUI expression in bounded stages. A clean
+    /// CI build must infer every modifier from scratch; one monolithic chain
+    /// crossed Swift's type-checking budget after transcript find was added.
+    private var chatContent: some View {
         VStack(spacing: 0) {
             header
             if transcriptFindPresented {
@@ -207,6 +214,10 @@ public struct ChatView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.bg)
+    }
+
+    private var observedContent: some View {
+        chatContent
         .onAppear {
             seedChatIfNeeded()
             // Idempotent: RootView attaches the router at connect time so
@@ -227,6 +238,10 @@ public struct ChatView: View {
                                                      messageCount: messages.count)
             followingLatest = false
         }
+    }
+
+    private var taskContent: some View {
+        observedContent
         .task(id: transcriptFindIndexKey) {
             guard transcriptFindPresented else { return }
             do {
@@ -310,6 +325,10 @@ public struct ChatView: View {
             cancelQueuedPromptEdit()
             closeTranscriptFind()
         }
+    }
+
+    private var modalContent: some View {
+        taskContent
         .sheet(isPresented: $showQueuePanel) {
             queuedPromptPanel
         }
@@ -332,6 +351,10 @@ public struct ChatView: View {
                 .id(state.id)
             }
         }
+    }
+
+    private var dialogContent: some View {
+        modalContent
         .confirmationDialog(copy.rewindConfirmTitle(theme.id),
                             isPresented: Binding(
                                 get: { pendingRestore != nil },
