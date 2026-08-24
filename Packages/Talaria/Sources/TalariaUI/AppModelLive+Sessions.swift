@@ -67,6 +67,10 @@ final class SessionsRuntime {
     /// production authority checks and publication path remain intact.
     var listSessionsForTesting:
         (@MainActor (GatewayClient, String) async throws -> [StoredSession])?
+    /// Page-aware seam for paging publication/fencing tests. The legacy
+    /// rows-only seam above remains source-compatible with existing tests.
+    var listSessionPageForTesting:
+        (@MainActor (GatewayClient, String) async throws -> SessionListPage)?
 
     static func key(botID: String, sessionID: String) -> String {
         botID + "\u{0}" + sessionID
@@ -194,7 +198,10 @@ extension AppModel {
     public func refreshSessions(botID: String) async {
         let runtime = SessionsRuntime.shared
         guard mode == .live else {
-            chat(for: botID).storedSessions = sessions[botID] ?? sessions["default"] ?? []
+            let chat = chat(for: botID)
+            chat.storedSessions = sessions[botID] ?? sessions["default"] ?? []
+            chat.storedSessionsTotal = nil
+            chat.storedSessionsHasMore = false
             runtime.loadErrors[botID] = nil
             return
         }
@@ -239,16 +246,20 @@ extension AppModel {
         guard await exactSessionListRefreshIsCurrent(
             botID: botID, authority: authority) else { return false }
         do {
-            let rows: [StoredSession]
-            if let override = runtime.listSessionsForTesting {
-                rows = try await override(authority.client, authority.route.profile)
+            let page: SessionListPage
+            if let override = runtime.listSessionPageForTesting {
+                page = try await override(authority.client, authority.route.profile)
+            } else if let override = runtime.listSessionsForTesting {
+                page = SessionListPage(
+                    sessions: try await override(
+                        authority.client, authority.route.profile))
             } else {
-                rows = try await authority.client.listSessions(
+                page = try await authority.client.listSessionPage(
                     limit: 200, profile: authority.route.profile, includeHidden: true)
             }
             guard await exactSessionListRefreshIsCurrent(
                 botID: botID, authority: authority) else { return false }
-            publishSessionRows(rows, botID: botID)
+            publishSessionPage(page, botID: botID)
             return true
         } catch {
             guard await exactSessionListRefreshIsCurrent(
@@ -290,8 +301,9 @@ extension AppModel {
         return true
     }
 
-    private func publishSessionRows(_ rows: [StoredSession], botID: String) {
+    private func publishSessionPage(_ page: SessionListPage, botID: String) {
         let runtime = SessionsRuntime.shared
+        let rows = page.sessions
         var summaries: [SessionSummary] = []
         summaries.reserveCapacity(rows.count)
         for row in rows where !row.id.isEmpty {
@@ -314,7 +326,10 @@ extension AppModel {
                 parentSessionID: row.parentSessionID,
                 branchParentRootID: row.branchParentRootID))
         }
-        chat(for: botID).storedSessions = summaries
+        let chat = chat(for: botID)
+        chat.storedSessions = summaries
+        chat.storedSessionsTotal = page.total
+        chat.storedSessionsHasMore = page.hasMore
         // The bot sheet's "Recent sessions" group reads `sessions[botID]`
         // (the demo-shaped index) — keep both in step so it goes live too.
         sessions[botID] = summaries
@@ -1012,11 +1027,10 @@ extension AppModel {
                     branch = try await source.client.branchSession(
                         lease.claim.target.runtimeSessionID)
                 }
-                try SessionBranchAckAuthority.requireExact(
+                try SessionBranchAckAuthority.requireWholeSessionExact(
                     branch,
                     parentRuntimeSessionID: lease.claim.target.runtimeSessionID,
-                    parentStoredSessionID: lease.claim.target.storedSessionID,
-                    requestedCount: branch.messageCount)
+                    parentStoredSessionID: lease.claim.target.storedSessionID)
                 try await requireSessionControlSourceAuthority(lease, source: source)
                 _ = await refreshSessionsFromExactSource(
                     botID: lease.claim.botID,
@@ -1411,6 +1425,11 @@ extension AppModel {
         runtime.previews[key] = nil
         if let chat = chats[botID] {
             chat.storedSessions.removeAll { $0.id == id }
+            // This is now a local optimistic projection rather than the exact
+            // session.list page that supplied the paging controls. Discard
+            // those controls until the authoritative changed-event refresh.
+            chat.storedSessionsTotal = nil
+            chat.storedSessionsHasMore = false
             // The deleted row was this chat's binding: forget it so the next
             // open creates a fresh session instead of resuming a dead key.
             if chat.storedSessionID == id {

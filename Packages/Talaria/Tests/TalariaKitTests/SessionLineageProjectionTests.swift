@@ -36,6 +36,16 @@ final class SessionLineageProjectionTests: XCTestCase {
         XCTAssertFalse(page.hasMore)
     }
 
+    func testLegacySessionListPageHasNoInventedPagingMetadata() throws {
+        let page = try GatewayClient.decodeStoredSessionPage(
+            .object(["sessions": .array([.object(["id": .string("legacy")])])]),
+            limit: 200, title: nil)
+        XCTAssertEqual(page.sessions.map(\.id), ["legacy"])
+        XCTAssertNil(page.total)
+        XCTAssertFalse(page.hasMore)
+        XCTAssertFalse(page.hasPagingMetadata)
+    }
+
     func testWireRowsAndMetadataAreCappedAtTwoHundred() throws {
         let raw = (0..<250).map { index -> JSONValue in
             .object(["id": .string("s-\(index)"),

@@ -48,6 +48,11 @@ public final class ChatState {
     public var attachments: [PendingAttachment] = []
     /// Stored sessions for this bot (session.list), for the sessions sheet.
     public var storedSessions: [SessionSummary] = []
+    /// Optional authoritative count/continuation metadata from the same
+    /// fenced `session.list` response as `storedSessions`. Older gateways
+    /// leave these at nil/false.
+    public var storedSessionsTotal: Int?
+    public var storedSessionsHasMore: Bool = false
     /// Live context-window breakdown (session.context_breakdown).
     public var contextSegments: [ContextSegment] = []
 

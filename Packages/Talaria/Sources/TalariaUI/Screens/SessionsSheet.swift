@@ -143,7 +143,8 @@ public struct SessionsSheet: View {
     }
 
     private var remoteRows: [Row] {
-        let known = Set((model.chats[botID]?.storedSessions ?? []).map(\.id))
+        let known = SessionsSheetLineagePresentationPolicy.knownSessionIdentities(
+            lineage.entries)
         return hits.compactMap { hit in
             guard SessionsSheetLineagePresentationPolicy.isFullTextOnly(
                 sessionID: hit.sessionID, knownSessionIDs: known) else { return nil }
@@ -154,6 +155,14 @@ public struct SessionsSheet: View {
     }
 
     private var archived: [ArchivedSessionRecord] { model.archivedSessions(botID: botID) }
+
+    private var authoritativeRemainderNotice: String? {
+        let chat = model.chats[botID]
+        return SessionsSheetLineagePresentationPolicy.remainderNotice(
+            loadedCount: lineage.entries.count,
+            total: chat?.storedSessionsTotal,
+            hasMore: chat?.storedSessionsHasMore ?? false)
+    }
 
     private var isEmpty: Bool { storedRows.isEmpty && remoteRows.isEmpty }
 
@@ -335,6 +344,10 @@ public struct SessionsSheet: View {
             if !remoteRows.isEmpty {
                 sectionLabel(copy.sessFullText(theme.id))
                 ForEach(remoteRows) { row in sessionRow(row) }
+            }
+
+            if let authoritativeRemainderNotice {
+                noteRow(authoritativeRemainderNotice, tone: theme.faint)
             }
 
             if !archived.isEmpty { archivedSection }
@@ -908,6 +921,31 @@ enum SessionsSheetLineagePresentationPolicy {
 
     static func isFullTextOnly(sessionID: String, knownSessionIDs: Set<String>) -> Bool {
         !knownSessionIDs.contains(sessionID)
+    }
+
+    static func knownSessionIdentities(
+        _ entries: [SessionLineageEntry]
+    ) -> Set<String> {
+        var known = Set<String>()
+        known.reserveCapacity(min(entries.count * 2, SessionLineageProjection.maximumRows * 2))
+        for entry in entries.prefix(SessionLineageProjection.maximumRows) {
+            known.insert(entry.id)
+            if let root = entry.summary.lineageRootID,
+               !root.isEmpty {
+                known.insert(root)
+            }
+        }
+        return known
+    }
+
+    static func remainderNotice(loadedCount: Int, total: Int?, hasMore: Bool) -> String? {
+        let boundedLoaded = min(max(0, loadedCount), SessionLineageProjection.maximumRows)
+        let authoritativeMore = hasMore || (total.map { $0 > boundedLoaded } ?? false)
+        guard authoritativeMore else { return nil }
+        if let total, total > boundedLoaded {
+            return "Showing \(boundedLoaded) of \(total) sessions. More remain on this gateway."
+        }
+        return "Showing the first \(boundedLoaded) sessions. More remain on this gateway."
     }
 
     static func voiceOverLabel(title: String, logicalLevel: Int,
