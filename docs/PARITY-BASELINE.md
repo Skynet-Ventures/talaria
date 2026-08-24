@@ -310,7 +310,18 @@ partial until the unchecked certification gates are recorded.
       and revisioned mutation contract required before phone controls can be
       added. The `e400e008..057dcdf23` MCP timeout change is runtime-only and
       the Linux Desktop HUD changes are non-portable; neither supplies that
-      missing authority.
+      missing authority. MoA preset administration also remains fail-closed
+      after the targeted exact-current audit. `GET/PUT /api/model/moa` is
+      profile-scoped and secret-free but has no canonical profile echo,
+      revision, CAS, conflict, or postcondition; preset/reference collections
+      and cost-driving cadence are unbounded; and the endpoint does not declare
+      revision-bound worker model options or numeric/concurrency ranges. Its
+      current request model strips per-reference token caps and resets an
+      existing privacy filter to off on save. The audit records the faithful
+      bounded snapshot, gateway-driven options, range/cost/risk metadata, and
+      revisioned mutation contract required before a phone editor can ship.
+      Talaria's existing gateway-declared MoA preset selection remains an
+      explicit session-only invocation path and is not management parity.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source
       discovery, explicit bounded/stale/failure state, and conditionally locked
       retained-body reads are implemented. Gateways returning `locked_root: nil`
