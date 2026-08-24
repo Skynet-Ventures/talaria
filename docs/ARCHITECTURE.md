@@ -114,8 +114,12 @@ Protocol facts baked into the transport (do not "fix" these):
 
 - The server coalesces `message.delta`/`thinking.delta`/`reasoning.delta`
   into ~33 ms batches — expect bursts of deltas back-to-back.
-- No client heartbeat is needed; public binds get protocol-level pings from
-  the server, loopback binds get none.
+- Current gateways advertise `heartbeat: true` in `gateway.ready` and answer
+  `gateway.ping`. Talaria sends an application heartbeat every 15 seconds and
+  invalidates a socket after 45 seconds without inbound traffic, allowing the
+  owning reconnect supervisor to replace a silent half-open connection.
+  Gateways that do not advertise the capability retain the older
+  URLSession/WebSocket close-event path.
 - The first frame after accept is the `gateway.ready` event —
   `GatewayTransport.connect()` treats its arrival as connection success and
   captures the skin payload.
