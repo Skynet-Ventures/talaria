@@ -1144,6 +1144,9 @@ public struct ChatView: View {
                     if let source = assistantMediaSource(
                         for: message, visibleText: visibleText, reference: reference) {
                         AssistantMediaCard(source: source, theme: theme, accent: botColor)
+                    } else {
+                        AssistantMediaUnavailableCard(
+                            reference: reference, theme: theme, accent: botColor)
                     }
                 }
             }
@@ -1223,9 +1226,7 @@ public struct ChatView: View {
 
     @ViewBuilder private func messageMenu(_ message: ChatMessage) -> some View {
         Button {
-            let visible = GeneratedImageEchoPolicy.suppress(in: message)
-            copyToPasteboard(AssistantMediaProjection.project(
-                visible, isStreaming: message.isStreaming).text)
+            copyToPasteboard(AssistantMediaProjection.copyText(in: message))
         } label: {
             Label(copy.copyMessage(theme.id), systemImage: "doc.on.doc")
         }

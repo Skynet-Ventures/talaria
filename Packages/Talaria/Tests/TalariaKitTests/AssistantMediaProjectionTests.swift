@@ -85,6 +85,7 @@ final class AssistantMediaProjectionTests: XCTestCase {
         {"example":"MEDIA:/inside/object.png"}
         ["MEDIA:/inside/array.png"]
         "example": "MEDIA:/inside/property.png"
+        Result: {"value":"MEDIA:/inside/inline-object.png copied","nested":["MEDIA:/inside/escaped-\\\"value.png"]}
         [label] MEDIA:/outside/link-context.png done
         MEDIA:/outside/real.png
         """
@@ -97,6 +98,8 @@ final class AssistantMediaProjectionTests: XCTestCase {
         XCTAssertTrue(projection.text.contains("MEDIA:/inside/tilde-fence.png"))
         XCTAssertTrue(projection.text.contains("> MEDIA:/inside/quote.png"))
         XCTAssertTrue(projection.text.contains("MEDIA:/inside/object.png"))
+        XCTAssertTrue(projection.text.contains("MEDIA:/inside/inline-object.png"))
+        XCTAssertTrue(projection.text.contains("MEDIA:/inside/escaped-\\\"value.png"))
         XCTAssertFalse(projection.text.contains("MEDIA:/outside/real.png"))
     }
 
@@ -214,6 +217,30 @@ final class AssistantMediaProjectionTests: XCTestCase {
                        "MEDIA: \"folder/a%20b.png?x=1#frag\"")
         XCTAssertEqual(item.fingerprint,
                        try reference(AssistantMediaProjection.project(source)).fingerprint)
+    }
+
+    func testDisplayNameNeverDecodesControlsBidiOrUnboundedCombiningText() throws {
+        let bidi = try reference(AssistantMediaProjection.project(
+            "MEDIA:https://cdn.example/x%0A%E2%80%AEname.mp3 "))
+        XCTAssertFalse(bidi.displayName.contains("\n"))
+        XCTAssertFalse(bidi.displayName.unicodeScalars.contains { scalar in
+            scalar.value == 0x202e
+        })
+        XCTAssertTrue(bidi.displayName.contains("%E2%80%AE"))
+
+        let combining = String(repeating: "e\u{301}", count: 1_000) + ".png"
+        let bounded = try reference(AssistantMediaProjection.project(
+            "MEDIA:\"/tmp/\(combining)\" "))
+        XCTAssertLessThanOrEqual(bounded.displayName.unicodeScalars.count, 101)
+    }
+
+    func testCopyProjectionIsAssistantOnly() {
+        let literal = "Please type MEDIA:/tmp/literal.png exactly"
+        XCTAssertEqual(AssistantMediaProjection.copyText(in: ChatMessage(
+            author: .user, text: literal)), literal)
+        XCTAssertEqual(AssistantMediaProjection.copyText(in: ChatMessage(
+            author: .bot, text: "Before MEDIA:/tmp/card.png after")),
+            "Before  after")
     }
 }
 

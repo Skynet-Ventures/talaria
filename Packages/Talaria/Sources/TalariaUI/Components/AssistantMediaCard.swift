@@ -13,23 +13,38 @@ import AppKit
 enum AssistantMediaPresentationPolicy {
     static let minimumInteractiveDimension: CGFloat = 44
     static let automaticallyStartsPlayback = false
+    static let loadsAutomatically = false
+    static let rendersUnavailableWithoutAuthority = true
     static let pausesWhenInactive = true
     static let accessibilityAnnouncements = true
 }
 
 @MainActor
-private final class AssistantMediaPlaybackCoordinator {
+final class AssistantMediaPlaybackCoordinator {
     static let shared = AssistantMediaPlaybackCoordinator()
     private weak var current: AVPlayer?
+    private var currentID: String?
+    private var deactivateCurrent: (() -> Void)?
+    var activeIDForTesting: String? { currentID }
 
-    func activate(_ player: AVPlayer) {
-        if current !== player { current?.pause() }
+    func activate(_ player: AVPlayer, id: String,
+                  onDeactivated: @escaping () -> Void) {
+        if current !== player || currentID != id {
+            current?.pause()
+            deactivateCurrent?()
+        }
         current = player
+        currentID = id
+        deactivateCurrent = onDeactivated
     }
 
-    func deactivate(_ player: AVPlayer) {
+    func deactivate(_ player: AVPlayer, id: String) {
         player.pause()
-        if current === player { current = nil }
+        if current === player, currentID == id {
+            current = nil
+            currentID = nil
+            deactivateCurrent = nil
+        }
     }
 }
 
@@ -63,7 +78,10 @@ struct AssistantMediaCard: View {
         case failure(String)
     }
 
-    private var kind: AssistantMediaProjection.Kind { source.reference.kind }
+    private var kind: AssistantMediaProjection.Kind {
+        AssistantMediaSourcePolicy.admit(source.reference.rawValue)?.presentationKind
+            ?? source.reference.kind
+    }
     private var statusValue: String {
         switch state {
         case .idle: return "\(kindLabel) not loaded"
@@ -104,12 +122,12 @@ struct AssistantMediaCard: View {
         .accessibilityElement(children: .contain)
         .accessibilityValue(statusValue)
         .transaction { if reducedMotion { $0.animation = nil } }
-        .task(id: source.identity) { await load(allowRemote: false) }
         .onChange(of: source.identity) { _, _ in reset() }
         .onChange(of: statusValue) { _, value in announce(value) }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { pause() }
         }
+        .task(id: playerMonitorIdentity) { await monitorPlayer() }
         .onDisappear { reset() }
         .sheet(item: $sharedFile, onDismiss: cleanupShare) { file in
             #if os(iOS)
@@ -123,7 +141,22 @@ struct AssistantMediaCard: View {
 
     @ViewBuilder private var content: some View {
         switch state {
-        case .idle, .loading:
+        case .idle:
+            VStack(alignment: .leading, spacing: 8) {
+                if let host = externalHost {
+                    Text("Loads from \(host) only after you ask.")
+                        .font(.caption).foregroundStyle(theme.sub)
+                        .textSelection(.enabled)
+                } else {
+                    Text("Loads from the producing gateway only after you ask.")
+                        .font(.caption).foregroundStyle(theme.sub)
+                }
+                actionButton("Load \(kindLabel.lowercased())",
+                             symbol: "arrow.down.circle") {
+                    startLoad(allowRemote: externalHost != nil)
+                }
+            }
+        case .loading:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small).tint(accent)
                 Text("Loading from the producing gateway…")
@@ -209,12 +242,10 @@ struct AssistantMediaCard: View {
                 VideoPlayer(player: player)
                     .aspectRatio(16 / 9, contentMode: .fit)
                     .frame(minHeight: 120)
-                    .onTapGesture { AssistantMediaPlaybackCoordinator.shared.activate(player) }
             } else {
                 actionButton("Prepare video", symbol: "play.rectangle") {
                     let next = AVPlayer(url: url)
                     player = next
-                    AssistantMediaPlaybackCoordinator.shared.activate(next)
                 }
             }
         }
@@ -265,10 +296,17 @@ struct AssistantMediaCard: View {
         state = .loading
         let result = await source.model.loadAssistantMedia(
             from: source, allowRemote: allowRemote)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            if case .localFile(let url, _) = result {
+                AppModel.removeOwnedAssistantMedia(url)
+            }
+            return
+        }
         switch result {
         case .image(let data, let raster): state = .image(data, raster)
-        case .localFile(let url, let kind): state = .file(url, kind)
+        case .localFile(let url, let kind):
+            state = .file(url, kind)
+            if kind == .video { player = AVPlayer(url: url) }
         case .externalApprovalRequired(let host): state = .permission(host: host)
         case .unavailable(let message): state = .failure(message)
         }
@@ -281,7 +319,8 @@ struct AssistantMediaCard: View {
             active.pause()
             playing = false
         } else {
-            AssistantMediaPlaybackCoordinator.shared.activate(active)
+            AssistantMediaPlaybackCoordinator.shared.activate(
+                active, id: source.identity, onDeactivated: { playing = false })
             active.play()
             playing = true
         }
@@ -289,8 +328,35 @@ struct AssistantMediaCard: View {
 
     private func pause() {
         guard let player else { return }
-        AssistantMediaPlaybackCoordinator.shared.deactivate(player)
+        AssistantMediaPlaybackCoordinator.shared.deactivate(
+            player, id: source.identity)
         playing = false
+    }
+
+    private var playerMonitorIdentity: String {
+        guard let player else { return "\(source.identity):none" }
+        return "\(source.identity):\(ObjectIdentifier(player).hashValue)"
+    }
+
+    private func monitorPlayer() async {
+        guard let player else { return }
+        while !Task.isCancelled {
+            let isPlaying = player.timeControlStatus == .playing
+            if isPlaying, !playing {
+                AssistantMediaPlaybackCoordinator.shared.activate(
+                    player, id: source.identity, onDeactivated: { playing = false })
+                playing = true
+            } else if !isPlaying, playing {
+                AssistantMediaPlaybackCoordinator.shared.deactivate(
+                    player, id: source.identity)
+                playing = false
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(200))
+            } catch {
+                return
+            }
+        }
     }
 
     private func share() {
@@ -338,10 +404,13 @@ struct AssistantMediaCard: View {
 
     private var kindLabel: String { label(for: kind) }
     private var headerDetail: String {
-        guard let admitted = AssistantMediaSourcePolicy.admit(source.reference.rawValue),
-              case .remoteURL(let url) = admitted.location,
-              let host = url.host() else { return source.reference.displayName }
+        guard let host = externalHost else { return source.reference.displayName }
         return "\(source.reference.displayName) · \(host)"
+    }
+    private var externalHost: String? {
+        guard let admitted = AssistantMediaSourcePolicy.admit(source.reference.rawValue),
+              case .remoteURL(let url) = admitted.location else { return nil }
+        return url.host()
     }
     private func label(for kind: AssistantMediaProjection.Kind) -> String {
         switch kind {
@@ -383,5 +452,37 @@ struct AssistantMediaCard: View {
         guard UIAccessibility.isVoiceOverRunning else { return }
         UIAccessibility.post(notification: .announcement, argument: value)
         #endif
+    }
+}
+
+struct AssistantMediaUnavailableCard: View {
+    let reference: AssistantMediaProjection.Reference
+    let theme: ThemePack
+    let accent: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "exclamationmark.circle")
+                .foregroundStyle(theme.warn)
+                .frame(width: AssistantMediaPresentationPolicy.minimumInteractiveDimension,
+                       height: AssistantMediaPresentationPolicy.minimumInteractiveDimension)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(reference.displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(theme.ink)
+                    .textSelection(.enabled)
+                Text("Media is unavailable until its producing live session is current.")
+                    .font(.caption)
+                    .foregroundStyle(theme.sub)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(theme.panel,
+                    in: RoundedRectangle(cornerRadius: theme.cardRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: theme.cardRadius, style: .continuous)
+            .strokeBorder(accent.opacity(0.22), lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Media unavailable. \(reference.displayName)")
     }
 }

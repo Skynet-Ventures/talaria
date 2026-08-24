@@ -74,6 +74,13 @@ public enum AssistantMediaProjection {
         return parser.parse()
     }
 
+    public static func copyText(in message: ChatMessage) -> String {
+        guard message.author == .bot else { return message.text }
+        let visible = GeneratedImageEchoPolicy.suppress(in: message)
+        let projection = project(visible, isStreaming: message.isStreaming)
+        return projection.isClipped ? "" : projection.text
+    }
+
     public static func classify(_ rawValue: String) -> Kind {
         guard rawValue.utf8.prefix(maximumValueUTF8Bytes + 1).count
                 <= maximumValueUTF8Bytes,
@@ -100,8 +107,21 @@ public enum AssistantMediaProjection {
         let clean = rawValue[..<end]
         let component = clean.split(whereSeparator: { $0 == "/" || $0 == "\\" })
             .last.map(String.init) ?? String(clean)
-        return component.removingPercentEncoding.flatMap { $0.isEmpty ? nil : $0 }
-            ?? (component.isEmpty ? rawValue : component)
+        let decoded = component.removingPercentEncoding
+        let candidate = decoded.flatMap { value in
+            value.isEmpty || value.unicodeScalars.contains(where: unsafeDisplayScalar)
+                ? nil : value
+        } ?? (component.isEmpty ? "media" : component)
+        let scalars = candidate.unicodeScalars
+        let prefix = String(scalars.prefix(100))
+        return scalars.count > 100 ? prefix + "…" : prefix
+    }
+
+    private static func unsafeDisplayScalar(_ scalar: UnicodeScalar) -> Bool {
+        scalar.value < 0x20 || (0x7f...0x9f).contains(scalar.value)
+            || scalar.value == 0x061c || (0x200e...0x200f).contains(scalar.value)
+            || (0x202a...0x202e).contains(scalar.value)
+            || (0x2066...0x2069).contains(scalar.value)
     }
 
     private static func fingerprint(rawValue: String, ordinal: Int) -> String {
@@ -189,8 +209,42 @@ public enum AssistantMediaProjection {
             let scalars = source.unicodeScalars
             var cursor = start
             var localUTF8 = 0
+            var jsonDepth = 0
             while cursor < end {
                 guard inspect(1) else { clipped = true; return }
+                if scalars[cursor] == "{" || scalars[cursor] == "[" {
+                    jsonDepth += 1
+                    localUTF8 += scalars[cursor].utf8.count
+                    cursor = scalars.index(after: cursor)
+                    continue
+                }
+                if scalars[cursor] == "}" || scalars[cursor] == "]" {
+                    jsonDepth = max(0, jsonDepth - 1)
+                    localUTF8 += scalars[cursor].utf8.count
+                    cursor = scalars.index(after: cursor)
+                    continue
+                }
+                if scalars[cursor] == "\"", jsonDepth > 0 {
+                    var probe = scalars.index(after: cursor)
+                    var skippedUTF8 = scalars[cursor].utf8.count
+                    var escaped = false
+                    while probe < end {
+                        guard inspect(1) else { clipped = true; return }
+                        let scalar = scalars[probe]
+                        skippedUTF8 += scalar.utf8.count
+                        probe = scalars.index(after: probe)
+                        if escaped {
+                            escaped = false
+                        } else if scalar == "\\" {
+                            escaped = true
+                        } else if scalar == "\"" {
+                            break
+                        }
+                    }
+                    cursor = probe
+                    localUTF8 += skippedUTF8
+                    continue
+                }
                 if scalars[cursor] == "`" {
                     var openingCount = 0
                     var probe = cursor

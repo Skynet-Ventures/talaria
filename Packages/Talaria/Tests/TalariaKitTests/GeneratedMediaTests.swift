@@ -479,11 +479,12 @@ final class GeneratedMediaTests: XCTestCase {
                     url: request.url!, statusCode: 200, httpVersion: nil,
                     headerFields: ["Content-Type": "audio/mpeg"])!)
             })
-        let loaded = try await client.restDataBoundedNoRedirect(
+        let loaded = try await client.restDataResponseBoundedNoRedirect(
             path: "api/files/stream",
             query: [URLQueryItem(name: "path", value: "/tmp/voice.mp3")],
             maximumResponseBytes: 40 * 1_024 * 1_024)
-        XCTAssertEqual(loaded, body)
+        XCTAssertEqual(loaded.0, body)
+        XCTAssertEqual((loaded.1 as? HTTPURLResponse)?.mimeType, "audio/mpeg")
         let ordinary = await calls.ordinary
         let protected = await calls.protected
         let request = await calls.request
@@ -495,6 +496,74 @@ final class GeneratedMediaTests: XCTestCase {
             URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?
                 .first(where: { $0.name == "path" })?.value
         }, "/tmp/voice.mp3")
+    }
+
+    func testAssistantManagedImageAndFileUseReadRouteWithMIMEAndDecodedBound() async throws {
+        actor Capture {
+            var request: URLRequest?
+            var limit: Int?
+            func set(_ request: URLRequest, _ limit: Int?) {
+                self.request = request; self.limit = limit
+            }
+        }
+        let capture = Capture()
+        let bytes = Data("document".utf8)
+        let encoded = bytes.base64EncodedString()
+        let body = Data(("{\"name\":\"report.pdf\",\"path\":\"/tmp/report.pdf\","
+            + "\"size\":8,\"mime_type\":\"application/pdf\","
+            + "\"data_url\":\"data:application/pdf;base64,\(encoded)\"}").utf8)
+        let client = GatewayClient(
+            baseURL: URL(string: "https://gateway.example/base")!,
+            credential: .sessionToken("secret"),
+            restExecutor: { request, _ in
+                (Data(), HTTPURLResponse(
+                    url: request.url!, statusCode: 500, httpVersion: nil,
+                    headerFields: nil)!)
+            },
+            noRedirectRESTExecutor: { request, limit in
+                await capture.set(request, limit)
+                return (body, HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"])!)
+            })
+        let loaded = try await client.assistantManagedFile(
+            path: "/tmp/report.pdf", maximumDecodedBytes: 40 * 1_024 * 1_024)
+        XCTAssertEqual(loaded.data, bytes)
+        XCTAssertEqual(loaded.mimeType, "application/pdf")
+        let request = await capture.request
+        XCTAssertTrue(request?.url?.absoluteString.contains("/base/api/files/read") == true)
+        XCTAssertFalse(request?.url?.absoluteString.contains("/api/files/stream") == true)
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "X-Hermes-Session-Token"),
+                       "secret")
+        let responseLimit = await capture.limit
+        XCTAssertNotNil(responseLimit)
+    }
+
+    func testAssistantManagedFileRejectsDeclaredSizeMIMEAndDecodedLengthMismatch() async throws {
+        for body in [
+            #"{"size":9,"mime_type":"application/pdf","data_url":"data:application/pdf;base64,ZG9jdW1lbnQ="}"#,
+            #"{"size":8,"mime_type":"application/pdf","data_url":"data:text/html;base64,ZG9jdW1lbnQ="}"#,
+            #"{"size":7,"mime_type":"application/pdf","data_url":"data:application/pdf;base64,ZG9jdW1lbnQ="}"#,
+        ] {
+            let client = GatewayClient(
+                baseURL: URL(string: "https://gateway.example")!,
+                credential: .sessionToken("secret"),
+                restExecutor: { request, _ in
+                    (Data(), HTTPURLResponse(
+                        url: request.url!, statusCode: 500, httpVersion: nil,
+                        headerFields: nil)!)
+                },
+                noRedirectRESTExecutor: { request, _ in
+                    (Data(body.utf8), HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: nil,
+                        headerFields: ["Content-Type": "application/json"])!)
+                })
+            do {
+                _ = try await client.assistantManagedFile(
+                    path: "/tmp/report.pdf", maximumDecodedBytes: 8)
+                XCTFail("malformed managed media must fail")
+            } catch {}
+        }
     }
 
     func testNoRedirectTransportDoesNotReplaySensitiveRequest() async {

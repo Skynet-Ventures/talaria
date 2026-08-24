@@ -40,6 +40,25 @@ enum AssistantMediaLoadResult: Sendable {
     case unavailable(String)
 }
 
+enum AssistantMediaAVPolicy {
+    static let maximumDuration: Double = 86_400
+    static let maximumTracks = 8
+    static let maximumDimension: Double = 8_192
+    static let maximumPixels: Double = 40_000_000
+    static let metadataDeadline: Duration = .seconds(5)
+
+    static func admits(duration: Double, trackCount: Int,
+                       width: Double? = nil, height: Double? = nil) -> Bool {
+        guard duration.isFinite, duration > 0, duration <= maximumDuration,
+              trackCount > 0, trackCount <= maximumTracks else { return false }
+        guard let width, let height else { return true }
+        let w = abs(width), h = abs(height)
+        return w.isFinite && h.isFinite && w > 0 && h > 0
+            && w <= maximumDimension && h <= maximumDimension
+            && w <= maximumPixels / h
+    }
+}
+
 private struct AssistantMediaLoadAuthority: Sendable {
     let botID: String
     let route: GatewayBotRoute
@@ -61,8 +80,13 @@ private struct AssistantMediaLoadAuthority: Sendable {
 extension AppModel {
     func loadAssistantMedia(from source: AssistantMediaPresentationSource,
                             allowRemote: Bool = false) async -> AssistantMediaLoadResult {
-        guard source.model === self,
-              let admitted = AssistantMediaSourcePolicy.admit(source.reference.rawValue),
+        guard source.model === self else {
+            return .unavailable("The producing chat is no longer current.")
+        }
+        guard let admitted = AssistantMediaSourcePolicy.admit(source.reference.rawValue) else {
+            return .unavailable("This media path is not supported on mobile.")
+        }
+        guard
               let authority = await captureAssistantMediaAuthority(source, admitted: admitted),
               assistantMediaAuthorityAcceptsSynchronously(authority) else {
             return .unavailable("The producing chat is no longer current.")
@@ -80,12 +104,23 @@ extension AppModel {
             }
             switch admitted.location {
             case .gatewayPath(let path):
-                bytes = try await authority.snapshot.client.restDataBoundedNoRedirect(
-                    path: "api/files/stream",
-                    query: [URLQueryItem(name: "path", value: path)],
-                    timeout: 60,
-                    maximumResponseBytes: AssistantMediaSourcePolicy.maximumDownloadBytes)
-                responseMIME = nil
+                if AssistantMediaSourcePolicy.gatewayFetchRoute(
+                    for: admitted.presentationKind) == .stream {
+                    let response = try await authority.snapshot.client
+                        .restDataResponseBoundedNoRedirect(
+                            path: "api/files/stream",
+                            query: [URLQueryItem(name: "path", value: path)],
+                            timeout: 60,
+                            maximumResponseBytes: AssistantMediaSourcePolicy.maximumDownloadBytes)
+                    bytes = response.0
+                    responseMIME = (response.1 as? HTTPURLResponse)?.mimeType?.lowercased()
+                } else {
+                    let payload = try await authority.snapshot.client.assistantManagedFile(
+                        path: path,
+                        maximumDecodedBytes: AssistantMediaSourcePolicy.maximumDownloadBytes)
+                    bytes = payload.data
+                    responseMIME = payload.mimeType
+                }
             case .remoteURL(let url):
                 let payload = try await RemoteAssistantMediaLoader.load(
                     url, maximumBytes: AssistantMediaSourcePolicy.maximumDownloadBytes)
@@ -116,7 +151,7 @@ extension AppModel {
         case .audio, .video, .file:
             let file: URL
             do {
-                file = try GatewayREST.materializeMedia(
+                file = try Self.materializeAssistantMedia(
                     data: bytes, suggestedName: admitted.displayName)
                 if admitted.presentationKind == .audio || admitted.presentationKind == .video {
                     guard await Self.playableMediaIsValid(
@@ -293,18 +328,44 @@ extension AppModel {
     private static func playableMediaIsValid(
         _ url: URL, kind: AssistantMediaProjection.Kind
     ) async -> Bool {
+        await withTaskGroup(of: Bool.self, returning: Bool.self) { group in
+            group.addTask { await inspectPlayableMedia(url, kind: kind) }
+            group.addTask {
+                do {
+                    try await Task.sleep(for: AssistantMediaAVPolicy.metadataDeadline)
+                } catch {
+                    return false
+                }
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private static func inspectPlayableMedia(
+        _ url: URL, kind: AssistantMediaProjection.Kind
+    ) async -> Bool {
         let asset = AVURLAsset(url: url)
         do {
             let duration = try await asset.load(.duration).seconds
-            guard duration.isFinite, duration > 0, duration <= 86_400 else { return false }
+            let allTracks = try await asset.load(.tracks)
             switch kind {
             case .audio:
-                return try await !asset.loadTracks(withMediaType: .audio).isEmpty
+                let tracks = try await asset.loadTracks(withMediaType: .audio)
+                return !tracks.isEmpty && AssistantMediaAVPolicy.admits(
+                    duration: duration, trackCount: allTracks.count)
             case .video:
                 let tracks = try await asset.loadTracks(withMediaType: .video)
                 guard let track = tracks.first else { return false }
                 let size = try await track.load(.naturalSize)
-                return abs(size.width) <= 8_192 && abs(size.height) <= 8_192
+                let transform = try await track.load(.preferredTransform)
+                let transformed = CGRect(origin: .zero, size: size)
+                    .applying(transform).standardized.size
+                return AssistantMediaAVPolicy.admits(
+                    duration: duration, trackCount: allTracks.count,
+                    width: transformed.width, height: transformed.height)
             case .image, .file:
                 return false
             }
@@ -315,13 +376,50 @@ extension AppModel {
 
     static func removeOwnedAssistantMedia(_ url: URL) {
         let folder = url.deletingLastPathComponent()
-        guard folder.lastPathComponent.hasPrefix("talaria-media-") else { return }
+        guard folder.lastPathComponent.hasPrefix(
+            AssistantMediaSourcePolicy.temporaryFolderPrefix) else { return }
         try? FileManager.default.removeItem(at: folder)
+    }
+
+    private static func materializeAssistantMedia(
+        data: Data, suggestedName: String
+    ) throws -> URL {
+        let safe = suggestedName.map { character in
+            character.isLetter || character.isNumber || "._- ".contains(character)
+                ? character : "-"
+        }
+        let name = String(safe).trimmingCharacters(in: .whitespacesAndNewlines)
+        let folder = FileManager.default.temporaryDirectory
+            .appending(path: "\(AssistantMediaSourcePolicy.temporaryFolderPrefix)\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder,
+                                                withIntermediateDirectories: true)
+        var completed = false
+        defer { if !completed { try? FileManager.default.removeItem(at: folder) } }
+        let destination = folder.appending(
+            path: name.isEmpty ? "media.bin" : String(name.prefix(100)))
+        try data.write(to: destination, options: .atomic)
+        #if os(iOS)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: destination.path)
+        #endif
+        try Task.checkCancellation()
+        completed = true
+        return destination
     }
 }
 
 enum AssistantMediaSourcePolicy {
     static let maximumDownloadBytes = 40 * 1_024 * 1_024
+    static let temporaryFolderPrefix = "talaria-assistant-media-"
+
+    enum GatewayFetchRoute: Sendable, Equatable { case managedRead, stream }
+
+    static func gatewayFetchRoute(
+        for kind: AssistantMediaProjection.Kind
+    ) -> GatewayFetchRoute {
+        kind == .audio || kind == .video ? .stream : .managedRead
+    }
 
     enum Location: Sendable, Equatable {
         case gatewayPath(String)

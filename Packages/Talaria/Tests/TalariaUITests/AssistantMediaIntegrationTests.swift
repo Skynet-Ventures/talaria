@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import TalariaKit
 @testable import TalariaUI
@@ -12,6 +13,8 @@ final class AssistantMediaIntegrationTests: XCTestCase {
     func testSourceAdmissionMIMEAndPresentationPolicies() throws {
         XCTAssertEqual(AssistantMediaPresentationPolicy.minimumInteractiveDimension, 44)
         XCTAssertFalse(AssistantMediaPresentationPolicy.automaticallyStartsPlayback)
+        XCTAssertFalse(AssistantMediaPresentationPolicy.loadsAutomatically)
+        XCTAssertTrue(AssistantMediaPresentationPolicy.rendersUnavailableWithoutAuthority)
         XCTAssertTrue(AssistantMediaPresentationPolicy.pausesWhenInactive)
         XCTAssertTrue(AssistantMediaPresentationPolicy.accessibilityAnnouncements)
 
@@ -36,6 +39,58 @@ final class AssistantMediaIntegrationTests: XCTestCase {
         XCTAssertTrue(AssistantMediaSourcePolicy.responseMIMEIsAllowed("audio/mpeg", for: .audio))
         XCTAssertFalse(AssistantMediaSourcePolicy.responseMIMEIsAllowed("text/html", for: .audio))
         XCTAssertFalse(AssistantMediaSourcePolicy.responseMIMEIsAllowed("text/html", for: .file))
+        XCTAssertNotEqual(AssistantMediaSourcePolicy.temporaryFolderPrefix, "talaria-media-")
+        XCTAssertEqual(AssistantMediaSourcePolicy.gatewayFetchRoute(for: .image), .managedRead)
+        XCTAssertEqual(AssistantMediaSourcePolicy.gatewayFetchRoute(for: .file), .managedRead)
+        XCTAssertEqual(AssistantMediaSourcePolicy.gatewayFetchRoute(for: .audio), .stream)
+        XCTAssertEqual(AssistantMediaSourcePolicy.gatewayFetchRoute(for: .video), .stream)
+
+        XCTAssertTrue(AssistantMediaAVPolicy.admits(
+            duration: 60, trackCount: 2, width: 1_920, height: 1_080))
+        XCTAssertFalse(AssistantMediaAVPolicy.admits(
+            duration: 0, trackCount: 1, width: 1_920, height: 1_080))
+        XCTAssertFalse(AssistantMediaAVPolicy.admits(
+            duration: 60, trackCount: AssistantMediaAVPolicy.maximumTracks + 1))
+        XCTAssertFalse(AssistantMediaAVPolicy.admits(
+            duration: 60, trackCount: 1, width: 0, height: 1_080))
+        XCTAssertFalse(AssistantMediaAVPolicy.admits(
+            duration: 60, trackCount: 1, width: 8_192, height: 8_192))
+    }
+
+    func testPlaybackCoordinatorDeactivatesPreviousOwnerAndClearsCurrentOwner() {
+        let coordinator = AssistantMediaPlaybackCoordinator()
+        let first = AVPlayer()
+        let second = AVPlayer()
+        var firstDeactivated = false
+        coordinator.activate(first, id: "first") { firstDeactivated = true }
+        XCTAssertEqual(coordinator.activeIDForTesting, "first")
+        coordinator.activate(second, id: "second") {}
+        XCTAssertTrue(firstDeactivated)
+        XCTAssertEqual(coordinator.activeIDForTesting, "second")
+        coordinator.deactivate(second, id: "second")
+        XCTAssertNil(coordinator.activeIDForTesting)
+    }
+
+    func testOwnedCleanupNeverRemovesArtifactOrForeignFolders() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+        let assistant = root.appending(
+            path: "\(AssistantMediaSourcePolicy.temporaryFolderPrefix)\(UUID().uuidString)")
+        let artifact = root.appending(path: "talaria-media-\(UUID().uuidString)")
+        let foreign = root.appending(path: "foreign-media-\(UUID().uuidString)")
+        for folder in [assistant, artifact, foreign] {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: folder.appending(path: "x.bin"))
+        }
+        defer {
+            for folder in [assistant, artifact, foreign] { try? fm.removeItem(at: folder) }
+        }
+        AppModel.removeOwnedAssistantMedia(assistant.appending(path: "x.bin"))
+        AppModel.removeOwnedAssistantMedia(artifact.appending(path: "x.bin"))
+        AppModel.removeOwnedAssistantMedia(foreign.appending(path: "x.bin"))
+        XCTAssertFalse(fm.fileExists(atPath: assistant.path))
+        XCTAssertTrue(fm.fileExists(atPath: artifact.path))
+        XCTAssertTrue(fm.fileExists(atPath: foreign.path))
     }
 
     func testSourceIdentityIsRouteSessionMessageAndDirectiveQualified() throws {

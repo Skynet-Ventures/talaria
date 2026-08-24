@@ -1229,6 +1229,17 @@ public actor GatewayClient {
         contentType: String, timeout: TimeInterval, responseLimit: Int?,
         rejectsRedirects: Bool = false
     ) async throws -> Data {
+        try await authenticatedRESTResponse(
+            path: path, method: method, query: query, body: body,
+            contentType: contentType, timeout: timeout,
+            responseLimit: responseLimit, rejectsRedirects: rejectsRedirects).0
+    }
+
+    private func authenticatedRESTResponse(
+        path: String, method: String, query: [URLQueryItem], body: Data?,
+        contentType: String, timeout: TimeInterval, responseLimit: Int?,
+        rejectsRedirects: Bool = false
+    ) async throws -> (Data, URLResponse) {
         let lease = try await acquireTrafficLease()
         do {
             var comps = URLComponents(url: baseURL.appending(path: path),
@@ -1252,7 +1263,7 @@ public actor GatewayClient {
                 throw GatewayError(code: code, message: detail ?? "HTTP \(code) for \(path)")
             }
             await lease?.release()
-            return data
+            return (data, response)
         } catch {
             await lease?.release()
             throw error
@@ -1312,6 +1323,19 @@ public actor GatewayClient {
             throw GatewayError(code: -11, message: "Invalid REST response limit.")
         }
         return try await authenticatedRESTData(
+            path: path, method: method, query: query, body: nil,
+            contentType: "application/octet-stream", timeout: timeout,
+            responseLimit: maximumResponseBytes, rejectsRedirects: true)
+    }
+
+    public func restDataResponseBoundedNoRedirect(
+        path: String, method: String = "GET", query: [URLQueryItem] = [],
+        timeout: TimeInterval = 30, maximumResponseBytes: Int
+    ) async throws -> (Data, URLResponse) {
+        guard maximumResponseBytes >= 0 else {
+            throw GatewayError(code: -11, message: "Invalid REST response limit.")
+        }
+        return try await authenticatedRESTResponse(
             path: path, method: method, query: query, body: nil,
             contentType: "application/octet-stream", timeout: timeout,
             responseLimit: maximumResponseBytes, rejectsRedirects: true)
