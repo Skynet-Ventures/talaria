@@ -256,7 +256,9 @@ partial until the unchecked certification gates are recorded.
       The first retained-history slice is implemented: bounded raw hydration
       reconstructs typed tool arguments/results by exact id, preserves
       protected terminal rows, and exposes a compact accessible generic mobile
-      disclosure. Specialist media/diff/search/structured renderers remain.
+      disclosure. Exact diff, web-search, terminal/execute-code, and generated-
+      image specialist renderers plus foreground transcript find are implemented;
+      other specialist media/renderers remain.
       Default working presentation is an animated agent avatar; tool activity
       and gateway-exposed reasoning summaries are opt-in advanced views.
       Multiline full-width capped composition, edit/rewind/regenerate, and
@@ -264,8 +266,10 @@ partial until the unchecked certification gates are recorded.
       N/M alternative-branch picker and lineage presentation, persistent
       multimodal parts, grouped generic tool runs, math/diagram renderers, and
       per-message TTS/timing. Exact generated-image transcript cards are now
-      implemented with source/lifecycle fencing and focused coverage, but their
-      real gateway/device load and share matrix remains open.
+      implemented with exact invocation/message/source/lifecycle fencing,
+      explicit public-host contact, bounded raster validation, accessible retry,
+      and focused coverage, but their real gateway/device load and share matrix
+      remains open.
       The separate source-qualified, text-only durable composer queue is
       implemented and focused-test covered; its gateway/device certification is
       still open.

@@ -9,17 +9,38 @@ struct GeneratedImagePresentationSource {
     let route: GatewayBotRoute
     let storedSessionID: String
     let liveSessionID: String
+    let messageRowID: Int?
+    let messageRevisionID: UUID
 
     var identity: String {
-        [route.gatewayID, route.profile, storedSessionID, liveSessionID]
+        [route.gatewayID, route.profile, storedSessionID, liveSessionID,
+         messageRowID.map(String.init) ?? "revision:\(messageRevisionID.uuidString)"]
             .joined(separator: "\u{1f}")
+    }
+
+    func identifies(_ message: ChatMessage) -> Bool {
+        if let messageRowID { return message.rowID == messageRowID }
+        return message.id == messageRevisionID
     }
 }
 
 enum GeneratedImageLoadResult: Sendable {
-    case image(Data)
+    case image(Data, GeneratedImageRasterMetadata)
     case externalApprovalRequired
     case unavailable(String)
+}
+
+enum GeneratedImageRasterFormat: String, Sendable, Equatable {
+    case png, jpeg, webp, gif, bmp
+
+    var fileExtension: String { self == .jpeg ? "jpg" : rawValue }
+    var mimeType: String { self == .jpeg ? "image/jpeg" : "image/\(rawValue)" }
+}
+
+struct GeneratedImageRasterMetadata: Sendable, Equatable {
+    let width: Int
+    let height: Int
+    let format: GeneratedImageRasterFormat
 }
 
 enum GeneratedImageRasterPolicy {
@@ -27,10 +48,13 @@ enum GeneratedImageRasterPolicy {
     static let maximumPixels = 40_000_000
     static let maximumFrames = 1
 
-    static func dimensions(_ data: Data) -> CGSize? {
+    static func inspect(_ data: Data, expectedMIME: String? = nil)
+        -> GeneratedImageRasterMetadata? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetCount(source) > 0,
-              CGImageSourceGetCount(source) <= maximumFrames,
+              CGImageSourceGetCount(source) == maximumFrames,
+              let rawType = CGImageSourceGetType(source) as String?,
+              let format = format(for: rawType),
+              expectedMIME == nil || expectedMIME?.lowercased() == format.mimeType,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
                 as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
@@ -38,7 +62,23 @@ enum GeneratedImageRasterPolicy {
         let w = width.intValue, h = height.intValue
         guard w > 0, h > 0, w <= maximumDimension, h <= maximumDimension,
               w <= maximumPixels / h else { return nil }
-        return CGSize(width: w, height: h)
+        return GeneratedImageRasterMetadata(width: w, height: h, format: format)
+    }
+
+    static func dimensions(_ data: Data) -> CGSize? {
+        guard let value = inspect(data) else { return nil }
+        return CGSize(width: value.width, height: value.height)
+    }
+
+    private static func format(for rawType: String) -> GeneratedImageRasterFormat? {
+        switch rawType.lowercased() {
+        case "public.png": return .png
+        case "public.jpeg", "public.jpg": return .jpeg
+        case "org.webmproject.webp", "public.webp": return .webp
+        case "com.compuserve.gif", "public.gif": return .gif
+        case "com.microsoft.bmp", "public.bmp": return .bmp
+        default: return nil
+        }
     }
 }
 
@@ -48,6 +88,9 @@ private struct GeneratedImageLoadAuthority: Sendable {
     let storedSessionID: String
     let liveSessionID: String
     let chatID: ObjectIdentifier
+    let messageRowID: Int?
+    let messageRevisionID: UUID
+    let gatewayToolID: String
     let output: ToolGeneratedImage
     let lifecycle: ProfileLifecycleGenerationToken
     let transcript: TranscriptHydrationSourceAuthority
@@ -57,14 +100,17 @@ private struct GeneratedImageLoadAuthority: Sendable {
 }
 
 extension AppModel {
-    func loadGeneratedImage(_ output: ToolGeneratedImage,
+    func loadGeneratedImage(_ call: ToolCall,
                             from source: GeneratedImagePresentationSource,
                             allowRemote: Bool = false) async -> GeneratedImageLoadResult {
         guard source.model === self,
-              let authority = await captureGeneratedImageAuthority(output, from: source)
+              GeneratedImageEchoPolicy.hasSuccessfulAuthority(call),
+              let output = call.generatedImage,
+              let authority = await captureGeneratedImageAuthority(call, from: source)
         else { return .unavailable("The producing chat is no longer current.") }
 
         let bytes: Data
+        let expectedMIME: String?
         do {
             switch output.sourceKind {
             case .gatewayPath:
@@ -73,13 +119,15 @@ extension AppModel {
                 guard let decoded = Self.decodeGeneratedImageDataURL(dataURL) else {
                     return .unavailable("The gateway returned malformed image data.")
                 }
-                bytes = decoded
+                bytes = decoded.data
+                expectedMIME = decoded.mimeType
             case .remoteURL:
                 guard allowRemote else { return .externalApprovalRequired }
                 guard let url = URL(string: output.source) else {
                     return .unavailable("The generated image link was invalid.")
                 }
                 bytes = try await GeneratedRemoteImageLoader.load(url)
+                expectedMIME = nil
             }
         } catch is CancellationError {
             return .unavailable("Image loading was cancelled.")
@@ -89,7 +137,7 @@ extension AppModel {
 
         guard !Task.isCancelled,
               bytes.count <= ToolGeneratedImageCodec.maximumInlineDecodedBytes,
-              GeneratedImageRasterPolicy.dimensions(bytes) != nil,
+              let raster = GeneratedImageRasterPolicy.inspect(bytes, expectedMIME: expectedMIME),
               await generatedImageAuthorityIsCurrent(authority) else {
             return .unavailable("The producing chat changed before the image loaded.")
         }
@@ -103,19 +151,24 @@ extension AppModel {
         }
         let accepted = generatedImageAuthorityAcceptsSynchronously(authority)
         await pool.release(lease)
-        return accepted ? .image(bytes)
+        return accepted ? .image(bytes, raster)
             : .unavailable("The producing chat changed before the image loaded.")
     }
 
     private func captureGeneratedImageAuthority(
-        _ output: ToolGeneratedImage,
+        _ call: ToolCall,
         from source: GeneratedImagePresentationSource
     ) async -> GeneratedImageLoadAuthority? {
         guard !Task.isCancelled, mode == .live,
+              GeneratedImageEchoPolicy.hasSuccessfulAuthority(call),
+              let toolID = call.gatewayToolID, !toolID.isEmpty,
+              let output = call.generatedImage,
               (stateRoute(for: source.botID) ?? gatewayRoute(for: source.botID)) == source.route,
               let chat = chats[source.botID],
               chat.storedSessionID == source.storedSessionID,
               (chat.sessionID ?? "") == source.liveSessionID,
+              currentGeneratedImageCall(in: chat, source: source,
+                                        gatewayToolID: toolID) == call,
               !source.storedSessionID.isEmpty,
               let lifecycle = profileLifecycleGenerationToken(for: source.botID),
               lifecycle.route == source.route else { return nil }
@@ -128,6 +181,8 @@ extension AppModel {
               let currentChat = chats[source.botID], ObjectIdentifier(currentChat) == chatID,
               currentChat.storedSessionID == source.storedSessionID,
               (currentChat.sessionID ?? "") == source.liveSessionID,
+              currentGeneratedImageCall(in: currentChat, source: source,
+                                        gatewayToolID: toolID) == call,
               (stateRoute(for: source.botID) ?? gatewayRoute(for: source.botID)) == source.route,
               profileLifecycleAccepts(lifecycle),
               let currentSaved = registry.saved.first(where: { $0.id == source.route.gatewayID }),
@@ -145,7 +200,10 @@ extension AppModel {
         return GeneratedImageLoadAuthority(
             botID: source.botID, route: source.route,
             storedSessionID: source.storedSessionID,
-            liveSessionID: source.liveSessionID, chatID: chatID, output: output,
+            liveSessionID: source.liveSessionID, chatID: chatID,
+            messageRowID: source.messageRowID,
+            messageRevisionID: source.messageRevisionID,
+            gatewayToolID: toolID, output: output,
             lifecycle: lifecycle, transcript: transcript,
             snapshot: retainedSource.connection, registryURL: saved.urlString,
             registryCredential: credential)
@@ -172,6 +230,17 @@ extension AppModel {
               let chat = chats[authority.botID], ObjectIdentifier(chat) == authority.chatID,
               chat.storedSessionID == authority.storedSessionID,
               (chat.sessionID ?? "") == authority.liveSessionID,
+              let currentCall = currentGeneratedImageCall(
+                in: chat,
+                source: GeneratedImagePresentationSource(
+                    model: self, botID: authority.botID, route: authority.route,
+                    storedSessionID: authority.storedSessionID,
+                    liveSessionID: authority.liveSessionID,
+                    messageRowID: authority.messageRowID,
+                    messageRevisionID: authority.messageRevisionID),
+                gatewayToolID: authority.gatewayToolID),
+              GeneratedImageEchoPolicy.hasSuccessfulAuthority(currentCall),
+              currentCall.generatedImage == authority.output,
               let saved = registry.saved.first(where: { $0.id == authority.route.gatewayID }),
               saved.urlString == authority.registryURL,
               authority.snapshot.baseURL?.absoluteString == saved.urlString,
@@ -181,11 +250,30 @@ extension AppModel {
         return true
     }
 
-    static func decodeGeneratedImageDataURL(_ value: String) -> Data? {
+    private func currentGeneratedImageCall(
+        in chat: ChatState, source: GeneratedImagePresentationSource,
+        gatewayToolID: String
+    ) -> ToolCall? {
+        var matchedMessage: ChatMessage?
+        for message in chat.messages where source.identifies(message) {
+            guard matchedMessage == nil else { return nil }
+            matchedMessage = message
+        }
+        guard let message = matchedMessage else { return nil }
+        var matchedCall: ToolCall?
+        for call in message.toolCalls where call.gatewayToolID == gatewayToolID {
+            guard matchedCall == nil else { return nil }
+            matchedCall = call
+        }
+        return matchedCall
+    }
+
+    static func decodeGeneratedImageDataURL(_ value: String)
+        -> (data: Data, mimeType: String)? {
         guard ToolGeneratedImageCodec.inlineDataDecodedUpperBound(value) != nil,
               let comma = value.firstIndex(of: ","),
               let data = Data(base64Encoded: String(value[value.index(after: comma)...])),
               data.count <= ToolGeneratedImageCodec.maximumInlineDecodedBytes else { return nil }
-        return data
+        return (data, String(value[..<comma]).dropLast(";base64".count).lowercased())
     }
 }

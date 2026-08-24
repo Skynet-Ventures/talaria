@@ -31,8 +31,7 @@ public struct TranscriptPresentationPolicy: Sendable, Equatable {
         // tool detail. Keep that deliverable visible without exposing ordinary
         // tool arguments/results in the bot-focused mode.
         return calls.filter {
-            $0.name == ToolGeneratedImageCodec.exactToolName
-                && $0.state == .done && $0.generatedImage != nil
+            GeneratedImageEchoPolicy.hasSuccessfulAuthority($0)
         }
     }
 

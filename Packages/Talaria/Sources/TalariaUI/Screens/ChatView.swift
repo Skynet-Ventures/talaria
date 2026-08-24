@@ -181,12 +181,14 @@ public struct ChatView: View {
         model.mode == .demo ? (DemoData.quickReplies[botID] ?? []) : []
     }
 
-    private var generatedImageSource: GeneratedImagePresentationSource? {
+    private func generatedImageSource(for message: ChatMessage)
+        -> GeneratedImagePresentationSource? {
         guard let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID),
               let chat, let stored = chat.storedSessionID, !stored.isEmpty else { return nil }
         return GeneratedImagePresentationSource(
             model: model, botID: botID, route: route,
-            storedSessionID: stored, liveSessionID: chat.sessionID ?? "")
+            storedSessionID: stored, liveSessionID: chat.sessionID ?? "",
+            messageRowID: message.rowID, messageRevisionID: message.id)
     }
 
     public var body: some View {
@@ -1049,8 +1051,7 @@ public struct ChatView: View {
                         .foregroundStyle(theme.ink.opacity(0.45))
                         .padding(.bottom, 4)
                 }
-                let visibleText = GeneratedImageEchoPolicy.suppress(
-                    in: message.text, calls: message.toolCalls)
+                let visibleText = GeneratedImageEchoPolicy.suppress(in: message)
                 if let reasoning = message.reasoning, !reasoning.isEmpty,
                    transcriptPolicy.showsReasoning(isLive: message.isStreaming) {
                     ThoughtBlock(reasoning: reasoning, theme: theme,
@@ -1065,7 +1066,7 @@ public struct ChatView: View {
                 if !visibleToolCalls.isEmpty {
                     ToolCallList(calls: visibleToolCalls, theme: theme, copy: copy,
                                  accent: botColor,
-                                 generatedImageSource: generatedImageSource)
+                                 generatedImageSource: generatedImageSource(for: message))
                         .padding(.top, visibleText.isEmpty ? 0 : 7)
                         .padding(.leading, theme.id == .ink ? 12 : 0)
                 }
@@ -1151,7 +1152,7 @@ public struct ChatView: View {
 
     @ViewBuilder private func messageMenu(_ message: ChatMessage) -> some View {
         Button {
-            copyToPasteboard(message.text)
+            copyToPasteboard(GeneratedImageEchoPolicy.suppress(in: message))
         } label: {
             Label(copy.copyMessage(theme.id), systemImage: "doc.on.doc")
         }

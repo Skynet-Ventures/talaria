@@ -151,10 +151,21 @@ final class GeneratedImageTranscriptTests: XCTestCase {
         XCTAssertEqual(TranscriptPresentationPolicy(detail: .quiet)
             .visibleToolCalls(calls).map(\.id), ["image"])
         XCTAssertEqual(GeneratedImagePresentationPolicy.minimumInteractiveDimension, 44)
+        XCTAssertEqual(GeneratedImagePresentationPolicy.retryLabel, "Retry")
+        XCTAssertEqual(GeneratedImagePresentationPolicy.accessibilityLiveRegion, "polite")
         XCTAssertEqual(GeneratedImagePresentationPolicy.titleTextStyle, .subheadline)
         XCTAssertFalse(GeneratedImagePresentationPolicy.reducedMotionUsesSpatialAnimation)
         XCTAssertEqual(GeneratedImagePresentationPolicy.accessibilityValue(
             call: calls[1], loaded: true), "Generated image ready")
+        XCTAssertEqual(GeneratedImagePresentationPolicy.accessibilityValue(
+            call: calls[1], loaded: false, loading: true),
+            "Loading generated image")
+        XCTAssertEqual(GeneratedImagePresentationPolicy.accessibilityValue(
+            call: calls[1], loaded: false, remoteApprovalRequired: true),
+            "Generated image requires permission to load")
+        XCTAssertEqual(GeneratedImagePresentationPolicy.accessibilityValue(
+            call: calls[1], loaded: false, failed: true),
+            "Generated image unavailable. Retry available")
     }
 
     func testSamePathAcrossSourcesHasDistinctTaskIdentityAndNoAuthorityFailsClosed() async throws {
@@ -162,16 +173,43 @@ final class GeneratedImageTranscriptTests: XCTestCase {
         let first = GeneratedImagePresentationSource(
             model: model, botID: "one",
             route: GatewayBotRoute(gatewayID: "A", profile: "default"),
-            storedSessionID: "stored", liveSessionID: "live")
+            storedSessionID: "stored", liveSessionID: "live",
+            messageRowID: 1, messageRevisionID: UUID())
         let second = GeneratedImagePresentationSource(
             model: model, botID: "two",
             route: GatewayBotRoute(gatewayID: "B", profile: "default"),
-            storedSessionID: "stored", liveSessionID: "live")
+            storedSessionID: "stored", liveSessionID: "live",
+            messageRowID: 1, messageRevisionID: UUID())
         XCTAssertNotEqual(first.identity, second.identity)
-        let result = await model.loadGeneratedImage(try output(), from: first)
+        let call = ToolCall(id: "orphan", name: "image_generate", context: "",
+                            state: .done, gatewayToolID: "wire",
+                            generatedImage: try output(), provenance: .unmatchedResult)
+        let result = await model.loadGeneratedImage(call, from: first)
         guard case .unavailable = result else {
             return XCTFail("A source without exact live authority must fail closed")
         }
+
+        let rowMessage = ChatMessage(id: UUID(), author: .bot, text: "", rowID: 1)
+        XCTAssertTrue(first.identifies(rowMessage))
+        XCTAssertFalse(first.identifies(ChatMessage(
+            id: first.messageRevisionID, author: .bot, text: "", rowID: 2)),
+            "a durable row identity cannot fall back to a coincidental revision id")
+    }
+
+    func testCompletedAuthorityRequiresExactPairedCurrentEvidence() throws {
+        let image = try output()
+        var call = ToolCall(id: "x", name: "image_generate", context: "",
+                            state: .done, gatewayToolID: "wire",
+                            generatedImage: image, provenance: .stored)
+        XCTAssertTrue(GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
+        call.gatewayToolID = nil
+        XCTAssertFalse(GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
+        call.gatewayToolID = "wire"; call.provenance = .unmatchedResult
+        XCTAssertFalse(GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
+        call.provenance = .live; call.state = .failed
+        XCTAssertFalse(GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
+        call.state = .done; call.name = "Image_Generate"
+        XCTAssertFalse(GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
     }
 
     func testDecodeAndRasterBombPoliciesFailClosed() {
@@ -197,6 +235,53 @@ final class GeneratedImageTranscriptTests: XCTestCase {
         CGImageDestinationAddImage(destination, frame, nil)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
         XCTAssertNil(GeneratedImageRasterPolicy.dimensions(animated as Data))
+    }
+
+    func testRasterPolicyUsesActualAllowlistAndTypedExtension() throws {
+        let png = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+        let pngMetadata = try XCTUnwrap(GeneratedImageRasterPolicy.inspect(png))
+        XCTAssertEqual(pngMetadata.format, .png)
+        XCTAssertEqual(pngMetadata.format.fileExtension, "png")
+        XCTAssertNil(GeneratedImageRasterPolicy.inspect(png, expectedMIME: "image/jpeg"))
+
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(png as CFData, nil))
+        let frame = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let tiff = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+            tiff, "public.tiff" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, frame, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        XCTAssertEqual(CGImageSourceGetType(try XCTUnwrap(
+            CGImageSourceCreateWithData(tiff as CFData, nil))) as String?, "public.tiff")
+        XCTAssertNil(GeneratedImageRasterPolicy.inspect(tiff as Data))
+
+        // A complete 1x1 32-bit ICO: directory, bitmap header, BGRA pixel,
+        // and one padded AND-mask scanline. ImageIO recognizes the container,
+        // while the specialist raster allowlist rejects it.
+        let icoBytes: [UInt8] = [
+            0,0,1,0,1,0, 1,1,0,0,1,0,32,0,48,0,0,0,22,0,0,0,
+            40,0,0,0,1,0,0,0,2,0,0,0,1,0,32,0,0,0,0,0,4,0,0,0,
+            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+            0,0,255,255, 0,0,0,0,
+        ]
+        let ico = Data(icoBytes)
+        XCTAssertNotNil(CGImageSourceCreateWithData(ico as CFData, nil))
+        XCTAssertNil(GeneratedImageRasterPolicy.inspect(ico))
+    }
+
+    func testRawNamedStandaloneImageResultRemainsInertUntilInvocationPairing() throws {
+        let transcript: JSONValue = ["messages": [[
+            "id": 9, "role": "tool", "tool_call_id": "orphan",
+            "name": "image_generate",
+            "content": ["success": true, "image": "/tmp/orphan.png"],
+        ]]]
+        let call = try XCTUnwrap(AppModel.chatMessages(fromTranscript: transcript)
+            .flatMap(\.toolCalls).first)
+        XCTAssertNil(call.generatedImage)
+        XCTAssertNotNil(call.deferredGeneratedImage)
+        XCTAssertFalse(GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
+        XCTAssertFalse(ToolRunPresentationPolicy.isGeneratedImageSpecialist(call))
     }
 
     func testTranscriptFindDoesNotIndexGeneratedCardPayload() throws {

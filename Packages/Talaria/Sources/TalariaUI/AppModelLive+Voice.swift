@@ -598,7 +598,8 @@ extension AppModel {
             if !busy, chat.messages.count > index, let last = chat.messages.last {
                 // A system row (error, denial, the stop note) ends the turn
                 // with no speech.
-                return last.author == .bot ? last.text : nil
+                return last.author == .bot
+                    ? GeneratedImageEchoPolicy.suppress(in: last) : nil
             }
             // The turn never started: the send failed, or the submit was
             // steered into a turn that had already finished.

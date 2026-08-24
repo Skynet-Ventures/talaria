@@ -16,11 +16,20 @@ enum GeneratedImagePresentationPolicy {
     static let statusTextStyle: Font.TextStyle = .caption
     static let pendingMessage = "The generated image will appear here."
     static let loadRemoteLabel = "Load image"
+    static let retryLabel = "Retry"
     static let reducedMotionUsesSpatialAnimation = false
+    static let accessibilityLiveRegion = "polite"
 
-    static func accessibilityValue(call: ToolCall, loaded: Bool) -> String {
+    static func accessibilityValue(call: ToolCall, loaded: Bool,
+                                   loading: Bool = false,
+                                   remoteApprovalRequired: Bool = false,
+                                   failed: Bool = false) -> String {
         if call.state == .running { return "Generating image" }
-        return loaded ? "Generated image ready" : "Generated image not loaded"
+        if loading { return "Loading generated image" }
+        if loaded { return "Generated image ready" }
+        if remoteApprovalRequired { return "Generated image requires permission to load" }
+        if failed { return "Generated image unavailable. Retry available" }
+        return "Generated image not loaded"
     }
 }
 
@@ -32,8 +41,10 @@ struct GeneratedImageCard: View {
     let accent: Color
 
     @State private var data: Data?
+    @State private var raster: GeneratedImageRasterMetadata?
     @State private var status: String?
     @State private var remoteApprovalRequired = false
+    @State private var remoteWasApproved = false
     @State private var loading = false
     @State private var viewerPresented = false
     @State private var exported: ExportedFile?
@@ -48,10 +59,10 @@ struct GeneratedImageCard: View {
             ?? ToolGeneratedImageCodec.aspectHint(from: call.arguments).ratio)
     }
     private var actualRatio: CGFloat {
-        guard let data, let size = GeneratedImageRasterPolicy.dimensions(data) else {
+        guard let raster else {
             return hintRatio
         }
-        return size.width / size.height
+        return CGFloat(raster.width) / CGFloat(raster.height)
     }
     private var taskIdentity: String {
         [source.identity, call.gatewayToolID ?? call.id, call.state.rawValue,
@@ -106,6 +117,7 @@ struct GeneratedImageCard: View {
                     .foregroundStyle(theme.sub)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel("Generated image status. \(status)")
+                    .generatedImagePoliteLiveRegion()
             }
         }
         .padding(10)
@@ -115,7 +127,9 @@ struct GeneratedImageCard: View {
             .strokeBorder(accent.opacity(0.32), lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityValue(GeneratedImagePresentationPolicy.accessibilityValue(
-            call: call, loaded: data != nil))
+            call: call, loaded: data != nil, loading: loading,
+            remoteApprovalRequired: remoteApprovalRequired && !remoteWasApproved,
+            failed: status != nil && (!remoteApprovalRequired || remoteWasApproved)))
         .transaction { transaction in
             if reducedMotion { transaction.animation = nil }
         }
@@ -162,8 +176,9 @@ struct GeneratedImageCard: View {
             .frame(minHeight: GeneratedImagePresentationPolicy.minimumInteractiveDimension)
             .accessibilityLabel("Generated image")
             .accessibilityHint("Opens a full-screen image viewer")
-        } else if remoteApprovalRequired {
+        } else if remoteApprovalRequired && !remoteWasApproved {
             Button {
+                remoteWasApproved = true
                 loadTask?.cancel()
                 loadTask = Task { await load(allowRemote: true) }
             } label: {
@@ -188,6 +203,23 @@ struct GeneratedImageCard: View {
             .disabled(loading)
             .accessibilityLabel(loading ? "Loading external generated image" : "Load image")
             .accessibilityHint("Contacts the public image host shown by the tool")
+        } else if status != nil && call.state == .done {
+            Button {
+                loadTask?.cancel()
+                loadTask = Task { await load(allowRemote: remoteWasApproved) }
+            } label: {
+                Label(GeneratedImagePresentationPolicy.retryLabel,
+                      systemImage: "arrow.clockwise")
+                    .font(.system(GeneratedImagePresentationPolicy.titleTextStyle)
+                        .weight(.semibold))
+                    .frame(maxWidth: .infinity,
+                           minHeight: GeneratedImagePresentationPolicy.minimumInteractiveDimension)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(accent)
+            .disabled(loading)
+            .accessibilityHint("Attempts to load this generated image again")
         } else {
             Text(call.state == .running
                  ? GeneratedImagePresentationPolicy.pendingMessage
@@ -200,6 +232,7 @@ struct GeneratedImageCard: View {
                 .background(theme.inset,
                             in: RoundedRectangle(cornerRadius: theme.rowRadius,
                                                  style: .continuous))
+                .generatedImagePoliteLiveRegion()
         }
     }
 
@@ -208,16 +241,17 @@ struct GeneratedImageCard: View {
         loading = true
         status = nil
         let result = await source.model.loadGeneratedImage(
-            output, from: source, allowRemote: allowRemote)
+            call, from: source, allowRemote: allowRemote)
         guard !Task.isCancelled, output == self.output else { return }
         loading = false
         switch result {
-        case .image(let bytes):
+        case .image(let bytes, let metadata):
             guard GeneratedImageRendering.image(bytes) != nil else {
                 status = "The returned bytes could not be decoded as an image."
                 return
             }
             data = bytes
+            raster = metadata
             remoteApprovalRequired = false
         case .externalApprovalRequired:
             remoteApprovalRequired = true
@@ -233,18 +267,20 @@ struct GeneratedImageCard: View {
         presentationTask?.cancel()
         presentationTask = nil
         data = nil
+        raster = nil
         status = nil
         loading = false
         remoteApprovalRequired = false
+        remoteWasApproved = false
         viewerPresented = false
         cleanupExport()
     }
 
     private func share() {
-        guard let data else { return }
+        guard let data, let raster else { return }
         do {
             exported = ExportedFile(url: try TalariaExportBox.write(
-                data, named: "generated-image.\(GeneratedImageRendering.extension(for: data))"))
+                data, named: "generated-image.\(raster.format.fileExtension)"))
         } catch {
             status = "The image could not be prepared for sharing or saving."
         }
@@ -270,6 +306,15 @@ struct GeneratedImageCard: View {
 }
 
 private extension View {
+    @ViewBuilder
+    func generatedImagePoliteLiveRegion() -> some View {
+        #if os(iOS)
+        accessibilityLiveRegion(.polite)
+        #else
+        self
+        #endif
+    }
+
     @ViewBuilder
     func generatedImageInspection<Content: View>(
         isPresented: Binding<Bool>,
@@ -303,17 +348,6 @@ private enum GeneratedImageRendering {
         #endif
     }
 
-    static func `extension`(for data: Data) -> String {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let type = CGImageSourceGetType(source) as String? else { return "png" }
-        if type.contains("jpeg") { return "jpg" }
-        if type.contains("webp") { return "webp" }
-        if type.contains("gif") { return "gif" }
-        if type.contains("heic") { return "heic" }
-        if type.contains("heif") { return "heif" }
-        if type.contains("bmp") { return "bmp" }
-        return "png"
-    }
 }
 
 @MainActor

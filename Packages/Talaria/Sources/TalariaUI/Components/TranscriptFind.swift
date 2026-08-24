@@ -186,8 +186,7 @@ public enum TranscriptFindPolicy {
             if offset.isMultiple(of: 16) { try Task.checkCancellation() }
             guard message.author == .user || message.author == .bot else { continue }
             let visibleText = message.author == .bot
-                ? GeneratedImageEchoPolicy.suppress(
-                    in: message.text, calls: message.toolCalls)
+                ? GeneratedImageEchoPolicy.suppress(in: message)
                 : message.text
             guard !visibleText.isEmpty else { continue }
             guard indexedMessages < maximumIndexedMessages,

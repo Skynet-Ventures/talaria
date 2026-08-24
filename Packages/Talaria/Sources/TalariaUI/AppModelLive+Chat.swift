@@ -1503,9 +1503,11 @@ extension AppModel {
             deferredWebSearchHasExplicitError: tool.webSearchOutput == nil
                 && tool.deferredWebSearchHasExplicitError,
             webSearchQuery: tool.webSearchOutput?.query,
-            generatedImage: tool.generatedImage,
-            deferredGeneratedImage: tool.generatedImage == nil
-                ? tool.deferredGeneratedImage : nil,
+            // An unmatched completion remains inert until an exact-id start
+            // proves the invocation, regardless of a repeated result name.
+            generatedImage: nil,
+            deferredGeneratedImage: tool.generatedImage
+                ?? tool.deferredGeneratedImage,
             provenance: .unmatchedResult,
             diagnostic: "No exact live tool-call id matched this completion; Talaria did not pair it by name."))
     }

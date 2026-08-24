@@ -31,7 +31,7 @@ enum ToolRunPresentationPolicy {
     static func isGeneratedImageSpecialist(_ call: ToolCall) -> Bool {
         call.name == ToolGeneratedImageCodec.exactToolName
             && (call.state == .running
-                || (call.state == .done && call.generatedImage != nil))
+                || GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
     }
 
     /// File diffs are review deliverables, not collapsible activity. Preserve

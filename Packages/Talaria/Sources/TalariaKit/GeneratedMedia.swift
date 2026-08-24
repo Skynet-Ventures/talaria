@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// Bounded, portable evidence from an exact Hermes `image_generate` result.
 /// The source remains inert until the UI binds it to the producing chat.
@@ -35,7 +40,9 @@ public struct ToolGeneratedImage: Codable, Sendable, Equatable {
         self.source = admitted.value
         self.sourceKind = sourceKind
         self.aspect = aspect
-        self.echoSources = ToolGeneratedImageCodec.admittedEchoSources(echoSources)
+        guard let admittedEchoes = ToolGeneratedImageCodec.admittedEchoSources(echoSources)
+        else { return nil }
+        self.echoSources = admittedEchoes
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -55,8 +62,33 @@ public struct ToolGeneratedImage: Codable, Sendable, Equatable {
         source = admitted.value
         sourceKind = rawKind
         aspect = try values.decodeIfPresent(Aspect.self, forKey: .aspect) ?? .landscape
-        echoSources = ToolGeneratedImageCodec.admittedEchoSources(
-            try values.decodeIfPresent([String].self, forKey: .echoSources) ?? [])
+        if values.contains(.echoSources) {
+            var encoded = try values.nestedUnkeyedContainer(forKey: .echoSources)
+            if let count = encoded.count, count > ToolGeneratedImageCodec.maximumEchoSources {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .echoSources, in: values,
+                    debugDescription: "Too many generated-image echo sources.")
+            }
+            var decoded: [String] = []
+            decoded.reserveCapacity(min(encoded.count ?? 0,
+                                        ToolGeneratedImageCodec.maximumEchoSources))
+            while !encoded.isAtEnd {
+                guard decoded.count < ToolGeneratedImageCodec.maximumEchoSources else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .echoSources, in: values,
+                        debugDescription: "Too many generated-image echo sources.")
+                }
+                decoded.append(try encoded.decode(String.self))
+            }
+            guard let admitted = ToolGeneratedImageCodec.admittedEchoSources(decoded) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .echoSources, in: values,
+                    debugDescription: "Generated-image echo source exceeded its bound.")
+            }
+            echoSources = admitted
+        } else {
+            echoSources = []
+        }
     }
 
     public static func merging(newer: ToolGeneratedImage?,
@@ -68,7 +100,9 @@ public struct ToolGeneratedImage: Codable, Sendable, Equatable {
 public enum ToolGeneratedImageCodec {
     public static let exactToolName = "image_generate"
     public static let maximumPathOrURLScalars = 2_048
-    public static let maximumSerializedResultBytes = 80_000
+    public static let maximumPathOrURLBytes = 8_192
+    public static let maximumSerializedResultBytes = ToolPayloadCodec.maximumResultCharacters
+    public static let maximumResultObjectFields = 32
     public static let maximumGatewayMediaResponseBytes = 16_781_312
     public static let maximumInlineDecodedBytes = 12 * 1_024 * 1_024
     public static let maximumEchoSources = 3
@@ -92,11 +126,11 @@ public enum ToolGeneratedImageCodec {
         let display = [record["host_image"]?.stringValue, record["image"]?.stringValue]
             .compactMap { admittedSource($0) }.first
         guard let display else { return nil }
-        let echoes = admittedEchoSources([
+        let echoes = [
             record["host_image"]?.stringValue,
             record["image"]?.stringValue,
             record["agent_visible_image"]?.stringValue,
-        ].compactMap { $0 })
+        ].compactMap { $0 }.compactMap(admittedEchoSource)
         return ToolGeneratedImage(
             source: display.value, sourceKind: display.kind,
             aspect: aspectHint(from: arguments), echoSources: echoes)
@@ -110,6 +144,9 @@ public enum ToolGeneratedImageCodec {
 
     public static func admittedSource(_ raw: String?) -> AdmittedSource? {
         guard let raw else { return nil }
+        guard raw.utf8.count <= maximumPathOrURLBytes,
+              raw.unicodeScalars.prefix(maximumPathOrURLScalars + 1).count
+                <= maximumPathOrURLScalars else { return nil }
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, !containsUnsafeScalar(value) else { return nil }
         let lower = value.lowercased()
@@ -117,9 +154,7 @@ public enum ToolGeneratedImageCodec {
         guard !lower.hasPrefix("data:") else { return nil }
 
         if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
-            guard value.unicodeScalars.prefix(maximumPathOrURLScalars + 1).count
-                    <= maximumPathOrURLScalars,
-                  !value.contains("\\"),
+            guard !value.contains("\\"),
                   let decoded = value.removingPercentEncoding,
                   !containsUnsafeScalar(decoded),
                   let parts = URLComponents(string: value),
@@ -131,9 +166,7 @@ public enum ToolGeneratedImageCodec {
             return AdmittedSource(value: value, kind: .remoteURL)
         }
 
-        guard value.unicodeScalars.prefix(maximumPathOrURLScalars + 1).count
-                <= maximumPathOrURLScalars,
-              !value.contains("%") else { return nil }
+        guard !value.contains("%") else { return nil }
         var path = value
         if lower.hasPrefix("file://") {
             guard let url = URL(string: value), url.scheme?.lowercased() == "file",
@@ -155,36 +188,48 @@ public enum ToolGeneratedImageCodec {
             normalized = parsed
         }
         let ext = URL(fileURLWithPath: normalized).pathExtension.lowercased()
-        guard ["png", "jpg", "jpeg", "webp", "gif", "heic", "heif", "bmp"]
+        guard ["png", "jpg", "jpeg", "webp", "gif", "bmp"]
             .contains(ext) else { return nil }
         return AdmittedSource(value: normalized, kind: .gatewayPath)
     }
 
-    public static func admittedEchoSources(_ values: [String]) -> [String] {
+    public static func admittedEchoSource(_ raw: String) -> String? {
+        guard raw.utf8.count <= maximumPathOrURLBytes,
+              raw.unicodeScalars.prefix(maximumPathOrURLScalars + 1).count
+                <= maximumPathOrURLScalars else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !containsUnsafeScalar(value) else { return nil }
+        return value
+    }
+
+    public static func admittedEchoSources(_ values: [String]) -> [String]? {
+        guard values.count <= maximumEchoSources else { return nil }
         var seen = Set<String>()
         var result: [String] = []
         for raw in values {
-            guard result.count < maximumEchoSources else { break }
-            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !value.isEmpty, !containsUnsafeScalar(value),
-                  value.unicodeScalars.prefix(maximumPathOrURLScalars + 1).count
-                    <= maximumPathOrURLScalars,
-                  seen.insert(value).inserted else { continue }
+            guard let value = admittedEchoSource(raw) else { return nil }
+            guard seen.insert(value).inserted else { continue }
             result.append(value)
         }
         return result
     }
 
     public static func inlineDataDecodedUpperBound(_ value: String) -> Int? {
-        guard let comma = value.firstIndex(of: ",") else { return nil }
+        let maximumEncoded = ((maximumInlineDecodedBytes + 2) / 3) * 4
+        guard value.utf8.count <= maximumEncoded + 40,
+              value.unicodeScalars.prefix(maximumEncoded + 41).count
+                <= maximumEncoded + 40,
+              let comma = value.firstIndex(of: ","),
+              let utf8Comma = comma.samePosition(in: value.utf8),
+              value.utf8.distance(from: value.utf8.startIndex,
+                                  to: utf8Comma) <= 32
+        else { return nil }
         let metadata = value[value.startIndex..<comma].lowercased()
         let allowed = ["data:image/png;base64", "data:image/jpeg;base64",
                        "data:image/webp;base64", "data:image/gif;base64",
-                       "data:image/heic;base64", "data:image/heif;base64",
                        "data:image/bmp;base64"]
         guard allowed.contains(String(metadata)) else { return nil }
         let encoded = value[value.index(after: comma)...]
-        let maximumEncoded = ((maximumInlineDecodedBytes + 2) / 3) * 4
         guard encoded.utf8.count <= maximumEncoded,
               encoded.unicodeScalars.allSatisfy({ scalar in
                   (65...90).contains(scalar.value) || (97...122).contains(scalar.value)
@@ -220,13 +265,17 @@ public enum ToolGeneratedImageCodec {
 
     private static func record(from result: JSONValue?) -> [String: JSONValue]? {
         guard let result, result != .null else { return nil }
-        if let object = result.objectValue { return object }
+        if let object = result.objectValue {
+            return object.count <= maximumResultObjectFields ? object : nil
+        }
         guard let text = result.stringValue,
               text.utf8.count <= maximumSerializedResultBytes,
               let data = text.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(JSONValue.self, from: data)
         else { return nil }
-        return decoded.objectValue
+        guard let object = decoded.objectValue,
+              object.count <= maximumResultObjectFields else { return nil }
+        return object
     }
 
     private static func containsUnsafeScalar(_ value: String) -> Bool {
@@ -240,57 +289,177 @@ public enum ToolGeneratedImageCodec {
 }
 
 public enum RemoteGeneratedImagePolicy {
-    /// Reject names and literal addresses that are inherently local/private.
-    /// The explicit loader additionally rejects redirects.
-    public static func hostIsPublic(_ raw: String) -> Bool {
-        let host = raw.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        guard !host.isEmpty, host != "localhost", !host.hasSuffix(".localhost"),
-              !host.hasSuffix(".local") else { return false }
-        if host == "::" || host == "::1" || host == "0:0:0:0:0:0:0:1"
-            || (host.contains(":") && (host.hasPrefix("fe80:")
-                || host.hasPrefix("fc") || host.hasPrefix("fd")
-                || host.hasPrefix("ff"))) { return false }
-        if host.hasPrefix("::ffff:"),
-           ipv4IsPrivate(String(host.dropFirst("::ffff:".count))) { return false }
-        if host.allSatisfy(\.isNumber) { return false }
-        return !ipv4IsPrivate(host)
+    public static let maximumResolvedAddresses = 64
+
+    public enum ResolvedAddress: Sendable, Equatable {
+        case ipv4(UInt8, UInt8, UInt8, UInt8)
+        case ipv6([UInt8])
     }
 
-    private static func ipv4IsPrivate(_ host: String) -> Bool {
-        let pieces = host.split(separator: ".")
-        let octets = pieces.compactMap { UInt8($0) }
-        if pieces.count == 4, octets.count == 4 {
-            let a = octets[0], b = octets[1], c = octets[2]
-            if a == 0 || a == 10 || a == 127 || (a == 169 && b == 254)
+    public typealias Resolver = @Sendable (String) async -> [ResolvedAddress]?
+
+    public static func hostIsPublic(_ raw: String) -> Bool {
+        guard raw.utf8.count <= 253 else { return false }
+        var host = raw.lowercased()
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            host.removeFirst()
+            host.removeLast()
+        }
+        if host.hasSuffix(".") { host.removeLast() }
+        guard !host.isEmpty, host != "localhost", !host.hasSuffix(".localhost"),
+              !host.hasSuffix(".local"), !host.contains("%") else { return false }
+        if let literal = parsedLiteral(host) {
+            if case .ipv4(let a, let b, let c, let d) = literal,
+               host != "\(a).\(b).\(c).\(d)" { return false }
+            return addressIsPublic(literal)
+        }
+
+        // inet_pton intentionally rejects legacy IPv4 spellings. Fail closed
+        // for strings made only from the numeric-address alphabet so octal,
+        // hexadecimal, shortened, and overflow forms are never sent to DNS.
+        let numericAlphabet = CharacterSet(charactersIn: "0123456789abcdefx.:")
+        if host.unicodeScalars.allSatisfy({ numericAlphabet.contains($0) }) {
+            return false
+        }
+        return true
+    }
+
+    public static func resolvedHostIsPublic(
+        _ raw: String, resolver: Resolver? = nil
+    ) async -> Bool {
+        guard hostIsPublic(raw) else { return false }
+        var host = raw.lowercased()
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            host.removeFirst(); host.removeLast()
+        }
+        if host.hasSuffix(".") { host.removeLast() }
+        if let literal = parsedLiteral(host) { return addressIsPublic(literal) }
+        let addresses = resolver == nil
+            ? await systemResolve(host) : await resolver?(host)
+        guard let addresses, !addresses.isEmpty,
+              addresses.count <= maximumResolvedAddresses else { return false }
+        return addresses.allSatisfy(addressIsPublic)
+    }
+
+    public static func addressIsPublic(_ address: ResolvedAddress) -> Bool {
+        switch address {
+        case .ipv4(let a, let b, let c, _):
+            return !(a == 0 || a == 10 || a == 127 || (a == 169 && b == 254)
                 || (a == 172 && (16...31).contains(b)) || (a == 192 && b == 168)
                 || (a == 100 && (64...127).contains(b))
                 || (a == 192 && (b == 0 || b == 2))
                 || (a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100)))
-                || (a == 203 && b == 0 && c == 113)
-                || a >= 224 { return true }
+                || (a == 203 && b == 0 && c == 113) || a >= 224)
+        case .ipv6(let bytes):
+            guard bytes.count == 16 else { return false }
+            if bytes.allSatisfy({ $0 == 0 }) { return false }
+            if bytes.dropLast().allSatisfy({ $0 == 0 }), bytes.last == 1 { return false }
+            if bytes[0] == 0xff || (bytes[0] & 0xfe) == 0xfc
+                || (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80)
+                || (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0xc0) { return false }
+            if bytes.prefix(10).allSatisfy({ $0 == 0 }), bytes[10] == 0xff,
+               bytes[11] == 0xff {
+                return addressIsPublic(.ipv4(bytes[12], bytes[13], bytes[14], bytes[15]))
+            }
+            if bytes.prefix(12).allSatisfy({ $0 == 0 }) {
+                return addressIsPublic(.ipv4(bytes[12], bytes[13], bytes[14], bytes[15]))
+            }
+            return true
         }
-        return false
+    }
+
+    public static func systemResolve(_ host: String) async -> [ResolvedAddress]? {
+        await Task.detached(priority: .userInitiated) {
+            var hints = addrinfo()
+            hints.ai_family = AF_UNSPEC
+            #if canImport(Darwin)
+            hints.ai_socktype = SOCK_STREAM
+            #else
+            hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+            #endif
+            var head: UnsafeMutablePointer<addrinfo>?
+            guard getaddrinfo(host, nil, &hints, &head) == 0, let head else { return nil }
+            defer { freeaddrinfo(head) }
+            var result: [ResolvedAddress] = []
+            var inspected = 0
+            var cursor: UnsafeMutablePointer<addrinfo>? = head
+            while let info = cursor?.pointee {
+                inspected += 1
+                guard inspected <= maximumResolvedAddresses else { return nil }
+                if info.ai_family == AF_INET,
+                   let socket = info.ai_addr?.withMemoryRebound(
+                    to: sockaddr_in.self, capacity: 1, { $0.pointee }) {
+                    var raw = socket.sin_addr
+                    withUnsafeBytes(of: &raw) { bytes in
+                        result.append(.ipv4(bytes[0], bytes[1], bytes[2], bytes[3]))
+                    }
+                } else if info.ai_family == AF_INET6,
+                          let socket = info.ai_addr?.withMemoryRebound(
+                            to: sockaddr_in6.self, capacity: 1, { $0.pointee }) {
+                    var raw = socket.sin6_addr
+                    let bytes = withUnsafeBytes(of: &raw) { Array($0.prefix(16)) }
+                    result.append(.ipv6(bytes))
+                }
+                cursor = info.ai_next
+            }
+            return result
+        }.value
+    }
+
+    private static func parsedLiteral(_ host: String) -> ResolvedAddress? {
+        var ipv4 = in_addr()
+        if host.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
+            return withUnsafeBytes(of: &ipv4) { .ipv4($0[0], $0[1], $0[2], $0[3]) }
+        }
+        var ipv6 = in6_addr()
+        if host.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 {
+            return withUnsafeBytes(of: &ipv6) { .ipv6(Array($0.prefix(16))) }
+        }
+        return nil
     }
 }
 
 public enum GeneratedImageEchoPolicy {
     public static let maximumTranscriptScalars = 128_000
+    public static let maximumTranscriptBytes = 512_000
+    public static let maximumCalls = 128
+    public static let maximumSuppressedSources = 24
 
     public static func hasSuccessfulAuthority(_ call: ToolCall) -> Bool {
-        call.name == ToolGeneratedImageCodec.exactToolName
-            && call.state == .done && call.generatedImage != nil
-            && call.gatewayToolID?.isEmpty == false
-            && (call.provenance == .live || call.provenance == .stored)
+        guard call.name == ToolGeneratedImageCodec.exactToolName,
+              call.state == .done, let image = call.generatedImage,
+              call.gatewayToolID?.isEmpty == false,
+              call.provenance == .live || call.provenance == .stored,
+              ToolGeneratedImage(source: image.source, sourceKind: image.sourceKind,
+                                 aspect: image.aspect,
+                                 echoSources: image.echoSources) == image else { return false }
+        return true
     }
 
     public static func suppress(in text: String, calls: [ToolCall]) -> String {
-        guard !text.isEmpty,
-              text.unicodeScalars.prefix(maximumTranscriptScalars + 1).count
-                <= maximumTranscriptScalars else { return text }
-        let sources = ToolGeneratedImageCodec.admittedEchoSources(calls.flatMap { call in
-            hasSuccessfulAuthority(call) ? (call.generatedImage?.echoSources ?? []) : []
-        })
+        guard !text.isEmpty else { return text }
+        // Retained transcript hydration itself caps a row at 128 calls. A
+        // hand-built/corrupt snapshot outside that envelope cannot safely
+        // decide which image echoes are authoritative, so expose no prose.
+        guard calls.count <= maximumCalls else { return "" }
+        var sources: [String] = []
+        var seen = Set<String>()
+        for call in calls where hasSuccessfulAuthority(call) {
+            guard let echoes = call.generatedImage?.echoSources else { continue }
+            for source in echoes {
+                guard sources.count < maximumSuppressedSources else { return "" }
+                guard let admitted = ToolGeneratedImageCodec.admittedEchoSource(source)
+                else { return "" }
+                if seen.insert(admitted).inserted { sources.append(admitted) }
+            }
+        }
         guard !sources.isEmpty else { return text }
+        // Byte/scalar ceilings are checked before regex construction or a
+        // whole-string transform. With successful image authority, oversized
+        // prose fails closed rather than leaking an unscanned echo.
+        guard text.utf8.count <= maximumTranscriptBytes,
+              text.unicodeScalars.prefix(maximumTranscriptScalars + 1).count
+                <= maximumTranscriptScalars else { return "" }
 
         var next = text
         for source in sources {
@@ -317,10 +486,11 @@ public enum GeneratedImageEchoPolicy {
             next = regex.stringByReplacingMatches(in: next, range: range, withTemplate: "$1")
         }
         return next
-            .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
-            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static func suppress(in message: ChatMessage) -> String {
+        guard message.author == .bot else { return message.text }
+        return suppress(in: message.text, calls: message.toolCalls)
     }
 }
 
@@ -339,15 +509,24 @@ public extension GatewayClient {
 }
 
 public enum GeneratedRemoteImageLoader {
-    public static func load(_ url: URL) async throws -> Data {
+    public static func load(
+        _ url: URL,
+        resolver: RemoteGeneratedImagePolicy.Resolver? = nil
+    ) async throws -> Data {
         guard let host = url.host(), RemoteGeneratedImagePolicy.hostIsPublic(host),
               url.scheme?.lowercased() == "http" || url.scheme?.lowercased() == "https"
         else { throw GatewayError(code: 403, message: "Private image hosts are not allowed.") }
+        guard await RemoteGeneratedImagePolicy.resolvedHostIsPublic(host, resolver: resolver)
+        else { throw GatewayError(code: 403, message: "Image host resolved to a private address.") }
         var request = URLRequest(url: url, timeoutInterval: 25)
         request.httpMethod = "GET"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.httpShouldSetCookies = false
         let (data, response) = try await GatewayBoundedRESTLoader.load(
             request, limit: ToolGeneratedImageCodec.maximumInlineDecodedBytes,
-            rejectsRedirects: true)
+            configuration: configuration, rejectsRedirects: true)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
               http.mimeType?.lowercased().hasPrefix("image/") == true else {

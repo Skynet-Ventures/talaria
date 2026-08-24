@@ -1501,9 +1501,12 @@ extension AppModel {
                 && searchCandidateAdmission.hasExplicitError,
             webSearchQuery: ToolWebSearchCodec.isWebSearchTool(name)
                 ? ToolWebSearchCodec.query(from: arguments) : nil,
-            generatedImage: ToolGeneratedImageCodec.isGeneratedImageTool(name)
-                ? generatedCandidate : nil,
-            deferredGeneratedImage: (name.isEmpty || name == "Tool")
+            // A standalone tool-result row is never image authority, even if
+            // it repeats a name. Exact-id merge with its retained invocation
+            // is the only promotion boundary.
+            generatedImage: nil,
+            deferredGeneratedImage: (name.isEmpty || name == "Tool"
+                || ToolGeneratedImageCodec.isGeneratedImageTool(name))
                 ? generatedCandidate : nil,
             provenance: hasRaw
                 ? (wireID == nil ? .unmatchedResult : (ambiguousIdentity ? .malformed : .stored))

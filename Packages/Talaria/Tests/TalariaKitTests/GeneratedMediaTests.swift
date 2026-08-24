@@ -109,7 +109,7 @@ final class GeneratedMediaTests: XCTestCase {
             ToolGeneratedImage.self, from: Data(hostile.utf8)))
     }
 
-    func testToolCompletePayloadUsesDeferredOnlyForNamelessCompletion() {
+    func testToolCompletePayloadKeepsEveryUnpairedCompletionDeferred() {
         let result: JSONValue = ["success": true, "image": "/tmp/x.png"]
         let nameless = ToolCompletePayload(["tool_id": "X", "result": result])
         XCTAssertNil(nameless.generatedImage)
@@ -118,8 +118,8 @@ final class GeneratedMediaTests: XCTestCase {
         let exact = ToolCompletePayload([
             "tool_id": "X", "name": "image_generate", "result": result,
         ])
-        XCTAssertNotNil(exact.generatedImage)
-        XCTAssertNil(exact.deferredGeneratedImage)
+        XCTAssertNil(exact.generatedImage)
+        XCTAssertNotNil(exact.deferredGeneratedImage)
 
         let other = ToolCompletePayload([
             "tool_id": "X", "name": "terminal", "result": result,
@@ -139,7 +139,7 @@ final class GeneratedMediaTests: XCTestCase {
             + "![cat](/host/cat.png) [media](#media:%2Fsandbox%2Fcat.png) "
             + "/sandbox/cat.png Done."
         XCTAssertEqual(GeneratedImageEchoPolicy.suppress(in: text, calls: [base]),
-                       "Here. ![other](/unrelated/provider.png) Done.")
+                       "Here. ![other](/unrelated/provider.png)    Done.")
         var failed = base; failed.state = .failed
         XCTAssertEqual(GeneratedImageEchoPolicy.suppress(in: text, calls: [failed]), text)
         var orphan = base; orphan.provenance = .unmatchedResult
@@ -156,6 +156,99 @@ final class GeneratedMediaTests: XCTestCase {
         XCTAssertTrue(RemoteGeneratedImagePolicy.hostIsPublic("fcdn.example.com"))
         XCTAssertTrue(RemoteGeneratedImagePolicy.hostIsPublic("127.0.0.1.example.com"))
         XCTAssertTrue(RemoteGeneratedImagePolicy.hostIsPublic("8.8.8.8"))
+    }
+
+    func testRemoteHostPolicyRejectsLegacyLiteralsAndResolvedPrivateAddresses() async {
+        for host in ["0177.0.0.1", "0x7f000001", "127.1", "127.0.1",
+                     "4294967295", "::ffff:7f00:1", "fe80::1%en0"] {
+            XCTAssertFalse(RemoteGeneratedImagePolicy.hostIsPublic(host), host)
+        }
+        let privateResolver: RemoteGeneratedImagePolicy.Resolver = { _ in
+            [.ipv4(93, 184, 216, 34), .ipv4(10, 0, 0, 1)]
+        }
+        let rejected = await RemoteGeneratedImagePolicy.resolvedHostIsPublic(
+            "cdn.example.com", resolver: privateResolver)
+        XCTAssertFalse(rejected)
+        let publicResolver: RemoteGeneratedImagePolicy.Resolver = { _ in
+            [.ipv4(93, 184, 216, 34), .ipv6([
+                0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0, 1,
+                0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46,
+            ])]
+        }
+        let admitted = await RemoteGeneratedImagePolicy.resolvedHostIsPublic(
+            "cdn.example.com", resolver: publicResolver)
+        XCTAssertTrue(admitted)
+        let oversizedResolver: RemoteGeneratedImagePolicy.Resolver = { _ in
+            Array(repeating: .ipv4(93, 184, 216, 34),
+                  count: RemoteGeneratedImagePolicy.maximumResolvedAddresses + 1)
+        }
+        let oversized = await RemoteGeneratedImagePolicy.resolvedHostIsPublic(
+            "cdn.example.com", resolver: oversizedResolver)
+        XCTAssertFalse(oversized)
+        XCTAssertFalse(RemoteGeneratedImagePolicy.addressIsPublic(
+            .ipv6(Array(repeating: 0, count: 10) + [0xff, 0xff, 127, 0, 0, 1])))
+
+        do {
+            _ = try await GeneratedRemoteImageLoader.load(
+                URL(string: "https://cdn.example.com/image.png")!,
+                resolver: privateResolver)
+            XCTFail("the loader must reject DNS answers before opening a request")
+        } catch let error as GatewayError {
+            XCTAssertEqual(error.code, 403)
+        } catch {
+            XCTFail("unexpected DNS rejection error: \(error)")
+        }
+    }
+
+    func testCandidateAndCodableBoundsFailClosed() throws {
+        var object: [String: JSONValue] = [
+            "success": true, "image": "/tmp/image.png",
+        ]
+        for index in 0...ToolGeneratedImageCodec.maximumResultObjectFields {
+            object["padding-\(index)"] = "x"
+        }
+        XCTAssertNil(ToolGeneratedImageCodec.candidate(
+            arguments: nil, result: .object(object)))
+        let hugeString = String(repeating: "x",
+            count: ToolGeneratedImageCodec.maximumSerializedResultBytes + 1)
+        XCTAssertNil(ToolGeneratedImageCodec.candidate(
+            arguments: nil, result: .string(hugeString)))
+        XCTAssertNil(ToolGeneratedImageCodec.admittedSource(
+            String(repeating: " ", count: ToolGeneratedImageCodec.maximumPathOrURLBytes + 1)
+                + "/tmp/x.png"))
+
+        let tooMany = #"{"source":"/tmp/x.png","sourceKind":"gatewayPath","aspect":"square","echoSources":["a","b","c","d"]}"#
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            ToolGeneratedImage.self, from: Data(tooMany.utf8)))
+        let hugeEcho = #"{"source":"/tmp/x.png","sourceKind":"gatewayPath","aspect":"square","echoSources":[""#
+            + String(repeating: "x", count: ToolGeneratedImageCodec.maximumPathOrURLBytes + 1)
+            + #""]}"#
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            ToolGeneratedImage.self, from: Data(hugeEcho.utf8)))
+    }
+
+    func testEchoSuppressionPreservesAllUnrelatedFormatting() throws {
+        let output = try XCTUnwrap(ToolGeneratedImageCodec.candidate(
+            arguments: nil,
+            result: ["success": true, "image": "/tmp/exact.png"]))
+        let call = ToolCall(id: "x", name: "image_generate", context: "",
+                            state: .done, gatewayToolID: "wire",
+                            generatedImage: output, provenance: .live)
+        let text = "Intro  keeps  spaces\n\n```swift\n  let x =  2\n```\n"
+            + "![exact](/tmp/exact.png)\n\nEnd"
+        XCTAssertEqual(GeneratedImageEchoPolicy.suppress(in: text, calls: [call]),
+                       "Intro  keeps  spaces\n\n```swift\n  let x =  2\n```\n\n\nEnd")
+        let message = ChatMessage(author: .bot, text: text, toolCalls: [call])
+        XCTAssertEqual(GeneratedImageEchoPolicy.suppress(in: message),
+                       GeneratedImageEchoPolicy.suppress(in: text, calls: [call]))
+        XCTAssertEqual(GeneratedImageEchoPolicy.suppress(
+            in: "/tmp/exact.png",
+            calls: Array(repeating: call,
+                         count: GeneratedImageEchoPolicy.maximumCalls + 1)), "")
+        XCTAssertEqual(GeneratedImageEchoPolicy.suppress(
+            in: String(repeating: "x",
+                       count: GeneratedImageEchoPolicy.maximumTranscriptBytes + 1)
+                + "/tmp/exact.png", calls: [call]), "")
     }
 
     func testGatewayMediaUsesExactBoundedNoRedirectExecutor() async throws {
