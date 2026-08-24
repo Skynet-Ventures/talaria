@@ -352,10 +352,39 @@ enum TranscriptHydrationMerge {
         row.time = live.time ?? stored.time
         row.card = live.card ?? stored.card
         row.reasoning = live.reasoning ?? stored.reasoning
-        if live.toolCalls.isEmpty { row.toolCalls = stored.toolCalls }
+        row.toolCalls = mergeToolCalls(stored: stored.toolCalls, live: live.toolCalls)
         row.rowID = live.rowID ?? stored.rowID
         row.failure = TurnFailureLifecycle.merge(stored.failure, live.failure)
         return row
+    }
+
+    private static func mergeToolCalls(stored: [ToolCall], live: [ToolCall]) -> [ToolCall] {
+        guard !stored.isEmpty else { return live }
+        guard !live.isEmpty else { return stored }
+        var consumed: Set<Int> = []
+        var merged = stored
+        for index in merged.indices {
+            guard let liveIndex = live.indices.first(where: { candidate in
+                guard !consumed.contains(candidate) else { return false }
+                if let wire = merged[index].gatewayToolID, !wire.isEmpty {
+                    return live[candidate].gatewayToolID == wire
+                }
+                return live[candidate].id == merged[index].id
+            }) else { continue }
+            consumed.insert(liveIndex)
+            let overlay = live[liveIndex]
+            merged[index].state = overlay.state
+            if !overlay.context.isEmpty { merged[index].context = overlay.context }
+            merged[index].summary = overlay.summary ?? merged[index].summary
+            merged[index].durationSeconds = overlay.durationSeconds
+                ?? merged[index].durationSeconds
+            merged[index].arguments = merged[index].arguments ?? overlay.arguments
+            merged[index].result = merged[index].result ?? overlay.result
+            merged[index].resultText = merged[index].resultText ?? overlay.resultText
+            if merged[index].diagnostic == nil { merged[index].diagnostic = overlay.diagnostic }
+        }
+        merged.append(contentsOf: live.indices.filter { !consumed.contains($0) }.map { live[$0] })
+        return merged
     }
 }
 
@@ -1139,20 +1168,23 @@ extension AppModel {
     // MARK: Hydration
 
     /// Replace the transcript with the stored conversation. The resume ack's
-    /// projection is primary (it is the shape every surface reads,
-    /// server.py:_history_to_messages); REST is the fallback for a resume that
-    /// omitted messages.
+    /// projection supplies the visible frame, while the bounded raw page
+    /// supplements tool-only assistant rows and exact results that
+    /// `_history_to_messages` intentionally omits.
     private func hydrateCanonical(_ live: LiveSession, botID: String, profile: String,
                                   client: GatewayClient,
                                   clearWhenEmpty: Bool) async throws {
         let chat = chat(for: botID)
         let chatID = ObjectIdentifier(chat)
         let hydrationGeneration = LiveRuntime.shared.generation
-        let sourceGatewayID = gatewayRoute(for: botID)?.gatewayID
+        guard let sourceRoute = gatewayRoute(for: botID),
+              sourceRoute.profile == profile,
+              let sourceAuthority = await captureTranscriptHydrationSourceAuthority(
+                route: sourceRoute, client: client) else { throw CancellationError() }
+        let sourceGatewayID = sourceRoute.gatewayID
         let storedID = live.storedSessionID.isEmpty ? chat.storedSessionID : live.storedSessionID
-        // A resume projection is the primary history source.  When it is
-        // empty, the REST page is a read-only fallback for this exact durable
-        // key.  Its one permitted retry is deliberately kept inside hydration:
+        // The REST page is a read-only supplement/fallback for this exact
+        // durable key. Its one permitted empty-projection retry stays here:
         // it must never re-enter canonical resolution, where a timeout could
         // otherwise choose a different title/recency candidate or mint a chat.
         try await Self.hydrateCanonicalTranscript(
@@ -1160,18 +1192,20 @@ extension AppModel {
             resumeMessages: live.messages,
             clearWhenEmpty: clearWhenEmpty,
             storedID: storedID,
+            toolsMayBeRunning: live.running || live.retainedInflight?.streaming == true,
             fallback: { durableTarget in
                 guard !durableTarget.isEmpty else { return nil }
                 return try await client.latestSessionMessages(
                     storedID: durableTarget, profile: profile)
             },
             accepts: {
-                guard LiveRuntime.shared.generation == hydrationGeneration,
+                guard await self.transcriptHydrationSourceIsCurrent(sourceAuthority),
+                      LiveRuntime.shared.generation == hydrationGeneration,
                       let owner = chats[botID], ObjectIdentifier(owner) == chatID,
                       owner.sessionID == live.sessionID,
                       owner.storedSessionID == storedID,
                       let route = gatewayRoute(for: botID) else { return false }
-                return route.gatewayID == sourceGatewayID && route.profile == profile
+                return route == sourceRoute
             })
         if let lease = CanonicalChatRuntime.shared.ambiguousKickoffs[botID],
            CanonicalChatRuntime.shared.kickoffs[botID] == lease.id,
@@ -1181,7 +1215,6 @@ extension AppModel {
             finishCanonicalKickoff(lease)
         }
         if let fence = ChatRuntime.shared.transcriptFences[botID],
-           let sourceGatewayID,
            let storedID = chat.storedSessionID,
            fence.acceptsAuthoritativeHydration(
                gatewayID: sourceGatewayID, profile: profile, storedID: storedID,
@@ -1214,16 +1247,26 @@ extension AppModel {
         chat: ChatState,
         resumeMessages: [JSONValue],
         clearWhenEmpty: Bool,
+        toolsMayBeRunning: Bool = false,
         fallback: @MainActor () async throws -> JSONValue?,
-        accepts: @MainActor () -> Bool
+        accepts: @MainActor () async -> Bool
     ) async throws {
         let baseline = chat.messages
-        var history = Self.chatMessages(fromTranscript: .array(resumeMessages))
-        if history.isEmpty, let payload = try await fallback() {
-            history = Self.chatMessages(fromTranscript: payload)
+        let resumePayload = JSONValue.array(resumeMessages)
+        var history = Self.chatMessages(
+            fromTranscript: resumePayload, toolsMayBeRunning: toolsMayBeRunning)
+        if history.isEmpty {
+            if let payload = try await fallback() {
+                history = Self.chatMessages(
+                    fromTranscript: payload, toolsMayBeRunning: toolsMayBeRunning)
+            }
+        } else if let payload = try? await fallback() {
+            let raw = Self.chatMessages(
+                fromTranscript: payload, toolsMayBeRunning: toolsMayBeRunning)
+            history = Self.mergeRawToolSupplement(display: history, raw: raw)
         }
         try Task.checkCancellation()
-        guard accepts() else { throw CancellationError() }
+        guard await accepts() else { throw CancellationError() }
         let chatID = ObjectIdentifier(chat)
         let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
         chat.messages = TranscriptHydrationMerge.merge(
@@ -1246,8 +1289,9 @@ extension AppModel {
         resumeMessages: [JSONValue],
         clearWhenEmpty: Bool,
         storedID: String?,
+        toolsMayBeRunning: Bool = false,
         fallback: @MainActor (String) async throws -> JSONValue?,
-        accepts: @MainActor () -> Bool
+        accepts: @MainActor () async -> Bool
     ) async throws {
         let durableTarget = storedID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         var attempt = 0
@@ -1257,6 +1301,7 @@ extension AppModel {
                     chat: chat,
                     resumeMessages: resumeMessages,
                     clearWhenEmpty: clearWhenEmpty,
+                    toolsMayBeRunning: toolsMayBeRunning,
                     fallback: {
                         guard !durableTarget.isEmpty else { return nil }
                         do {
@@ -1314,6 +1359,11 @@ extension AppModel {
 
 // MARK: - REST hydration
 
+enum StoredTranscriptHydrationPayloadPolicy {
+    static let maximumRows = 200
+    static let maximumResponseBytes = 1_048_576
+}
+
 extension GatewayClient {
 
     /// The newest page of a stored transcript, in desktop's exact shape
@@ -1329,14 +1379,17 @@ extension GatewayClient {
     ///   durable display history; without them the transcript silently ends at
     ///   the compaction boundary (hermes_state.py:10155-10161).
     func latestSessionMessages(storedID: String, profile: String?,
-                               limit: Int = 200) async throws -> JSONValue {
-        var query = [URLQueryItem(name: "limit", value: String(limit)),
+                               limit: Int = StoredTranscriptHydrationPayloadPolicy.maximumRows) async throws -> JSONValue {
+        let boundedLimit = min(max(1, limit), StoredTranscriptHydrationPayloadPolicy.maximumRows)
+        var query = [URLQueryItem(name: "limit", value: String(boundedLimit)),
                      URLQueryItem(name: "order", value: "latest"),
                      URLQueryItem(name: "include_compacted", value: "true")]
         if let profile, !profile.isEmpty {
             query.insert(URLQueryItem(name: "profile", value: profile), at: 0)
         }
-        return try await restJSON(path: "api/sessions/\(storedID)/messages", query: query)
+        return try await restJSONBounded(
+            path: "api/sessions/\(storedID)/messages", query: query,
+            maximumResponseBytes: StoredTranscriptHydrationPayloadPolicy.maximumResponseBytes)
     }
 }
 

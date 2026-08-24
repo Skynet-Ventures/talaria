@@ -829,7 +829,13 @@ extension AppModel {
                                     client: GatewayClient) async {
         guard mode == .live, !isOffline else { return }
         guard let chat = chats[botID], !chat.messages.isEmpty else { return }
-        let profile = GatewayBotRoute(qualifiedID: botID)?.profile ?? botID
+        guard let route = gatewayRoute(for: botID),
+              let authority = await captureTranscriptHydrationSourceAuthority(
+                route: route, client: client) else { return }
+        let profile = route.profile
+        let chatID = ObjectIdentifier(chat)
+        let storedAtStart = chat.storedSessionID
+        let runtimeAtStart = chat.sessionID
 
         var payload: JSONValue?
         // A session still in the registry answers over WS with row ids and the
@@ -844,12 +850,28 @@ extension AppModel {
                 payload = try? await client.sessionHistory(runtimeSID)
             }
         }
-        if payload == nil, let stored = chat.storedSessionID, !stored.isEmpty {
-            payload = try? await client.latestSessionMessages(storedID: stored, profile: profile)
+        var rawPayload: JSONValue?
+        if let stored = chat.storedSessionID, !stored.isEmpty {
+            rawPayload = try? await client.latestSessionMessages(
+                storedID: stored, profile: profile)
+            if payload == nil { payload = rawPayload }
         }
         guard let payload else { return }
 
-        let fetched = Self.chatMessages(fromTranscript: payload)
+        guard await transcriptHydrationSourceIsCurrent(authority),
+              let owner = chats[botID], ObjectIdentifier(owner) == chatID,
+              owner.storedSessionID == storedAtStart,
+              owner.sessionID == runtimeAtStart,
+              gatewayRoute(for: botID) == route else { return }
+
+        var fetched = Self.chatMessages(
+            fromTranscript: payload, toolsMayBeRunning: chat.isRunning)
+        if let rawPayload, rawPayload != payload {
+            fetched = Self.mergeRawToolSupplement(
+                display: fetched,
+                raw: Self.chatMessages(
+                    fromTranscript: rawPayload, toolsMayBeRunning: chat.isRunning))
+        }
         guard !fetched.isEmpty else { return }
         graft(fetched, into: chat)
     }

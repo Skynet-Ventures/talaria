@@ -1182,7 +1182,7 @@ extension AppModel {
                 operationID: tool.toolID.isEmpty ? "tool:\(tool.name)" : tool.toolID)
 
         case .toolComplete(let tool):
-            completeTool(tool, payload: event.payload, in: chat)
+            completeTool(tool, payload: event.payload, in: chat, botID: botID)
             LiveActivityController.shared.endOperationalWork(
                 botID: botID,
                 operationID: tool.toolID.isEmpty ? "tool:\(tool.name)" : tool.toolID)
@@ -1215,24 +1215,35 @@ extension AppModel {
         }) {
             // Promote the tool.generating placeholder rather than add a twin.
             calls[pending].id = id
+            calls[pending].gatewayToolID = tool.toolID.isEmpty ? nil : tool.toolID
             calls[pending].context = tool.context
-        } else if let existing = calls.firstIndex(where: { $0.id == id }) {
+            calls[pending].arguments = tool.arguments
+        } else if let existing = calls.firstIndex(where: {
+            $0.id == id || (!tool.toolID.isEmpty && $0.gatewayToolID == tool.toolID)
+        }) {
             calls[existing].context = tool.context
+            calls[existing].gatewayToolID = tool.toolID.isEmpty ? nil : tool.toolID
+            calls[existing].arguments = tool.arguments ?? calls[existing].arguments
         } else {
-            calls.append(ToolCall(id: id, name: tool.name, context: tool.context))
+            calls.append(ToolCall(
+                id: id, name: tool.name, context: tool.context,
+                gatewayToolID: tool.toolID.isEmpty ? nil : tool.toolID,
+                arguments: tool.arguments))
         }
         chat.messages[index].toolCalls = calls
     }
 
-    private func completeTool(_ tool: ToolCompletePayload, payload: JSONValue?, in chat: ChatState) {
+    private func completeTool(_ tool: ToolCompletePayload, payload: JSONValue?,
+                              in chat: ChatState, botID: String) {
         // Newest first, and only within reach of the running turn: a stale
         // chip further up the transcript must not be retro-completed by a
         // same-named tool running now.
         for index in chat.messages.indices.suffix(12).reversed() {
             guard !chat.messages[index].toolCalls.isEmpty else { continue }
             var calls = chat.messages[index].toolCalls
-            let hit = calls.firstIndex { $0.id == tool.toolID && !tool.toolID.isEmpty }
-                ?? calls.lastIndex { $0.state == .running && $0.name == tool.name }
+            let hit = calls.firstIndex {
+                !tool.toolID.isEmpty && ($0.gatewayToolID == tool.toolID || $0.id == tool.toolID)
+            }
             guard let hit else { continue }
 
             calls[hit].state = Self.toolFailed(payload: payload, summary: tool.summary,
@@ -1240,6 +1251,7 @@ extension AppModel {
             calls[hit].summary = tool.summary
             // result_text only rides along in verbose mode; `result` is always
             // there, so fall back to a readable rendering of it.
+            calls[hit].result = tool.result
             calls[hit].resultText = tool.resultText ?? Self.describeResult(payload?["result"])
             calls[hit].durationSeconds = tool.durationSeconds
             if calls[hit].context.isEmpty, let summary = tool.summary {
@@ -1248,6 +1260,21 @@ extension AppModel {
             chat.messages[index].toolCalls = calls
             return
         }
+        let result = tool.result ?? ToolPayloadCodec.unavailable(
+            "Hermes completed this tool without retaining inspectable output.")
+        let index = toolAnchor(in: chat, botID: botID)
+        chat.messages[index].toolCalls.append(ToolCall(
+            id: "live-result:\(UUID().uuidString)",
+            name: tool.name.isEmpty ? "Tool" : tool.name,
+            context: "",
+            state: Self.toolFailed(payload: payload, summary: tool.summary,
+                                   resultText: tool.resultText) ? .failed : .done,
+            summary: tool.summary, resultText: result.displayText,
+            durationSeconds: tool.durationSeconds,
+            gatewayToolID: tool.toolID.isEmpty ? nil : tool.toolID,
+            arguments: tool.arguments, result: result,
+            provenance: .unmatchedResult,
+            diagnostic: "No exact live tool-call id matched this completion; Talaria did not pair it by name."))
     }
 
     /// A finished turn can hold no running tools — a stop or an error leaves
@@ -1266,19 +1293,13 @@ extension AppModel {
         }
     }
 
-    /// The gateway has no explicit tool-failure flag (`_on_tool_complete`
-    /// just ships the tool's own result), so read the result the way a person
-    /// would: an `error` key, or text that opens with one.
+    /// Only protocol-level evidence marks a tool failed. Human prose is not a
+    /// status bit (a successful grep result can legitimately begin "error").
     static func toolFailed(payload: JSONValue?, summary: String?, resultText: String?) -> Bool {
-        if let result = payload?["result"], result["error"] != nil { return true }
-        let text = (resultText ?? summary ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !text.isEmpty else { return false }
-        for marker in ["error", "failed", "traceback", "exception", "permission denied"]
-        where text.hasPrefix(marker) {
-            return true
-        }
-        return false
+        if payload?["is_error"]?.boolValue == true
+            || ToolPayloadCodec.valueIsExplicitError(payload?["error"]) { return true }
+        return ToolPayloadCodec.resultHasExplicitError(
+            ToolPayloadCodec.result(from: payload?["result"]))
     }
 
     /// Render a tool result for the expanded chip: strings verbatim, structured
