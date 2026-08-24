@@ -52,6 +52,108 @@ final class RoomStoreTests: XCTestCase {
         XCTAssertEqual(restored.first?.name, "Standalone")
     }
 
+    func testComposerDraftSurvivesReloadAndRenameByImmutableRoomID() async throws {
+        let base = try temporaryBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = RoomStore(baseDirectory: base)
+        let room = RoomRecord(name: "Before", members: members())
+        try await store.upsert(room)
+        try await store.setComposerDraft("half typed 🚀", roomID: room.id)
+        _ = try await store.mutate(roomID: room.id) { $0.name = "After" }
+
+        let relaunched = RoomStore(baseDirectory: base)
+        let restoredDraft = try await relaunched.composerDraft(roomID: room.id)
+        let restoredRoom = try await relaunched.room(id: room.id)
+        XCTAssertEqual(restoredDraft, "half typed 🚀")
+        XCTAssertEqual(restoredRoom?.name, "After")
+    }
+
+    func testComposerDraftDeleteAndSameNameRecreationCannotInherit() async throws {
+        let base = try temporaryBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = RoomStore(baseDirectory: base)
+        let original = RoomRecord(name: "Same", members: members())
+        try await store.upsert(original)
+        try await store.setComposerDraft("belongs only to original", roomID: original.id)
+        try await store.delete(roomID: original.id)
+
+        let replacement = RoomRecord(name: "Same", members: members())
+        try await store.upsert(replacement)
+        XCTAssertNotEqual(original.id, replacement.id)
+        let replacementDraft = try await store.composerDraft(roomID: replacement.id)
+        XCTAssertEqual(replacementDraft, "")
+        do {
+            _ = try await store.composerDraft(roomID: original.id)
+            XCTFail("a deleted immutable identity must not retain draft authority")
+        } catch {
+            XCTAssertEqual(error as? RoomStoreError, .roomNotFound(original.id))
+        }
+        let index = try String(contentsOf: base.appendingPathComponent("Rooms/rooms-v1.json"),
+                               encoding: .utf8)
+        XCTAssertFalse(index.contains("belongs only to original"))
+    }
+
+    func testDeleteAllPurgesComposerDraftFromAuthoritativeEmptyCommit() async throws {
+        let base = try temporaryBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = RoomStore(baseDirectory: base)
+        let room = RoomRecord(name: "Private", members: members())
+        try await store.upsert(room)
+        try await store.setComposerDraft("erase this local draft", roomID: room.id)
+        try await store.deleteAll()
+
+        let relaunched = RoomStore(baseDirectory: base)
+        let restoredRooms = try await relaunched.loadAll()
+        XCTAssertTrue(restoredRooms.isEmpty)
+        do {
+            _ = try await relaunched.composerDraft(roomID: room.id)
+            XCTFail("privacy deletion must remove draft and room identity together")
+        } catch {
+            XCTAssertEqual(error as? RoomStoreError, .roomNotFound(room.id))
+        }
+    }
+
+    func testLegacyEnvelopeWithoutComposerDraftFieldMigratesToEmpty() async throws {
+        let base = try temporaryBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let room = RoomRecord(name: "Legacy", members: members())
+        let writer = RoomStore(baseDirectory: base)
+        try await writer.upsert(room)
+        let indexURL = base.appendingPathComponent("Rooms/rooms-v1.json")
+        let data = try Data(contentsOf: indexURL)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "composerDrafts")
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            .write(to: indexURL, options: .atomic)
+
+        let migrated = RoomStore(baseDirectory: base)
+        let migratedDraft = try await migrated.composerDraft(roomID: room.id)
+        XCTAssertEqual(migratedDraft, "")
+    }
+
+    func testMalformedDuplicateComposerDraftRowsFailClosed() async throws {
+        let base = try temporaryBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let room = RoomRecord(name: "Duplicate", members: members())
+        let writer = RoomStore(baseDirectory: base)
+        try await writer.upsert(room)
+        try await writer.setComposerDraft("one", roomID: room.id)
+        let indexURL = base.appendingPathComponent("Rooms/rooms-v1.json")
+        let data = try Data(contentsOf: indexURL)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let drafts = try XCTUnwrap(object["composerDrafts"] as? [[String: Any]])
+        object["composerDrafts"] = drafts + drafts
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            .write(to: indexURL, options: .atomic)
+
+        do {
+            _ = try await RoomStore(baseDirectory: base).loadAll()
+            XCTFail("duplicate immutable draft identities must fail closed")
+        } catch {
+            XCTAssertEqual(error as? RoomStoreError, .corruptIndex)
+        }
+    }
+
     func testMalformedIndexFailsClosedInsteadOfReturningEmpty() async throws {
         let base = try temporaryBase()
         defer { try? FileManager.default.removeItem(at: base) }
@@ -1218,6 +1320,8 @@ final class RoomStoreTests: XCTestCase {
         let legacyRoomID = try XCTUnwrap(RoomProjectionEnvelope.localRoomID(
             forProjectionKey: legacyKey))
         XCTAssertEqual(Set(hydrated.rooms.map(\.id)), [idRoomID, legacyRoomID])
+        try await store.setComposerDraft("preserved until fence releases", roomID: idRoomID)
+        try await store.setComposerDraft("delete with remote room", roomID: legacyRoomID)
 
         let fenced = try await store.reconcileRoomProjection(
             RoomProjectionEnvelope(deleted: [idKey: 1, legacyKey: 3]),
@@ -1225,6 +1329,14 @@ final class RoomStoreTests: XCTestCase {
             allowedGatewayIDs: projectedGatewayIDs)
         XCTAssertNotNil(fenced.rooms.first { $0.id == idRoomID })
         XCTAssertNil(fenced.rooms.first { $0.id == legacyRoomID })
+        let preservedDraft = try await store.composerDraft(roomID: idRoomID)
+        XCTAssertEqual(preservedDraft, "preserved until fence releases")
+        do {
+            _ = try await store.composerDraft(roomID: legacyRoomID)
+            XCTFail("an authoritative remote deletion must purge its local draft")
+        } catch {
+            XCTAssertEqual(error as? RoomStoreError, .roomNotFound(legacyRoomID))
+        }
         XCTAssertNil(fenced.roomProjection.rooms[idKey])
         XCTAssertNil(fenced.roomProjection.rooms[legacyKey])
 
@@ -1234,6 +1346,12 @@ final class RoomStoreTests: XCTestCase {
         let released = try await store.reconcileRoomProjection(RoomProjectionEnvelope())
         XCTAssertNil(released.rooms.first { $0.id == idRoomID })
         XCTAssertTrue(released.rooms.isEmpty)
+        do {
+            _ = try await store.composerDraft(roomID: idRoomID)
+            XCTFail("the released tombstone must purge the formerly fenced draft")
+        } catch {
+            XCTAssertEqual(error as? RoomStoreError, .roomNotFound(idRoomID))
+        }
     }
 
     func testMalformedModernMembersOrUnroutableAuthorsRemainLedgerOnly() async throws {

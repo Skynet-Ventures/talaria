@@ -162,6 +162,53 @@ already treats a present empty image as clear, while an absent image remains
 ambiguous because size bounding can omit it. A Desktop-origin omission is
 therefore never inferred as removal.
 
+## Targeted durable room-composer draft audit at `057dcdf23`
+
+Room composer ownership was re-audited directly against exact Hermes source
+`057dcdf236f8a6a26721c10fcc6ccb72726e272a`, especially
+`groupComposerDraftKey`, the window-local `groupComposerDrafts` map,
+rename/disband integration, revision-guarded send restoration, and
+`group-composer-drafts.test.mjs`. The narrow Talaria dependency base is the
+shared-room projection/CAS merge `665d988d9fc75efb9ade8c3439fd1fa495a2021f`:
+the room store, runtime, view, and composer are unchanged between that owner
+and the later ordered-transcript/read-aloud heads, so unrelated transcript and
+management stacks are intentionally excluded.
+
+Desktop establishes the portable identity rule: current room drafts key by
+immutable `roomId`, legacy name-keyed state migrates when that identity
+appears, rename preserves the room draft, disband clears only that room, and a
+failed optimistic send restores the prior snapshot only if no newer edit has
+won. Desktop keeps main, reply, and pending-attachment drafts in a module-local
+map so they survive pane parking but not process relaunch, and explicitly does
+not publish half-typed content or attachment bytes into shared room metadata.
+
+Talaria implements the phone equivalent for the single main room composer:
+one protected local text draft per immutable Talaria `RoomID`. It never keys
+by display name, source gateway, profile, or member route and never enters the
+shared room projection. A rename therefore preserves it without migration;
+disband, authoritative projection deletion, and Settings privacy deletion
+purge it atomically with the rich room index; a same-name recreation has a new
+`RoomID` and cannot inherit it. A missing `composerDrafts` field in an older v1
+index migrates to no durable drafts—the prior Talaria implementation held text
+only in SwiftUI state, so there is no authoritative name-keyed local state to
+guess or import.
+
+Draft text preserves exact whitespace but is independently bounded to 4,096
+Unicode scalars and 16,384 UTF-8 bytes. The protected envelope admits at most
+128 unique non-empty rows and 1 MiB of aggregate draft UTF-8; duplicates,
+orphans, noncanonical over-bound rows, and oversized collections fail closed.
+Runtime reads are generation-fenced, writes are coalesced in order under the
+same per-room mutation/privacy gate as send and disband, and stale queued work
+cannot recreate a deleted room. A successful send clears only when the current
+text is the exact submitted snapshot. Failed or uncertain sends preserve the
+text, and any protected-storage failure leaves the on-screen value intact with
+an explicit warning rather than claiming durability.
+
+Attachments and per-thread reply drafts remain deliberately outside this
+slice. Persisting attachment bytes needs a separate quota, lifecycle, and
+orphan-cleanup contract; inventing a second draft identity such as member route
+or editable thread label would weaken the one-immutable-room requirement.
+
 ## Current-source corrections
 
 | Contract | Talaria disposition | Automated evidence | Remaining certification |
@@ -174,6 +221,7 @@ therefore never inferred as removal.
 | Hidden room-member clarification and approval | Implemented as runtime-only prompt state rebuilt from `session.resume`. Clarify wins when both fields exist; cards use the exact room/member/runtime/request identity and owning gateway. Approval requires a positive resolved count. Batch answers are sequential, resume accepted locks from `pending_clarify.answers`, and never resend locked questions. | `RoomPendingPromptTests`, `RoomRoutingTests` | Cross-gateway approval and single/multi-select/batch clarify; partial batch relaunch; desktop resolves first; 20-minute hard cap |
 | Room pending deadline/recovery | Implemented. A blocked non-running session cannot become a pass. Busy or awaiting-user state extends the sliding 180-second deadline up to the 20-minute hard cap; the cap clears transient prompt UI while leaving durable timed-out work for later harvest/re-mirroring. | `RoomRoutingTests` | Background/relaunch near both deadlines; rename, member removal, and disband while a prompt is open |
 | Immutable room member-session identity | Implemented with the durable Talaria `RoomID`, independent of the editable room name. Rename preserves identity; delete and same-name recreation mint a different identity and cannot resume the deleted room's title-based sessions. Existing durable session IDs remain first authority and legacy name-titled rooms retain an explicit migration fallback. | `RoomRoutingTests` | Rename and same-name recreation against real primary and foreign profiles |
+| Durable room composer draft | Implemented against exact Desktop `057dcdf23` identity/failure semantics as one bounded, protected, local-only main-composer text row per immutable Talaria `RoomID`. Rename survives; disband, remote tombstone, and privacy erase purge; same-name recreation cannot inherit; successful exact-snapshot send clears while failure/uncertainty preserves. Drafts never enter shared profile metadata. | `RoomComposerDraftTests`, `RoomComposerDraftRuntimeTests`, focused `RoomStoreTests`, and `RoomRoutingTests.testOfflineCreateAndDisbandKeepSourceQualifiedMetadataOutbox` | Real device: type/background/terminate/relaunch restore, rapid room switching, rename, failed and successful sends, remote tombstone, disband/same-name recreation, and Delete Local Data |
 | Shared gateway room projection and profile-metadata CAS | Implemented. Talaria combines its bounded, separately persisted ledger with safe rich-room hydration, reachable-credentialed-gateway fan-out, per-gateway serialization/retry, exact CAS read-back, bounded legacy fallback, and adoption/reconnect/foreground reseeding. Foreign client-local routes hydrate as frozen view-only seats until exact local authority exists. Privacy deletion fences suspended sync, and startup applies cached tombstones before network recovery. | Focused `RoomStoreTests`, `RoomEngineTests`, `RoomProjectionRuntimeTests`, `ProfileUIMetaCASTests`, and cached-tombstone/settings `RoomRoutingTests` regressions cover storage and scheduler policy. Production target discovery and lifecycle-hook wiring are source-reviewed but remain part of live certification; upstream group-room and profile-CAS suites remain the pinned authority. | Run and retain all six live Desktop/phone/gateway cases in `TESTING.md` |
 | Source-qualified slash commands | Implemented. Catalog/completion/resolve caches are per physical gateway; `slash.exec` captures the client and session that own the selected bot and connection generation. Typed output/send/skill/prefill/alias results are decoded without an unsafe unconditional `command.dispatch` fallback. Follow-up send failure retains a recoverable draft without replaying the first RPC. | `SourceQualifiedRoutingTests` | Two live gateways with the same runtime session id; supported structured results; plugin/quick-command collision remains rejected |
 | Source-qualified MCP setup prompts | Implemented with `(gateway, request_id)` identity, secondary event routing, exact-source expiration and response. | `SourceQualifiedRoutingTests` | Same request id on two live gateways and one expired response |

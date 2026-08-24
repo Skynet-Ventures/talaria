@@ -19,6 +19,8 @@ final class RoomRuntime {
     var metadataPendingCount = 0
     var metadataLastError: String?
     var profileLifecycleError: String?
+    var composerDrafts: [RoomID: String] = [:]
+    var composerDraftErrors: [RoomID: String] = [:]
     var isLoaded = false
     /// Blocking prompts belong to the live hidden session, not to the durable
     /// room transcript.  The compound key intentionally includes the source
@@ -59,6 +61,8 @@ final class RoomRuntime {
     /// at this boundary lets concurrency tests suspend the winning mutation
     /// without weakening the namespace lock itself.
     @ObservationIgnored var roomNameCommitBarrier: (@MainActor () async -> Void)?
+    @ObservationIgnored var composerDraftTasks: [RoomID: Task<Void, Never>] = [:]
+    @ObservationIgnored var composerDraftGenerations: [RoomID: UInt64] = [:]
     /// A batch may partially succeed before a later question fails. Remember
     /// only confirmed question ids for this live request so retrying the card
     /// does not duplicate a response Hermes already acknowledged.
@@ -983,6 +987,11 @@ public extension AppModel {
             runtime.metadataPendingCount = 0
             runtime.metadataLastError = nil
             runtime.profileLifecycleError = nil
+            for task in runtime.composerDraftTasks.values { task.cancel() }
+            runtime.composerDraftTasks.removeAll()
+            runtime.composerDraftGenerations.removeAll()
+            runtime.composerDrafts.removeAll()
+            runtime.composerDraftErrors.removeAll()
             runtime.isLoaded = false
             runtime.pendingPrompts.removeAll()
             runtime.answeredPromptQuestions.removeAll()
@@ -1331,6 +1340,7 @@ public extension AppModel {
             )
         )
         try await runtime.store.delete(roomID: roomID, metadataMutations: metadata)
+        runtime.retireComposerDraft(roomID)
         runtime.driveTasks[roomID] = nil
         runtime.driveTokens[roomID] = nil
         runtime.postSettleHarvestTasks[roomID] = nil

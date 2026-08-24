@@ -73,9 +73,17 @@ public struct RoomView: View {
                 } else {
                     RoomComposer(theme: theme, members: liveMembers,
                                  placeholder: "New thread in \(room.name)…",
-                                 submitLabel: "New Thread") { text, attachments in
+                                 submitLabel: "New Thread",
+                                 draft: Binding(
+                                     get: { model.roomComposerDraft(roomID) },
+                                     set: { model.updateRoomComposerDraft($0, roomID: roomID) }
+                                 ),
+                                 draftPersistenceError: model.roomComposerDraftError(roomID)
+                    ) { text, attachments in
                         _ = try await model.sendRoomMessage(roomID: roomID, text: text,
                                                             attachments: attachments)
+                        try await model.clearRoomComposerDraftAfterSend(
+                            roomID, submitted: text)
                     }
                     .padding(10).background(theme.bg)
                     .overlay(alignment: .top) {
@@ -90,6 +98,7 @@ public struct RoomView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity).background(theme.bg)
         .task {
             await model.loadRooms()
+            await model.loadRoomComposerDraft(roomID)
             model.reconcileRoom(roomID)
         }
         .confirmationDialog("Disband this room?", isPresented: $confirmDisband,
