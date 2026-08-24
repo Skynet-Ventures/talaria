@@ -41,7 +41,7 @@ behavior.
 - PR94 `ff0ea1a6e91c3af0996f406dac0acf9f607cc166`: bounded discount presentation
   and Ox Alpha search aliases. Independent QA and CI are green, but its
   dependency chain and device proof remain open.
-- PR95 review head `1b50d7969810c33582caaad5273b8e83520ad54d`
+- PR95 review head `887de277b1ea9b9f2860b85e9e38b5fe8b2e8971`
   (implementation `4a06df18e768fe4bb8a206dc86f1dce0a08feec6`): exact-source push admission
   plus configured bot title/avatar presentation. Merge and device proof remain
   open.

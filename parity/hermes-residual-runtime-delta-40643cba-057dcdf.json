@@ -754,7 +754,7 @@
       "entriesFile": "parity/hermes-desktop-delta-40643cba-057dcdf.tsv",
       "metadataFile": "parity/hermes-desktop-delta-40643cba-057dcdf.json",
       "entriesSha256": "9dd0832633b57697e43c97ce456a602f4b38f9f6073cf7807aba92654d6c16e4",
-      "metadataSha256": "a55968cc9cf4957f2d71dbdf74a104f6587eaccd5b2dadd138da3fec603a2325"
+      "metadataSha256": "24fb07ec0dec6c76eccf20261a71785242bfe0e453456cbda60cead3e5681ea1"
     },
     "cli-current": {
       "kind": "working-tree-uncommitted",
@@ -768,7 +768,7 @@
       "entriesFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.tsv",
       "metadataFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.json",
       "entriesSha256": "7d82ecd09a4e5e4dc4f281f5daa7446326636908f63d1c40989806c1655d5d5b",
-      "metadataSha256": "051cbbf050c4a870869c143d690f295a7c9b49dddb8a90fa818416b19f4f025f"
+      "metadataSha256": "672db1cf853e6c52c9a49567ecea58bbcefae2fdbd6264b367e9e47f21979cdb"
     }
   },
   "predecessorCounts": {

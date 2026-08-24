@@ -43,7 +43,7 @@
       "entriesFile": "parity/hermes-desktop-delta-40643cba-057dcdf.tsv",
       "checkerFile": "scripts/check_hermes_desktop_delta.py",
       "documentationFile": "docs/HERMES-DESKTOP-DELTA-40643CBA-057DCDF.md",
-      "metadataSha256": "a55968cc9cf4957f2d71dbdf74a104f6587eaccd5b2dadd138da3fec603a2325",
+      "metadataSha256": "24fb07ec0dec6c76eccf20261a71785242bfe0e453456cbda60cead3e5681ea1",
       "entriesSha256": "9dd0832633b57697e43c97ce456a602f4b38f9f6073cf7807aba92654d6c16e4",
       "scopedCommitCount": 241
     },
@@ -63,7 +63,7 @@
       "entriesFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.tsv",
       "checkerFile": "scripts/check_hermes_gateway_platform_delta.py",
       "documentationFile": "docs/HERMES-GATEWAY-PLATFORM-DELTA-40643CBA-057DCDF.md",
-      "metadataSha256": "051cbbf050c4a870869c143d690f295a7c9b49dddb8a90fa818416b19f4f025f",
+      "metadataSha256": "672db1cf853e6c52c9a49567ecea58bbcefae2fdbd6264b367e9e47f21979cdb",
       "entriesSha256": "7d82ecd09a4e5e4dc4f281f5daa7446326636908f63d1c40989806c1655d5d5b",
       "scopedCommitCount": 82
     },
@@ -73,7 +73,7 @@
       "entriesFile": "parity/hermes-residual-runtime-delta-40643cba-057dcdf.tsv",
       "checkerFile": "scripts/check_hermes_residual_runtime_delta.py",
       "documentationFile": "docs/HERMES-RESIDUAL-RUNTIME-DELTA-40643CBA-057DCDF.md",
-      "metadataSha256": "826ed67663c40f4bf84663f6163a4bbc495fbfb7d2a6069fd2d25ae56423ef3b",
+      "metadataSha256": "d460c24f304164d6678b87160cbf1293b21f0c982944924a287ae0e6c559bd3c",
       "entriesSha256": "5338d9646b1e518b1badafc0b300e25800e9e16372b922e6fff6662583479b46",
       "scopedCommitCount": 201
     }
@@ -102,7 +102,7 @@
       {
         "pullRequest": 95,
         "branch": "codex/source-qualified-push-presentation",
-        "head": "1b50d7969810c33582caaad5273b8e83520ad54d",
+        "head": "887de277b1ea9b9f2860b85e9e38b5fe8b2e8971",
         "implementationCommit": "4a06df18e768fe4bb8a206dc86f1dce0a08feec6",
         "status": "implemented-unmerged-device-proof-pending"
       }

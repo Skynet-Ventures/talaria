@@ -71,7 +71,7 @@ PINNED_LEDGER_HEADS: dict[str, dict[str, object]] = {
 OPEN_SLICE_HEADS = {
     "source-qualified-push-presentation": (
         "codex/source-qualified-push-presentation",
-        "1b50d7969810c33582caaad5273b8e83520ad54d",
+        "887de277b1ea9b9f2860b85e9e38b5fe8b2e8971",
     ),
     "compact-bot-profile": (
         "codex/current-hermes-compact-bot-profile",
