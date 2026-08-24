@@ -554,6 +554,8 @@ public struct ToolCompletePayload: Sendable {
     public var arguments: ToolPayload?
     public var result: ToolPayload?
     public var fileDiff: ToolFileDiff?
+    public var structuredOutput: ToolStructuredOutput?
+    public var deferredStructuredOutput: ToolStructuredOutput?
     public var deferredFileDiff: ToolFileDiff?
 
     public init(_ v: JSONValue?) {
@@ -573,13 +575,18 @@ public struct ToolCompletePayload: Sendable {
         }
         arguments = ToolPayloadCodec.directArguments(
             from: v?["args"] ?? v?["arguments"] ?? v?["input"])
-        result = ToolPayloadCodec.result(from: v?["result"] ?? v?["result_text"])
+        let rawResult = v?["result"] ?? v?["result_text"]
+        let outputAdmission = ToolOutputCodec.admit(toolName: name, result: rawResult)
+        result = outputAdmission.genericResult
         resultText = result?.displayText
         let candidate = ToolDiffCodec.candidate(
             arguments: v?["args"] ?? v?["arguments"] ?? v?["input"],
             result: v?["result"] ?? v?["result_text"],
             inlineDiff: v?["inline_diff"])
         fileDiff = ToolDiffCodec.isFileEditTool(name) ? candidate : nil
+        structuredOutput = outputAdmission.output
+        deferredStructuredOutput = name.isEmpty
+            ? ToolOutputCodec.candidate(result: rawResult) : nil
         deferredFileDiff = fileDiff == nil ? candidate : nil
     }
 }

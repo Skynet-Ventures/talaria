@@ -388,10 +388,15 @@ public struct ToolChip: View {
            !arguments.isEmpty {
             sections.append("Arguments (\(payloadLabel(payload)))\n\(arguments)")
         }
-        if let payload = call.result, let result = payload.displayText, !result.isEmpty {
+        if call.structuredOutput == nil,
+           let payload = call.result, let result = payload.displayText, !result.isEmpty {
             sections.append("Result (\(payloadLabel(payload)))\n\(result)")
-        } else if let result = call.resultText, !result.isEmpty {
+        } else if call.structuredOutput == nil,
+                  let result = call.resultText, !result.isEmpty {
             sections.append("Result (text)\n\(result)")
+        } else if let residual = call.structuredOutput?.residualText,
+                  !residual.isEmpty {
+            sections.append("Result metadata\n\(residual)")
         } else if let summary = call.summary, !summary.isEmpty, summary != call.context {
             sections.append("Result\n\(summary)")
         }
@@ -402,7 +407,9 @@ public struct ToolChip: View {
             ? sections.joined(separator: "\n\n") : nil
     }
 
-    private var expandable: Bool { detail != nil }
+    private var expandable: Bool {
+        (detail != nil || call.structuredOutput != nil) && call.state != .running
+    }
 
     private var statusText: String {
         switch call.state { case .running: "Running"; case .done: "Completed"; case .failed: "Failed" }
@@ -457,8 +464,11 @@ public struct ToolChip: View {
                 ? (expanded ? "Collapses arguments and result" : "Shows arguments and result")
                 : "No additional detail")
 
-            if expanded, let detail {
-                resultPanel(detail)
+            if expanded {
+                if let output = call.structuredOutput {
+                    StructuredToolOutputView(output: output, theme: theme)
+                }
+                if let detail { resultPanel(detail) }
             }
         }
         .background(chrome)
@@ -651,6 +661,123 @@ public struct ToolChip: View {
         }
     }
 }
+
+private struct StructuredToolOutputView: View {
+    let output: ToolStructuredOutput
+    let theme: ThemePack
+
+    @ScaledMetric(relativeTo: .body) private var diagnosticSize: CGFloat = 10.5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let diagnostic = output.diagnostic {
+                Text(diagnostic)
+                    .font(theme.body(diagnosticSize))
+                    .foregroundStyle(theme.faint)
+            }
+            if let stdout = output.stdout {
+                ToolOutputSection(label: "stdout", stream: stdout, theme: theme)
+            }
+            if let stderr = output.stderr {
+                // stderr is a channel label, not a failure claim. Git, npm and
+                // many healthy CLIs write informational progress here.
+                ToolOutputSection(label: "stderr", stream: stderr, theme: theme)
+            }
+        }
+        .padding(.horizontal, theme.id == .ink ? 8 : 10)
+        .padding(.top, 4)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct ToolOutputSection: View {
+    let label: String
+    let stream: ToolOutputStream
+    let theme: ThemePack
+
+    @State private var copied = false
+    @ScaledMetric(relativeTo: .body) private var textSize: CGFloat = 10.5
+    @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 9
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(label.uppercased())
+                    .font(theme.mono(labelSize, weight: .semibold))
+                    .tracking(1.2)
+                    .foregroundStyle(theme.faint)
+                Spacer(minLength: 0)
+                if !stream.copyText.isEmpty {
+                    Button {
+                        copyToPasteboard(stream.copyText)
+                        copied = true
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.caption)
+                            .foregroundStyle(copied ? theme.ok : theme.faint)
+                            .frame(minWidth: ToolRunPresentationPolicy.minimumInteractiveDimension,
+                                   minHeight: ToolRunPresentationPolicy.minimumInteractiveDimension)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(copied ? "\(label) copied" : "Copy \(label)")
+                    .accessibilityHint("Copies the bounded plain-text \(label) output.")
+                }
+            }
+            if let diagnostic = stream.diagnostic {
+                Text(diagnostic)
+                    .font(theme.body(textSize))
+                    .foregroundStyle(stream.state == .malformed ? theme.danger : theme.faint)
+            }
+            if stream.state == .available, !stream.segments.isEmpty {
+                ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                    ansiText
+                        .font(theme.mono(textSize))
+                        .lineSpacing(2)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: true, vertical: true)
+                }
+                .frame(maxHeight: 180)
+                // Expose one bounded stream summary. Styled Text descendants
+                // must not independently hand VoiceOver the full 10k preview.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(label) output")
+                .accessibilityValue(ToolOutputPresentationPolicy.accessibilityValue(stream))
+            }
+        }
+    }
+
+    private var ansiText: Text {
+        stream.segments.reduce(Text("")) { partial, segment in
+            var piece = Text(segment.text).foregroundColor(color(for: segment.foreground))
+            if segment.bold { piece = piece.bold() }
+            return partial + piece
+        }
+    }
+
+    private func color(for foreground: ToolANSISegment.Foreground?) -> Color {
+        guard let foreground else { return theme.sub }
+        switch foreground {
+        case .black: return theme.ink.opacity(0.72)
+        case .red: return .red.opacity(0.84)
+        case .green: return .green.opacity(0.82)
+        case .yellow: return .orange.opacity(0.88)
+        case .blue: return .blue.opacity(0.84)
+        case .magenta: return .purple.opacity(0.84)
+        case .cyan: return .cyan.opacity(0.84)
+        case .white: return theme.ink.opacity(0.75)
+        case .brightBlack: return theme.faint
+        case .brightRed: return .red
+        case .brightGreen: return .green
+        case .brightYellow: return .orange
+        case .brightBlue: return .blue
+        case .brightMagenta: return .pink
+        case .brightCyan: return .cyan
+        case .brightWhite: return theme.ink
+        }
+    }
+}
+
 
 // MARK: - Spinner
 

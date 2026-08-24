@@ -28,7 +28,8 @@ final class TranscriptToolHydrationTests: XCTestCase {
         XCTAssertEqual(calls.map(\.gatewayToolID), ["call-a", "call-b"])
         XCTAssertEqual(Set(calls.map(\.id)).count, 2)
         XCTAssertEqual(calls[0].arguments?.json?["command"]?.stringValue, "alpha")
-        XCTAssertEqual(calls[1].result?.json?["stdout"]?.stringValue, "B")
+        XCTAssertEqual(calls[0].structuredOutput?.stdout?.plainText, "A")
+        XCTAssertEqual(calls[1].structuredOutput?.stdout?.plainText, "B")
         XCTAssertEqual(calls.map(\.state), [.done, .done])
     }
 

@@ -1208,6 +1208,21 @@ extension AppModel {
             return false
         }
 
+        func exactPendingToolName(for wireID: String?) -> String? {
+            guard let wireID, !wireID.isEmpty else { return nil }
+            if let call = pending.last(where: {
+                $0.gatewayToolID == wireID
+                    && ($0.result == nil || $0.result?.kind == .unavailable)
+            }) { return call.name }
+            for message in messages.reversed() where message.author == .bot {
+                if let call = message.toolCalls.last(where: {
+                    $0.gatewayToolID == wireID
+                        && ($0.result == nil || $0.result?.kind == .unavailable)
+                }) { return call.name }
+            }
+            return nil
+        }
+
         for (index, row) in rows.enumerated() {
             guard row["display_kind"]?.stringValue != "hidden" else { continue }
             let role = row["role"]?.stringValue
@@ -1228,8 +1243,11 @@ extension AppModel {
             let rowID = transcriptRowID(row)
             switch role {
             case "tool":
+                let wireID = transcriptWireID(row["tool_call_id"] ?? row["tool_id"])
                 let result = storedToolResult(
-                    row, index: index, rowID: rowID, ambiguousWireIDs: ambiguousToolIDs)
+                    row, index: index, rowID: rowID,
+                    ambiguousWireIDs: ambiguousToolIDs,
+                    exactToolName: exactPendingToolName(for: wireID))
                 if !apply(result) { retain([result], time: time, rowID: rowID) }
 
             case "assistant":
@@ -1424,12 +1442,13 @@ extension AppModel {
     }
 
     private static func storedToolResult(
-        _ row: JSONValue, index: Int, rowID: Int?, ambiguousWireIDs: Set<String> = []
+        _ row: JSONValue, index: Int, rowID: Int?,
+        ambiguousWireIDs: Set<String> = [], exactToolName: String? = nil
     ) -> ToolCall {
         // Database row `id` is not an execution id.
         let wireID = transcriptWireID(row["tool_call_id"] ?? row["tool_id"])
         let name = ToolPayloadCodec.admittedIdentity(
-            row["tool_name"]?.stringValue ?? row["name"]?.stringValue,
+            exactToolName ?? row["tool_name"]?.stringValue ?? row["name"]?.stringValue,
             maximum: ToolPayloadCodec.maximumToolNameCharacters) ?? "Tool"
         let arguments = ToolPayloadCodec.directArguments(
             from: row["args"] ?? row["arguments"] ?? row["input"])
@@ -1438,21 +1457,27 @@ extension AppModel {
         } ?? ToolPayloadCodec.preview(arguments, maximum: 80) ?? ""
         let raw = row["content"] ?? row["result"]
         let hasRaw = raw != nil && raw != .null
-        let result = ToolPayloadCodec.result(from: raw)
-            ?? ToolPayloadCodec.unavailable(hasRaw
+        let outputAdmission = ToolOutputCodec.admit(toolName: name, result: raw)
+        let deferredOutput = (name.isEmpty || name == "Tool")
+            ? ToolOutputCodec.candidate(result: raw) : nil
+        let result = outputAdmission.output != nil
+            ? outputAdmission.genericResult
+            : outputAdmission.genericResult ?? ToolPayloadCodec.unavailable(hasRaw
                 ? "Hermes saved an empty tool result."
                 : "This display projection omitted the retained tool output.")
         let ambiguousIdentity = wireID.map { ambiguousWireIDs.contains($0) } == true
         return ToolCall(
             id: "stored-result:\(rowID.map(String.init) ?? "unknown"):\(index)",
             name: name, context: context,
-            state: ToolPayloadCodec.resultHasExplicitError(result) ? .failed : .done,
+            state: outputAdmission.hasExplicitError ? .failed : .done,
             summary: context.isEmpty ? ToolPayloadCodec.preview(result) : context,
-            resultText: result.displayText, gatewayToolID: wireID,
+            resultText: result?.displayText, gatewayToolID: wireID,
             arguments: arguments, result: result,
             fileDiff: ToolDiffCodec.extract(toolName: name,
                 arguments: row["args"] ?? row["arguments"] ?? row["input"],
                 result: raw),
+            structuredOutput: outputAdmission.output,
+            deferredStructuredOutput: deferredOutput,
             deferredFileDiff: ToolDiffCodec.isFileEditTool(name) ? nil
                 : ToolDiffCodec.candidate(
                     arguments: row["args"] ?? row["arguments"] ?? row["input"],
@@ -1468,7 +1493,8 @@ extension AppModel {
     }
 
     private static func mergeStoredResult(_ result: ToolCall, into call: inout ToolCall) {
-        call.state = result.state
+        let preservesFailedEvidence = call.state == .failed && result.state != .failed
+        call.state = preservesFailedEvidence ? .failed : result.state
         call.context = call.context.isEmpty ? result.context : call.context
         call.arguments = call.arguments ?? result.arguments
         call.result = result.result
@@ -1478,6 +1504,27 @@ extension AppModel {
             call.fileDiff = diff
         }
         call.deferredFileDiff = nil
+        call.structuredOutput = preservesFailedEvidence
+            ? ToolStructuredOutput.merging(
+                newer: call.structuredOutput, preserving: result.structuredOutput)
+            : ToolStructuredOutput.merging(
+                newer: result.structuredOutput, preserving: call.structuredOutput)
+        if ToolOutputCodec.isStructuredTool(call.name) {
+            call.structuredOutput = preservesFailedEvidence
+                ? ToolStructuredOutput.merging(
+                    newer: call.structuredOutput,
+                    preserving: result.deferredStructuredOutput)
+                : ToolStructuredOutput.merging(
+                    newer: result.deferredStructuredOutput,
+                    preserving: call.structuredOutput)
+            call.deferredStructuredOutput = nil
+        } else if call.name.isEmpty || call.name == "Tool" {
+            call.deferredStructuredOutput = ToolStructuredOutput.merging(
+                newer: result.deferredStructuredOutput,
+                preserving: call.deferredStructuredOutput)
+        } else {
+            call.deferredStructuredOutput = nil
+        }
         call.summary = result.summary ?? call.summary
         call.resultText = result.resultText ?? call.resultText
         call.diagnostic = result.provenance == .projection ? call.diagnostic : result.diagnostic

@@ -463,6 +463,12 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
     public var result: ToolPayload?
     /// Bounded specialist evidence for edit_file/patch/write_file only.
     public var fileDiff: ToolFileDiff?
+    /// Bounded specialist evidence for exact terminal/execute_code results.
+    public var structuredOutput: ToolStructuredOutput?
+    /// Bounded stream-shaped evidence received before the exact tool name.
+    /// This remains inert until an exact-ID start establishes an eligible
+    /// case-sensitive terminal/execute_code name.
+    public var deferredStructuredOutput: ToolStructuredOutput?
     /// Bounded explicit diff material awaiting an exact file-edit tool name.
     /// Never rendered or treated as a specialist until promoted by exact ID.
     public var deferredFileDiff: ToolFileDiff?
@@ -474,6 +480,8 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
                 durationSeconds: Double? = nil, gatewayToolID: String? = nil,
                 arguments: ToolPayload? = nil, result: ToolPayload? = nil,
                 fileDiff: ToolFileDiff? = nil,
+                structuredOutput: ToolStructuredOutput? = nil,
+                deferredStructuredOutput: ToolStructuredOutput? = nil,
                 deferredFileDiff: ToolFileDiff? = nil,
                 provenance: Provenance = .live, diagnostic: String? = nil) {
         self.id = id; self.name = name; self.context = context; self.state = state
@@ -482,13 +490,16 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         self.gatewayToolID = gatewayToolID
         self.arguments = arguments; self.result = result
         self.fileDiff = fileDiff
+        self.structuredOutput = structuredOutput
+        self.deferredStructuredOutput = deferredStructuredOutput
         self.deferredFileDiff = deferredFileDiff
         self.provenance = provenance; self.diagnostic = diagnostic
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, gatewayToolID, name, context, state, summary, resultText
-        case durationSeconds, arguments, result, fileDiff, deferredFileDiff
+        case durationSeconds, arguments, result, fileDiff, structuredOutput
+        case deferredStructuredOutput, deferredFileDiff
         case provenance, diagnostic
     }
 
@@ -506,6 +517,10 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         arguments = try values.decodeIfPresent(ToolPayload.self, forKey: .arguments)
         result = try values.decodeIfPresent(ToolPayload.self, forKey: .result)
         fileDiff = try values.decodeIfPresent(ToolFileDiff.self, forKey: .fileDiff)
+        structuredOutput = try values.decodeIfPresent(
+            ToolStructuredOutput.self, forKey: .structuredOutput)
+        deferredStructuredOutput = try values.decodeIfPresent(
+            ToolStructuredOutput.self, forKey: .deferredStructuredOutput)
         deferredFileDiff = try values.decodeIfPresent(
             ToolFileDiff.self, forKey: .deferredFileDiff)
         provenance = try values.decodeIfPresent(Provenance.self, forKey: .provenance) ?? .live

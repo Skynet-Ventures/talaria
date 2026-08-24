@@ -65,6 +65,27 @@ public enum TranscriptMotionPolicy {
     }
 }
 
+public enum ToolOutputPresentationPolicy {
+    public static let maximumAccessibilityScalars = 500
+
+    /// VoiceOver receives one bounded single-line preview. Selectable output
+    /// and clipboard copy retain the complete already-admitted stream.
+    public static func accessibilityValue(_ stream: ToolOutputStream) -> String {
+        var iterator = stream.plainText.unicodeScalars.makeIterator()
+        var output = String.UnicodeScalarView()
+        var count = 0
+        while count < maximumAccessibilityScalars, let scalar = iterator.next() {
+            output.append(scalar)
+            count += 1
+        }
+        var text = String(output)
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+        if iterator.next() != nil { text += " …" }
+        return text
+    }
+}
+
 public enum ChatComposerAction: Sendable, Equatable {
     case disabled
     case palette
