@@ -637,6 +637,16 @@ enum GatewayBoundedRESTLoader {
 
 /// One gateway connection: transport lifecycle + typed RPCs.
 public actor GatewayClient {
+    /// Result of the explicit foreground socket validation. A lifecycle
+    /// traffic fence is deliberately separate from transport failure: the
+    /// fence is local authority and must never trigger a reconnect around an
+    /// in-flight profile mutation.
+    public enum ForegroundLiveness: Sendable, Equatable {
+        case healthy
+        case reconnectRequired
+        case trafficFenced
+    }
+
     public struct TrafficLease: Sendable {
         private let releaseOperation: @Sendable () async -> Void
 
@@ -672,6 +682,10 @@ public actor GatewayClient {
     /// admission remains part of every exercised wire boundary.
     typealias RPCExecutor = @Sendable (String, JSONValue?, TimeInterval) async throws -> JSONValue
     private var rpcExecutorForTesting: RPCExecutor?
+    /// Package-test readiness seam. Production always reads the exact current
+    /// transport state; this only makes half-open/closed wake policy
+    /// deterministic without opening a real WebSocket.
+    private var foregroundReadinessForTesting: Bool?
     typealias RESTExecutor = @Sendable (URLRequest, Int?) async throws -> (Data, URLResponse)
     private let restExecutor: RESTExecutor
     private let noRedirectRESTExecutor: RESTExecutor
@@ -742,6 +756,10 @@ public actor GatewayClient {
         rpcExecutorForTesting = executor
     }
 
+    func setForegroundReadinessForTesting(_ ready: Bool?) {
+        foregroundReadinessForTesting = ready
+    }
+
     /// Install the owning app's source-qualified lifecycle admission. The
     /// check lives on the client rather than only in route resolution so a
     /// mutation that begins after a caller obtains this actor still wins the
@@ -768,6 +786,39 @@ public actor GatewayClient {
         get async {
             guard let transport else { return false }
             return await transport.state == .ready
+        }
+    }
+
+    /// Validate a socket immediately after iOS foregrounds the app. This is a
+    /// short, bounded application RPC rather than a belief based on
+    /// URLSessionWebSocketTask state: suspended half-open links often still
+    /// report ready until their first write/response boundary.
+    ///
+    /// Current Hermes answers exactly `{ "ok": true }`. Missing, malformed,
+    /// timed-out, or failed replies require the existing supervised reconnect.
+    /// Local lifecycle traffic rejection is not a link failure.
+    public func validateForegroundLiveness() async -> ForegroundLiveness {
+        let ready: Bool
+        if let foregroundReadinessForTesting {
+            ready = foregroundReadinessForTesting
+        } else if let transport {
+            ready = await transport.state == .ready
+        } else {
+            ready = false
+        }
+        guard ready else { return .reconnectRequired }
+
+        do {
+            let result = try await rpc("gateway.ping", .object([:]), timeout: 3)
+            guard result.objectValue?["ok"]?.boolValue == true,
+                  result.objectValue?.count == 1 else {
+                return .reconnectRequired
+            }
+            return .healthy
+        } catch let error as GatewayError where error.code == Self.trafficFenced {
+            return .trafficFenced
+        } catch {
+            return .reconnectRequired
         }
     }
 

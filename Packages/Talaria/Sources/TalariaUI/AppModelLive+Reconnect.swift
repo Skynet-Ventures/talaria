@@ -337,22 +337,42 @@ extension AppModel {
 
     // MARK: Foreground / manual entry points
 
-    /// Scene-phase hook (`scenePhase == .active`). Re-probes every saved
-    /// gateway, then either reconnects a dead link immediately or refreshes the
-    /// roster of a healthy one.
+    /// Scene-phase hook (`scenePhase == .active`). Validates the exact current
+    /// socket before waiting on any saved-gateway HTTP diagnostics, then either
+    /// enters supervised reconnect immediately or refreshes a healthy source.
     public func applicationDidBecomeActive() {
         startLinkSupervision()
-        // The socket that was supposed to deliver `message.complete` died when
-        // the process was parked, so the roster's "working" flags are beliefs
-        // and not facts until `session.active_list` says otherwise. Asked
-        // before the roster refresh below and independently of it: this runs
-        // even when the link is down (it records the debt and the reaper pays
-        // it once the link is back), and it is the only thing that clears a
-        // bot left spinning on a turn that finished while we were away.
-        foregroundReseed()
         Task { @MainActor in
+            guard mode == .live, let client,
+                  let capturedSource = currentReconnectAuthority()?.episodeSource else {
+                await refreshConnectionHealth()
+                return
+            }
+            let liveness = await client.validateForegroundLiveness()
+            // A gateway switch, credential rotation, client replacement, or
+            // generation change while ping was suspended makes its answer
+            // irrelevant. Never reconnect or publish against ambient state.
+            guard currentReconnectAuthority()?.episodeSource == capturedSource else { return }
+            switch liveness {
+            case .reconnectRequired:
+                reconnectNow()
+                return
+            case .trafficFenced:
+                // Profile-lifecycle authority intentionally rejected local
+                // traffic. Do not mistake that for a dead socket or route
+                // around the fence; the next active/watch pass can validate.
+                return
+            case .healthy:
+                break
+            }
+            // Only ask the socket for liveness/session snapshots after the
+            // explicit ping proved it survived suspension. Failed links are
+            // reseeded by reconnect housekeeping; fenced links must not route
+            // around lifecycle authority.
+            foregroundReseed()
             await refreshConnectionHealth()
-            guard mode == .live, let client else { return }
+            guard mode == .live, self.client === client,
+                  currentReconnectAuthority()?.episodeSource == capturedSource else { return }
             guard await client.isConnected else {
                 reconnectNow()
                 return

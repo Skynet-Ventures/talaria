@@ -61,6 +61,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
         fixture.registry.remove(id: fixture.gateway.id)
         ConnectionSupervisor.shared.diagnostics.removeValue(forKey: fixture.gateway.id)
         ConnectionSupervisor.shared.resetTestingSeams()
+        ConnectionSupervisor.shared.healthProbe = { gateway in
+            await GatewayDiagnostics.probe(gateway)
+        }
         ManagedCloudBootRuntime.shared.resetForTesting()
     }
 
@@ -149,6 +152,89 @@ final class SupervisedReconnectParityTests: XCTestCase {
         XCTAssertFalse(fixture.model.isOffline)
         XCTAssertNil(supervisor.episodeSource)
         XCTAssertNil(fixture.model.postBootReconnectRecovery)
+    }
+
+    @MainActor
+    func testForegroundHalfOpenPingFailureEntersReconnectBeforeHTTPProbe() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+        await fixture.client.setRPCExecutorForTesting { method, _, timeout in
+            guard method == "gateway.ping" else {
+                return .object(["profiles": .array([]), "jobs": .array([])])
+            }
+            XCTAssertEqual(method, "gateway.ping")
+            XCTAssertEqual(timeout, 3)
+            throw GatewayError(code: -5, message: "request timed out: gateway.ping")
+        }
+        supervisor.healthProbe = { _ in
+            XCTFail("saved-gateway HTTP probes must not delay failed foreground ping recovery")
+            return (.offline, GatewayDiagnostics())
+        }
+        var dial: CheckedContinuation<Void, Never>?
+        supervisor.dial = { _ in
+            await withCheckedContinuation { dial = $0 }
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { dial != nil }
+
+        XCTAssertTrue(fixture.model.isReconnecting)
+        dial?.resume()
+        await LiveRuntime.shared.reconnectTask?.value
+    }
+
+    @MainActor
+    func testForegroundAlreadyDisconnectedEntersExactSourceReconnectImmediately() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(false)
+        await fixture.client.setRPCExecutorForTesting { method, _, _ in
+            if method == "gateway.ping" {
+                XCTFail("disconnected foreground link must not attempt ping")
+            }
+            return .object(["profiles": .array([]), "jobs": .array([])])
+        }
+        supervisor.healthProbe = { _ in
+            XCTFail("HTTP probe must not precede reconnect for a disconnected current socket")
+            return (.offline, GatewayDiagnostics())
+        }
+        var dial: CheckedContinuation<Void, Never>?
+        supervisor.dial = { client in
+            XCTAssertTrue(client === fixture.client)
+            await withCheckedContinuation { dial = $0 }
+        }
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { dial != nil }
+
+        XCTAssertTrue(fixture.model.isReconnecting)
+        dial?.resume()
+        await LiveRuntime.shared.reconnectTask?.value
+    }
+
+    @MainActor
+    func testForegroundTrafficFenceNeverReconnectsAroundLifecycleAuthority() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+        await fixture.client.setTrafficAdmission { nil }
+        await fixture.client.setRPCExecutorForTesting { _, _, _ in
+            XCTFail("traffic-fenced wake must not reach the socket")
+            return .object(["ok": .bool(true)])
+        }
+        var dialCount = 0
+        supervisor.dial = { _ in dialCount += 1 }
+
+        fixture.model.applicationDidBecomeActive()
+        // Let the foreground task cross the actor boundary and settle.
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertEqual(dialCount, 0)
+        XCTAssertNil(LiveRuntime.shared.reconnectTask)
+        XCTAssertFalse(fixture.model.isReconnecting)
     }
 
     @MainActor

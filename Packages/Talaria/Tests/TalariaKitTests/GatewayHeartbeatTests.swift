@@ -3,6 +3,12 @@ import XCTest
 @testable import TalariaKit
 
 final class GatewayHeartbeatTests: XCTestCase {
+    private func client() -> GatewayClient {
+        GatewayClient(
+            baseURL: URL(string: "https://foreground-heartbeat.example")!,
+            credential: .sessionToken("foreground-heartbeat-test"))
+    }
+
     func testInvalidPolicyValuesDisableHeartbeat() {
         XCTAssertFalse(GatewayHeartbeatPolicy(interval: .nan, deadline: 45).isEnabled)
         XCTAssertFalse(GatewayHeartbeatPolicy(interval: 15, deadline: .infinity).isEnabled)
@@ -54,6 +60,67 @@ final class GatewayHeartbeatTests: XCTestCase {
         }
         XCTAssertTrue(changeEvents)
         XCTAssertTrue(heartbeat)
+    }
+
+    func testForegroundHealthyPingRequiresExactBoundedReply() async {
+        let client = client()
+        await client.setForegroundReadinessForTesting(true)
+        await client.setRPCExecutorForTesting { method, params, timeout in
+            XCTAssertEqual(method, "gateway.ping")
+            XCTAssertEqual(params, .object([:]))
+            XCTAssertEqual(timeout, 3)
+            return .object(["ok": .bool(true)])
+        }
+
+        let outcome = await client.validateForegroundLiveness()
+        XCTAssertEqual(outcome, .healthy)
+    }
+
+    func testForegroundHalfOpenFailureAndMalformedReplyRequireReconnect() async {
+        let client = client()
+        await client.setForegroundReadinessForTesting(true)
+        await client.setRPCExecutorForTesting { _, _, _ in
+            throw GatewayError(code: -5, message: "request timed out: gateway.ping")
+        }
+        var outcome = await client.validateForegroundLiveness()
+        XCTAssertEqual(outcome, .reconnectRequired)
+
+        await client.setRPCExecutorForTesting { _, _, _ in
+            .object(["ok": .string("true")])
+        }
+        outcome = await client.validateForegroundLiveness()
+        XCTAssertEqual(outcome, .reconnectRequired)
+
+        await client.setRPCExecutorForTesting { _, _, _ in
+            .object(["ok": .bool(true), "unexpected": .bool(true)])
+        }
+        outcome = await client.validateForegroundLiveness()
+        XCTAssertEqual(outcome, .reconnectRequired)
+    }
+
+    func testForegroundAlreadyDisconnectedNeverAttemptsPing() async {
+        let client = client()
+        await client.setForegroundReadinessForTesting(false)
+        await client.setRPCExecutorForTesting { _, _, _ in
+            XCTFail("a disconnected link must fail before RPC")
+            return .object(["ok": .bool(true)])
+        }
+
+        let outcome = await client.validateForegroundLiveness()
+        XCTAssertEqual(outcome, .reconnectRequired)
+    }
+
+    func testForegroundTrafficFenceDoesNotBecomeReconnectFailure() async {
+        let client = client()
+        await client.setForegroundReadinessForTesting(true)
+        await client.setTrafficAdmission { nil }
+        await client.setRPCExecutorForTesting { _, _, _ in
+            XCTFail("traffic-fenced wake must not reach the transport")
+            return .object(["ok": .bool(true)])
+        }
+
+        let outcome = await client.validateForegroundLiveness()
+        XCTAssertEqual(outcome, .trafficFenced)
     }
 }
 #endif
