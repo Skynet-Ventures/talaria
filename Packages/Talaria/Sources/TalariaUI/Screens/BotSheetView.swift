@@ -2,12 +2,21 @@ import SwiftUI
 import TalariaKit
 import TalariaTheme
 
+public enum BotProfileDetailPolicy {
+    public static let recentSessionLimit = 3
+    public static func recentSessions(_ sessions: [SessionSummary]) -> [SessionSummary] {
+        Array(sessions.prefix(recentSessionLimit))
+    }
+    public static func showsAllSessions(total: Int) -> Bool {
+        total > recentSessionLimit
+    }
+}
+
 // Bot Profile sheet — design-map.md §4 "Bot Profile" (prototype screen `detail`).
 //
 // Large avatar (the profile's generated portrait when it has one) + description,
 // stat cards, recent sessions, the context-window meter, the per-bot YOLO
-// toggle, model pin chips, the memory "star map", Duplicate / Edit actions and
-// the CLI-only deletion footnote.
+// toggle, model pin, compact memory summary, and source-fenced profile actions.
 //
 // Live mode backs the sheet with real data on open: session.list {profile} for
 // the sessions group, session.context_breakdown for the meter (only when the
@@ -24,6 +33,9 @@ public struct BotSheetView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showEditor = false
     @State private var showPets = false
+    @State private var showSessions = false
+    @State private var showModels = false
+    @State private var showDeleteConfirmation = false
 
     /// profiles.describe snapshot — skills/toolsets counts and the pin.
     @State private var snapshot: ProfileSnapshot?
@@ -31,6 +43,7 @@ public struct BotSheetView: View {
     @State private var pinWarning = false
     @State private var duplicating = false
     @State private var duplicateFailed = false
+    @State private var deletingProfile = false
     /// False until the open-time RPCs settle, so empty cards say "reading…"
     /// instead of claiming the bot has nothing.
     @State private var hydrated = false
@@ -90,6 +103,10 @@ public struct BotSheetView: View {
         min(100, contextSegments.reduce(0) { $0 + $1.percent })
     }
 
+    private var recentSessions: [SessionSummary] {
+        BotProfileDetailPolicy.recentSessions(sessions)
+    }
+
     // Star map: positions/sizes/delays ported from the prototype's `stars`.
     private static let stars: [(x: CGFloat, y: CGFloat)] = [
         (0.16, 0.26), (0.34, 0.12), (0.55, 0.20), (0.78, 0.30),
@@ -107,37 +124,17 @@ public struct BotSheetView: View {
                     statCards
                     sectionLabel(copy.sessionsSec)
                     sessionsGroup
-                    sectionLabel("\(copy.contextSec) · \(contextTotal)%")
-                    contextCard
-                    yoloCard
-                    sectionLabel(copy.modelSec)
-                    modelChips
+                    sectionLabel(CopyPack.runtimeSection(theme.id))
+                    runtimeCard
                     sectionLabel(copy.memorySec)
-                    memoryCard
-                    // Pets are profile-scoped cosmetics; the row exists only
-                    // when this gateway actually has a pet surface (see
-                    // AppModelLive+Pets). The sheet hangs off the row rather
-                    // than the container — two `.sheet` modifiers on one view
-                    // compete, and the editor owns that slot.
-                    if model.pets(for: botID).hasSurface {
-                        actionRow(copy.petRow(theme.id)) { showPets = true }
-                            .sheet(isPresented: $showPets) {
-                                PetGalleryView(model: model, botID: botID)
-                            }
-                    }
-                    actionRow(duplicating ? CopyPack.duplicating(theme.id) : copy.duplicate) {
-                        duplicateBot()
-                    }
+                    memorySummaryCard
+                    sectionLabel(CopyPack.actionsSection(theme.id))
+                    actionsGroup
                     if duplicateFailed {
                         Text(CopyPack.duplicateFailed(theme.id))
                             .font(style.footNoteFont)
                             .foregroundStyle(theme.danger)
                     }
-                    actionRow(copy.editLook) { showEditor = true }
-                    Text(copy.deleteNote)
-                        .font(style.footNoteFont)
-                        .foregroundStyle(theme.faint)
-                        .lineSpacing(3)
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 4)
@@ -149,6 +146,19 @@ public struct BotSheetView: View {
         // Re-read after an edit: skills, toolsets and the pin may all have moved.
         .sheet(isPresented: $showEditor, onDismiss: { Task { await hydrate() } }) {
             CreateBotView(model: model, editing: model.bot(botID))
+        }
+        .confirmationDialog(
+            CopyPack.rosterDeleteTitle(
+                theme.id, name: TalariaVoice.displayName(for: bot, theme.id)),
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(CopyPack.rosterDelete(theme.id), role: .destructive) {
+                deleteCurrentProfile()
+            }
+            Button(copy.cancel, role: .cancel) {}
+        } message: {
+            Text(CopyPack.rosterDeleteBody(theme.id))
         }
         .task(id: botID) { await hydrate() }
     }
@@ -280,7 +290,7 @@ public struct BotSheetView: View {
                 .modifier(DetailCardChrome(theme: theme))
         } else {
             VStack(spacing: 0) {
-                ForEach(sessions) { session in
+                ForEach(recentSessions) { session in
                     Button {
                         openSession(session)
                     } label: {
@@ -304,8 +314,31 @@ public struct BotSheetView: View {
                     }
                     .buttonStyle(.plain)
 
-                    if theme.rowStyle == .ledger || session.id != sessions.last?.id {
+                    if theme.rowStyle == .ledger || session.id != recentSessions.last?.id {
                         Rectangle().fill(theme.line).frame(height: 1)
+                    }
+                }
+                if BotProfileDetailPolicy.showsAllSessions(total: sessions.count) {
+                    Button {
+                        showSessions = true
+                    } label: {
+                        HStack {
+                            Text(CopyPack.allSessions(sessions.count, theme.id))
+                                .font(style.aTextFont)
+                                .foregroundStyle(theme.accent)
+                            Spacer()
+                            Text("›").foregroundStyle(theme.faint)
+                        }
+                        .padding(EdgeInsets(top: 11, leading: 13, bottom: 11, trailing: 13))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .sheet(isPresented: $showSessions) {
+                        SessionsSheet(model: model, botID: botID, onOpen: { _ in
+                            model.selectedTab = .home
+                            showSessions = false
+                            Task { @MainActor in await Task.yield(); dismiss() }
+                        })
                     }
                 }
             }
@@ -322,6 +355,159 @@ public struct BotSheetView: View {
     }
 
     // MARK: - Context window
+
+    private var runtimeCard: some View {
+        VStack(spacing: 0) {
+            Button { showModels = true } label: {
+                compactRow(title: copy.modelSec, value: pinnedModel ?? CopyPack.noModels(theme.id),
+                           showsChevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Model, \(pinnedModel ?? CopyPack.noModels(theme.id))")
+            .accessibilityHint("Opens the model picker")
+            .sheet(isPresented: $showModels) {
+                ProfileModelPicker(choices: modelChoices, selected: pinnedModel,
+                                   theme: theme) { choice in
+                    pinModel(choice)
+                    showModels = false
+                }
+            }
+            if pinWarning {
+                divider
+                Text(CopyPack.modelProviderUnknown(theme.id))
+                    .font(style.aSubFont)
+                    .foregroundStyle(theme.warn)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(EdgeInsets(top: 9, leading: 13, bottom: 9, trailing: 13))
+                    .accessibilityLabel(CopyPack.modelProviderUnknown(theme.id))
+            }
+            divider
+            VStack(alignment: .leading, spacing: 7) {
+                compactRow(title: copy.contextSec,
+                           value: contextSegments.isEmpty ? "—" : "\(contextTotal)%")
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(theme.line)
+                        Capsule().fill(theme.accent)
+                            .frame(width: geo.size.width * CGFloat(contextTotal) / 100)
+                    }
+                }
+                .frame(height: 5)
+            }
+            .padding(EdgeInsets(top: 10, leading: 13, bottom: 10, trailing: 13))
+            divider
+            yoloCard
+        }
+        .modifier(DetailCardChrome(theme: theme))
+    }
+
+    private var memorySummaryCard: some View {
+        VStack(spacing: 0) {
+            compactRow(title: CopyPack.statSkills(theme.id), value: String(enabledSkillCount))
+            divider
+            compactRow(title: CopyPack.statSessions(theme.id), value: String(sessions.count))
+            if isLive {
+                divider
+                Text(CopyPack.memoryNoRows(theme.id))
+                    .font(style.footNoteFont)
+                    .foregroundStyle(theme.faint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(EdgeInsets(top: 9, leading: 13, bottom: 9, trailing: 13))
+            }
+        }
+        .modifier(DetailCardChrome(theme: theme))
+    }
+
+    private var actionsGroup: some View {
+        VStack(spacing: 0) {
+            compactAction(copy.editLook) { showEditor = true }
+            if model.pets(for: botID).hasSurface {
+                divider
+                compactAction(copy.petRow(theme.id)) { showPets = true }
+                    .sheet(isPresented: $showPets) {
+                        PetGalleryView(model: model, botID: botID)
+                    }
+            }
+            divider
+            compactAction(duplicating ? CopyPack.duplicating(theme.id) : copy.duplicate) {
+                duplicateBot()
+            }
+            if let target = model.profileLifecycleTarget(rosterID: botID),
+               target.route.profile != "default" {
+                divider
+                compactAction(
+                    deletingProfile ? CopyPack.deletingProfile(theme.id) : CopyPack.rosterDelete(theme.id),
+                    destructive: true
+                ) {
+                    showDeleteConfirmation = true
+                }
+                .disabled(deletingProfile)
+            }
+        }
+        .modifier(DetailCardChrome(theme: theme))
+    }
+
+    private var divider: some View { Rectangle().fill(theme.line).frame(height: 1) }
+
+    private func compactRow(title: String, value: String,
+                            showsChevron: Bool = false) -> some View {
+        HStack(spacing: 10) {
+            Text(title).font(style.aTextFont).foregroundStyle(theme.ink)
+            Spacer(minLength: 12)
+            Text(value).font(style.aSubFont).foregroundStyle(theme.sub).lineLimit(1)
+            if showsChevron { Text("›").foregroundStyle(theme.faint) }
+        }
+        .padding(EdgeInsets(top: 11, leading: 13, bottom: 11, trailing: 13))
+        .contentShape(Rectangle())
+    }
+
+    private func compactAction(
+        _ title: String,
+        destructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(title).font(style.aTextFont)
+                    .foregroundStyle(destructive ? theme.danger : theme.ink)
+                Spacer()
+                Text("›").foregroundStyle(theme.faint)
+            }
+            .padding(EdgeInsets(top: 11, leading: 13, bottom: 11, trailing: 13))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func deleteCurrentProfile() {
+        guard !deletingProfile,
+              let target = model.profileLifecycleTarget(rosterID: botID),
+              target.route.profile != "default" else { return }
+        deletingProfile = true
+        let doomed = bot
+        Task {
+            let outcome = await model.deleteProfile(target, confirmed: true)
+            deletingProfile = false
+            switch outcome {
+            case .deleted:
+                model.toast(
+                    kind: .success,
+                    title: CopyPack.rosterDeleted(
+                        theme.id, name: TalariaVoice.displayName(for: doomed, theme.id)),
+                    botID: doomed.id)
+                dismiss()
+            case .refused(let reason):
+                model.toast(kind: .failure,
+                            title: CopyPack.rosterDeleteFailed(theme.id),
+                            message: reason, botID: doomed.id)
+            case .renamed:
+                model.toast(kind: .failure,
+                            title: CopyPack.rosterDeleteFailed(theme.id),
+                            message: "Hermes returned an unexpected profile result.",
+                            botID: doomed.id)
+            }
+        }
+    }
 
     @ViewBuilder private var contextCard: some View {
         if contextSegments.isEmpty {
@@ -395,7 +581,6 @@ public struct BotSheetView: View {
             }
         }
         .padding(EdgeInsets(top: 11, leading: 13, bottom: 11, trailing: 13))
-        .modifier(DetailCardChrome(theme: theme))
     }
 
     // MARK: - Model pin
@@ -564,9 +749,115 @@ private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
+@MainActor
+private struct ProfileModelPicker: View {
+    let choices: [ModelChoice]
+    let selected: String?
+    let theme: ThemePack
+    let choose: (ModelChoice) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var filtered: [ModelChoice] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return choices }
+        return choices.filter {
+            $0.model.lowercased().contains(needle)
+                || $0.provider.lowercased().contains(needle)
+                || $0.providerName.lowercased().contains(needle)
+        }
+    }
+
+    private var groups: [(String, [ModelChoice])] {
+        Dictionary(grouping: filtered) {
+            $0.providerName.nilIfEmpty ?? $0.provider.nilIfEmpty ?? "Other"
+        }
+        .map { ($0.key, $0.value.sorted { $0.model < $1.model }) }
+        .sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(groups, id: \.0) { group in
+                    Section(group.0) {
+                        ForEach(group.1) { choice in
+                            Button {
+                                choose(choice)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(choice.model)
+                                            .font(theme.body(13.5, weight: .semibold))
+                                            .foregroundStyle(theme.ink)
+                                        if !choice.provider.isEmpty {
+                                            Text(choice.provider)
+                                                .font(theme.mono(9.5))
+                                                .foregroundStyle(theme.faint)
+                                        }
+                                    }
+                                    Spacer()
+                                    if selected == choice.model {
+                                        Text("✓").foregroundStyle(theme.accent)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(
+                                choice.providerName.isEmpty
+                                    ? choice.model
+                                    : "\(choice.model), \(choice.providerName)"
+                            )
+                            .accessibilityValue(selected == choice.model ? "Selected" : "")
+                            .accessibilityHint("Pins this model to the bot profile")
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(theme.bg)
+            .searchable(text: $query, prompt: "Search models")
+            .navigationTitle("Model")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationBackground(theme.bg)
+        .presentationDetents([.large])
+    }
+}
+
 // MARK: - Bot-sheet copy (the three voices)
 
 extension CopyPack {
+
+    static func runtimeSection(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Runtime"
+        case .control: "RUNTIME"
+        case .ink: "at work"
+        }
+    }
+
+    static func actionsSection(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Profile"
+        case .control: "PROFILE"
+        case .ink: "the profile"
+        }
+    }
+
+    static func allSessions(_ count: Int, _ t: ThemeID) -> String {
+        switch t {
+        case .soft: "See all \(count) sessions"
+        case .control: "OPEN ALL \(count) SESSIONS"
+        case .ink: "read all \(count) sittings"
+        }
+    }
 
     static func statSessions(_ t: ThemeID) -> String {
         switch t {
