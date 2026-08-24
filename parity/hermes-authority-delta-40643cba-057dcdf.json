@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
+  "targetCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "entryCount": 63,
+  "entriesFile": "hermes-authority-delta-40643cba-057dcdf.tsv",
+  "clusterCounts": {
+    "C01-canonical-routing": 11,
+    "C02-a2a-cron": 7,
+    "C03-roster-ownership": 8,
+    "C04-room-lifecycle": 11,
+    "C05-attention-relay": 7,
+    "C06-room-turn-consistency": 6,
+    "C07-desktop-shell": 7,
+    "C08-failed-turn-diagnostics": 6
+  },
+  "authorityFiles": [
+    {
+      "path": "apps/desktop/src/plugins/hermes-bots/plugin.js",
+      "baseSha256": "738e108f12134bf651b9e43a795d87c6b24dd0bd3c2e0da1e533b1912fb2783e",
+      "targetSha256": "a26cebc5e3b76096f288f0ad2a30f66550894b2c33bcc2a2fca0c5d12b5094b1"
+    },
+    {
+      "path": "website/docs/user-guide/bot-mode.md",
+      "baseSha256": "3b614687a88c6da3213fcaef6f6a0d1a801a2bfed4407c36c5666b6d588d4e97",
+      "targetSha256": "43136a19bd8ec6766083f6fec49b924d0b42a1c6e9736ebd865cae97017c0915"
+    },
+    {
+      "path": "website/docs/user-guide/desktop.md",
+      "baseSha256": "0d69317f4b78160b5f747acbca8267e4a8025ebd2153d1c2e133d8b85d0e3e9c",
+      "targetSha256": "889b20baf56abe60ee7dd79e019b2314854a9bb737939e81b51a779d41e1eb3a"
+    },
+    {
+      "path": "website/docs/user-guide/multi-connection-desktop.md",
+      "baseSha256": "ef5cb45bee0ace82bcad61f8a94db00ea6ec95bc56218b434ed7e28bd09ec422",
+      "targetSha256": "ef5cb45bee0ace82bcad61f8a94db00ea6ec95bc56218b434ed7e28bd09ec422"
+    },
+    {
+      "path": "apps/desktop/DESIGN.md",
+      "baseSha256": "5967f00ea0b44928c6f88736658e9d3d2bf6ad9fdd790cb3fa635910c5d1c27d",
+      "targetSha256": "5967f00ea0b44928c6f88736658e9d3d2bf6ad9fdd790cb3fa635910c5d1c27d"
+    }
+  ]
+}

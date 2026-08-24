@@ -12,6 +12,11 @@ commits in the `18a15a46..efb6b40f` window and the bounded
 row-by-row ledgers; when they disagree, this exact-source delta is newer.
 
 The authority hashes live in [`parity/hermes-upstream.json`](../parity/hermes-upstream.json).
+The later five-file authority slice through `057dcdf23` is dispositioned
+commit-by-commit in
+[`HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md`](HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md).
+That bounded ledger does not repin the canonical manifest or claim coverage of
+the other 978 net-changed files in the complete range.
 An implementation row is not certified merely because it is checked below:
 the evidence column names the remaining gateway or device proof explicitly.
 The audit cutoff is the exact `40643cba` snapshot reviewed on 2026-08-20
