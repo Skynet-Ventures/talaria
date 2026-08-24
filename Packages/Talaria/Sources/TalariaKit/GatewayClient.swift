@@ -1302,6 +1302,21 @@ public actor GatewayClient {
         return try JSONDecoder().decode(JSONValue.self, from: data)
     }
 
+    /// Bounded authenticated bytes for sensitive same-origin endpoints. Every
+    /// redirect is rejected before URLSession can replay gateway credentials.
+    public func restDataBoundedNoRedirect(path: String, method: String = "GET",
+                                          query: [URLQueryItem] = [],
+                                          timeout: TimeInterval = 30,
+                                          maximumResponseBytes: Int) async throws -> Data {
+        guard maximumResponseBytes >= 0 else {
+            throw GatewayError(code: -11, message: "Invalid REST response limit.")
+        }
+        return try await authenticatedRESTData(
+            path: path, method: method, query: query, body: nil,
+            contentType: "application/octet-stream", timeout: timeout,
+            responseLimit: maximumResponseBytes, rejectsRedirects: true)
+    }
+
     // Transcript hydration lives in `latestSessionMessages`
     // (TalariaUI/AppModelLive+CanonicalChat.swift). The wrapper that used to
     // sit here sent only limit+offset, and the endpoint pages from the OLDEST
