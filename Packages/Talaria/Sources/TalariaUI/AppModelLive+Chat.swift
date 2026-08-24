@@ -1308,13 +1308,15 @@ extension AppModel {
     static func describeResult(_ value: JSONValue?) -> String? {
         guard let value, value != .null else { return nil }
         if let text = value.stringValue {
-            return text.isEmpty ? nil : String(text.prefix(20_000))
+            // This path is fed directly by live gateway payloads rather than
+            // the retained-payload codec. Apply the same scalar/control
+            // admission before prefixing so bidi/C0 controls cannot spoof a
+            // copied or painted result, and avoid grapheme-bounded work on
+            // combining-mark bombs.
+            return text.isEmpty ? nil : ToolPayloadCodec.boundedText(
+                text, maximum: ToolPayloadCodec.maximumResultCharacters)
         }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(value),
-              let text = String(data: data, encoding: .utf8) else { return nil }
-        return String(text.prefix(20_000))
+        return ToolPayloadCodec.result(from: value)?.displayText
     }
 
     // MARK: - Sending: submit, or steer while a turn runs

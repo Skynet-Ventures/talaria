@@ -17,6 +17,16 @@ removes C0/C1 and bidirectional spoofing controls. Malformed or unpaired
 records remain visible with a bounded diagnostic; Talaria never pairs them by
 tool name, prose, or database row id.
 
+Transcript pages are normalized to oldest-first before the 200-row cap, so a
+newest-first 201-row response drops its oldest row. Duplicate exact
+`tool_id`/`tool_call_id` values are ambiguous evidence: every colliding call or
+result stays visible with a diagnostic and no result is guessed. Liveness
+rehydration uses the same raw-supplement-then-graft path as foreground reads;
+when a longer page has no durable anchor, protected terminal-failure rows keep
+their UUID and failure evidence, while fetched canonical text/tool state wins
+and unmatched protected rows are inserted in order. Stale protected IDs are
+pruned after publication.
+
 Publication remains source-qualified across every suspension. Primary reads
 retain the exact app client. Secondary reads additionally retain the pool-slot
 generation and routed event-pump generation, then re-check route, profile,

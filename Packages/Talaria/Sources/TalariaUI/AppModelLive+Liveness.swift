@@ -885,12 +885,34 @@ extension AppModel {
     /// was down, and its last bubble may be a half-streamed one the persisted
     /// row supersedes. So: anchor the fetched page on the newest settled
     /// message we already hold and append only what comes after it.
-    private func graft(_ fetched: [ChatMessage], into chat: ChatState) {
+    /// Publish a liveness read through the same graft used by
+    /// `rehydrateTranscript`. This remains internal so the focused tests can
+    /// exercise the production graft without needing to manufacture a live
+    /// gateway route or source-authority token.
+    func graft(_ fetched: [ChatMessage], into chat: ChatState) {
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+        chat.messages = Self.graftTranscript(
+            fetched: fetched, existing: chat.messages, protectedIDs: protectedIDs)
+        guard !protectedIDs.isEmpty else { return }
+        let visible = Set(chat.messages.map(\.id))
+        ChatRuntime.shared.retainedFailureRows[chatID] = protectedIDs.intersection(visible)
+    }
+
+    /// Pure part of the liveness graft. A no-anchor replacement is unusual
+    /// (normally the durable row id anchors the page), but it is a legitimate
+    /// recovery path after compression/branching. Keep protected terminal
+    /// rows in that path while allowing fetched canonical content to win when
+    /// the two projections identify the same row.
+    static func graftTranscript(
+        fetched: [ChatMessage], existing: [ChatMessage],
+        protectedIDs: Set<UUID> = []
+    ) -> [ChatMessage] {
         // Trailing rows the store cannot be expected to carry, peeled off so
         // the anchor below lands on a real transcript row: user bubbles typed
         // while this read was in flight (`prompt.submit` has not persisted
         // them) and Talaria's own system lines, which are never persisted.
-        var settled = chat.messages
+        var settled = existing
         var pending: [ChatMessage] = []
         while let last = settled.last, last.author != .bot {
             pending.insert(last, at: 0)
@@ -907,19 +929,146 @@ extension AppModel {
         }
 
         guard let anchor = settled.last else {
-            chat.messages = fetched + carried
-            return
+            guard fetched.count > settled.count else { return existing }
+            return Self.graftReplacement(
+                fetched: fetched, settled: settled, existing: existing,
+                carried: carried, protectedIDs: protectedIDs)
         }
         if let index = fetched.lastIndex(where: { Self.sameTranscriptRow($0, anchor) }) {
-            chat.messages = settled + fetched[fetched.index(after: index)...] + carried
+            return settled + fetched[fetched.index(after: index)...] + carried
         } else if fetched.count > settled.count {
             // No overlap and the server holds more: the local view has drifted
             // far enough (a compression, a branch, a long absence) that the
             // fetched page is simply the better transcript.
-            chat.messages = fetched + carried
+            return Self.graftReplacement(
+                fetched: fetched, settled: settled, existing: existing,
+                carried: carried, protectedIDs: protectedIDs)
         }
         // Otherwise the page describes older ground than what is on screen —
         // grafting it would rewind the chat, so leave the transcript alone.
+        return existing
+    }
+
+    /// Replace only the canonical portion of an unanchored graft. Protected
+    /// rows are local terminal evidence, not a competing transcript: an exact
+    /// fetched row supplies its current text/tool state, while the protected
+    /// UUID and failure evidence ride along. An unmatched protected row is
+    /// inserted in durable/visible order and never allowed to overwrite a
+    /// fetched row merely because its text happens to be stale.
+    private static func graftReplacement(
+        fetched: [ChatMessage], settled: [ChatMessage], existing: [ChatMessage],
+        carried: [ChatMessage], protectedIDs: Set<UUID>
+    ) -> [ChatMessage] {
+        var merged = fetched
+        let carriedIDs = Set(carried.map(\.id))
+        let protectedRows = existing.enumerated().filter { _, row in
+            protectedIDs.contains(row.id) && !carriedIDs.contains(row.id)
+        }
+        var consumedFetchedIndices: Set<Int> = []
+
+        for (localIndex, protected) in protectedRows {
+            if let fetchedIndex = Self.protectedMatchIndex(
+                protected, in: merged, excluding: consumedFetchedIndices,
+                expectedPosition: localIndex, localCount: settled.count) {
+                var canonical = merged[fetchedIndex]
+                // Keep the protected UUID so the retained-failure side table
+                // remains valid. All other fields come from the fetched row;
+                // this prevents stale live text/tool state replacing stored
+                // canonical content. Failure is the one local-only terminal
+                // fact that must survive the read.
+                canonical.id = protected.id
+                canonical.failure = TurnFailureLifecycle.merge(
+                    protected.failure, canonical.failure)
+                merged[fetchedIndex] = canonical
+                consumedFetchedIndices.insert(fetchedIndex)
+                continue
+            }
+
+            let insertion = Self.protectedInsertionIndex(
+                protected, localIndex: localIndex, settled: settled,
+                merged: merged, consumed: consumedFetchedIndices)
+            merged.insert(protected, at: insertion)
+            consumedFetchedIndices = Set(consumedFetchedIndices.map {
+                $0 >= insertion ? $0 + 1 : $0
+            })
+        }
+
+        merged.append(contentsOf: carried)
+        // A malformed gateway page should not make SwiftUI's Identifiable
+        // contract ambiguous. Preserve the first occurrence (especially the
+        // protected one) and mint a local identity for any later collision.
+        var seen: Set<UUID> = []
+        for index in merged.indices {
+            if seen.contains(merged[index].id) {
+                merged[index].id = UUID()
+            }
+            seen.insert(merged[index].id)
+        }
+        return merged
+    }
+
+    private static func protectedMatchIndex(
+        _ protected: ChatMessage, in messages: [ChatMessage],
+        excluding: Set<Int>, expectedPosition: Int, localCount: Int
+    ) -> Int? {
+        let exact = messages.indices.filter { index in
+            !excluding.contains(index) && protected.rowID != nil
+                && messages[index].rowID == protected.rowID
+        }
+        if let first = exact.first { return first }
+
+        let semantic = messages.indices.filter { index in
+            !excluding.contains(index) && sameTranscriptRow(messages[index], protected)
+        }
+        guard !semantic.isEmpty else { return nil }
+        guard semantic.count > 1 else { return semantic[0] }
+        // Repeated text without durable ids is inherently ambiguous. Pick the
+        // occurrence nearest the local position, then keep subsequent choices
+        // monotonic through `excluding`; this avoids duplicating a protected
+        // row while remaining deterministic and bounded.
+        let scale = max(localCount, 1)
+        let expected = Double(expectedPosition) / Double(scale)
+            * Double(max(messages.count - 1, 0))
+        return semantic.min {
+            abs(Double($0) - expected) < abs(Double($1) - expected)
+        }
+    }
+
+    private static func protectedInsertionIndex(
+        _ protected: ChatMessage, localIndex: Int, settled: [ChatMessage],
+        merged: [ChatMessage], consumed: Set<Int>
+    ) -> Int {
+        // Durable ids are ordered by the gateway. Use them when available so
+        // a failure row that predates a fetched page stays before it, while a
+        // newer unmatched failure remains at the tail.
+        if let rowID = protected.rowID,
+           let index = merged.firstIndex(where: { message in
+               guard let candidate = message.rowID else { return false }
+               return candidate > rowID
+           }) {
+            return index
+        }
+
+        // Otherwise use the nearest local rows that were successfully matched
+        // into the fetched page. This preserves ordering without assuming
+        // that repeated visible text is a durable identity.
+        if localIndex > settled.startIndex {
+            for prior in settled[..<localIndex].reversed() {
+                guard let priorIndex = merged.indices.first(where: { index in
+                    !consumed.contains(index) && sameTranscriptRow(merged[index], prior)
+                }) else { continue }
+                return priorIndex + 1
+            }
+        }
+        if localIndex + 1 < settled.endIndex {
+            for next in settled[(localIndex + 1)...] {
+                guard let nextIndex = merged.indices.first(where: { index in
+                    !consumed.contains(index) && sameTranscriptRow(merged[index], next)
+                }) else { continue }
+                return nextIndex
+            }
+        }
+        return merged.endIndex
     }
 
     /// Row identity across two projections of the same transcript. `row_id`
