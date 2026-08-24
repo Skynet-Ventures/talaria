@@ -375,8 +375,12 @@ create/edit/clone/run certification cases.
 ### 5. Remaining transcript and session depth
 
 Message edit, rewind/restore, regenerate, and message-level child creation are
-implemented. Remaining depth includes the N/M alternative-branch picker and
-lineage presentation, persistent multimodal parts, grouped generic tool runs,
+implemented. Desktop's N/M regenerate alternatives are client-local response
+siblings; selecting one does not switch Hermes' durable context and a normal
+resume cannot reconstruct them. The separate `session.branch` durable child
+contract is already implemented. Remaining depth includes a bounded current-
+chat N/M response picker, separate durable session-tree lineage presentation,
+persistent multimodal parts, grouped generic tool runs,
 math/diagram presentation, per-message TTS, whole-turn timing, tours, and
 transcript-wide activity. Bounded diff, ANSI terminal, web-search, generated-
 image lightbox/share, and explicit assistant image/audio/video/file cards are
