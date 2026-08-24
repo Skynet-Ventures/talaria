@@ -1436,6 +1436,14 @@ extension AppModel {
             ChatRuntime.shared.retainedFailureRows[chatID] =
                 protectedIDs.intersection(visible)
         }
+        if let binding = chat.assistantResponseBinding,
+           !chat.messages.contains(where: {
+               $0.author == .user && $0.id == binding.sourceUserID
+           }) {
+            // A stored page that cannot rebind the exact source row is a new
+            // authoritative projection, not evidence for this local shelf.
+            chat.clearAssistantResponseAlternatives()
+        }
     }
 
     /// Canonical hydration's narrowly-scoped retry policy.  The fallback

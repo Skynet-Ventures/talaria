@@ -30,17 +30,26 @@ public struct AssistantResponseAlternativesBinding: Sendable, Equatable, Hashabl
 public struct AssistantResponseAlternativeRun: Identifiable, Sendable, Equatable {
     public var id: UUID
     public var messages: [ChatMessage]
+    /// Measured retained budgets after admission. These are hard upper
+    /// bounds, not estimates copied from the source payload.
+    public var visibleScalars: Int
+    public var workItems: Int
+    public var bytes: Int
     public var isClipped: Bool
     public var clippedMessages: Int
     public var clippedVisibleScalars: Int
     public var clippedWorkItems: Int
     public var clippedBytes: Int
 
-    public init(id: UUID = UUID(), messages: [ChatMessage], isClipped: Bool = false,
+    public init(id: UUID = UUID(), messages: [ChatMessage], visibleScalars: Int = 0,
+                workItems: Int = 0, bytes: Int = 0, isClipped: Bool = false,
                 clippedMessages: Int = 0, clippedVisibleScalars: Int = 0,
                 clippedWorkItems: Int = 0, clippedBytes: Int = 0) {
         self.id = id
         self.messages = messages
+        self.visibleScalars = visibleScalars
+        self.workItems = workItems
+        self.bytes = bytes
         self.isClipped = isClipped
         self.clippedMessages = clippedMessages
         self.clippedVisibleScalars = clippedVisibleScalars
@@ -168,6 +177,59 @@ public enum AssistantResponseAlternativesPolicy {
         state.groups.first { $0.binding == binding }
     }
 
+    /// Rebind one source row after a destructive regenerate replaces its
+    /// optimistic user identity. Every other binding dimension must match;
+    /// a text/profile match is never enough. The existing group id and all
+    /// archived runs remain untouched.
+    public static func rebindSourceUserID(
+        from oldSourceUserID: UUID, to newSourceUserID: UUID,
+        matching binding: AssistantResponseAlternativesBinding,
+        in state: AssistantResponseAlternatives
+    ) -> AssistantResponseAlternatives {
+        let candidates = state.groups.indices.filter { index in
+            let groupBinding = state.groups[index].binding
+            return groupBinding.sourceUserID == oldSourceUserID
+                && groupBinding.chatID == binding.chatID
+                && groupBinding.storedSessionID == binding.storedSessionID
+                && groupBinding.runtimeSessionID == binding.runtimeSessionID
+                && groupBinding.gatewayID == binding.gatewayID
+                && groupBinding.profile == binding.profile
+        }
+        guard candidates.count == 1, let index = candidates.first else {
+            return state
+        }
+        if oldSourceUserID != newSourceUserID,
+           state.groups.contains(where: {
+               $0.id != state.groups[index].id
+                   && $0.binding.sourceUserID == newSourceUserID
+           }) {
+            // Never merge two exact source identities into one visible turn.
+            // A duplicate optimistic id is an ambiguous receipt, not a
+            // reason to let one shelf overwrite another.
+            return state
+        }
+        var next = state
+        next.groups[index].binding.sourceUserID = newSourceUserID
+        return next
+    }
+
+    /// Remove groups whose source turns were dropped by an accepted
+    /// destructive action. The source being regenerated is intentionally
+    /// excluded by the caller so its shelf can migrate and append atomically.
+    public static func pruning(
+        sourceUserIDs: Set<UUID>, in state: AssistantResponseAlternatives
+    ) -> AssistantResponseAlternatives {
+        guard !sourceUserIDs.isEmpty else { return state }
+        var next = state
+        next.groups.removeAll { sourceUserIDs.contains($0.binding.sourceUserID) }
+        if let selected = next.selectedGroupID,
+           !next.groups.contains(where: { $0.id == selected }) {
+            next.selectedGroupID = nil
+            next.selectedAlternativeIndex = nil
+        }
+        return next
+    }
+
     /// Select an archived run, or `nil` for the current/newest run. Invalid
     /// indexes fail closed and leave the prior state unchanged.
     public static func select(
@@ -253,7 +315,25 @@ public enum AssistantResponseAlternativesPolicy {
         in state: AssistantResponseAlternatives
     ) -> (current: Int, total: Int)? {
         guard let group = state.selectedGroup else { return nil }
-        let current = (state.selectedAlternativeIndex ?? group.alternatives.count) + 1
+        return responsePosition(group: group,
+                                archivedIndex: state.selectedAlternativeIndex)
+    }
+
+    public static func responsePosition(
+        groupID: UUID, in state: AssistantResponseAlternatives
+    ) -> (current: Int, total: Int)? {
+        guard let group = state.groups.first(where: { $0.id == groupID }) else {
+            return nil
+        }
+        let archivedIndex = state.selectedGroupID == groupID
+            ? state.selectedAlternativeIndex : nil
+        return responsePosition(group: group, archivedIndex: archivedIndex)
+    }
+
+    private static func responsePosition(
+        group: AssistantResponseAlternativeGroup, archivedIndex: Int?
+    ) -> (current: Int, total: Int) {
+        let current = (archivedIndex ?? group.alternatives.count) + 1
         return (current, group.alternatives.count + 1)
     }
 
@@ -273,108 +353,363 @@ public enum AssistantResponseAlternativesPolicy {
         _ source: [ChatMessage], id: UUID = UUID()
     ) -> AssistantResponseAlternativeRun {
         var clipped = source.count > maximumMessagesPerRun
-        var clippedMessages = max(0, source.count - maximumMessagesPerRun)
-        var visibleScalars = 0
-        var workItems = 0
-        var bytes = 0
+        let clippedMessages = max(0, source.count - maximumMessagesPerRun)
         var clippedVisibleScalars = 0
         var clippedWorkItems = 0
-        var admitted: [ChatMessage] = []
-        admitted.reserveCapacity(min(source.count, maximumMessagesPerRun))
+        var admitted = source.prefix(maximumMessagesPerRun).map {
+            boundedMessage($0, clipped: &clipped)
+        }
 
-        for sourceMessage in source.prefix(maximumMessagesPerRun) {
-            var message = sourceMessage
-            var messageClipped = false
-            let text = boundedText(message.text, maximum: maximumTextScalarsPerMessage)
-            message.text = text.text
-            messageClipped = messageClipped || text.truncated
-            if let reasoning = message.reasoning {
-                let bounded = boundedText(reasoning, maximum: maximumTextScalarsPerMessage)
-                message.reasoning = bounded.text
-                messageClipped = messageClipped || bounded.truncated
+        // A work item is a retained message or tool invocation. Drop only
+        // whole tool items at this boundary; never retain a partial ToolCall.
+        var remainingWork = maximumWorkItemsPerRun
+        for index in admitted.indices {
+            guard remainingWork > 0 else {
+                clippedWorkItems += admitted[index].toolCalls.count + 1
+                clipped = clipped || !admitted[index].toolCalls.isEmpty
+                admitted[index].toolCalls.removeAll()
+                continue
             }
-            var calls: [ToolCall] = []
-            calls.reserveCapacity(min(message.toolCalls.count, 128))
-            for call in message.toolCalls.prefix(128) {
-                var boundedCall = call
-                let context = boundedText(call.context, maximum: maximumToolScalars)
-                boundedCall.context = context.text
-                let summary = call.summary.map {
-                    boundedText($0, maximum: maximumToolScalars)
-                }
-                boundedCall.summary = summary?.text
-                let result = call.resultText.map {
-                    boundedText($0, maximum: maximumToolScalars)
-                }
-                boundedCall.resultText = result?.text
-                let diagnostic = call.diagnostic.map {
-                    boundedText($0, maximum: maximumToolScalars)
-                }
-                boundedCall.diagnostic = diagnostic?.text
-                messageClipped = messageClipped || context.truncated
-                    || summary?.truncated == true || result?.truncated == true
-                    || diagnostic?.truncated == true
-                calls.append(boundedCall)
-            }
-            if message.toolCalls.count > calls.count {
+            remainingWork -= 1 // the message itself
+            let allowedCalls = min(admitted[index].toolCalls.count, remainingWork)
+            if allowedCalls < admitted[index].toolCalls.count {
+                clippedWorkItems += admitted[index].toolCalls.count - allowedCalls
                 clipped = true
-                clippedWorkItems += message.toolCalls.count - calls.count
+                admitted[index].toolCalls = Array(
+                    admitted[index].toolCalls.prefix(allowedCalls))
             }
-            message.toolCalls = calls
-            let messageScalars = visibleScalarCount(message)
-            let messageBytes = visibleByteCount(message)
-            visibleScalars += messageScalars
-            bytes += messageBytes
-            workItems += 1 + calls.count
-            if messageClipped { clipped = true }
-            admitted.append(message)
+            remainingWork -= admitted[index].toolCalls.count
         }
 
-        if visibleScalars > maximumVisibleScalarsPerRun {
+        // Consume the scalar budget in display order, including argument and
+        // result text. This pass is bounded-prefix work even for hostile
+        // multi-byte strings and leaves a truthful clipped marker.
+        let preClipScalars = retainedScalarCount(admitted)
+        if preClipScalars > maximumVisibleScalarsPerRun {
+            clippedVisibleScalars = preClipScalars - maximumVisibleScalarsPerRun
             clipped = true
-            clippedVisibleScalars = visibleScalars - maximumVisibleScalarsPerRun
-            let allowance = maximumVisibleScalarsPerRun
-            var used = 0
+            // JSON and specialist evidence are complete-value fields.  They
+            // cannot be prefix-clipped safely, so discard them atomically
+            // before consuming the scalar prefix of ordinary text fields.
             for index in admitted.indices {
-                let message = admitted[index]
-                let available = max(0, allowance - used)
-                let bounded = boundedText(message.text, maximum: available)
-                admitted[index].text = bounded.text
-                used += bounded.text.unicodeScalars.count
-                if bounded.truncated { admitted[index].reasoning = nil }
-                if used >= allowance {
-                    for rest in admitted.indices where rest > index {
-                        admitted[rest].text = ""
-                        admitted[rest].reasoning = nil
-                        admitted[rest].toolCalls = []
-                    }
-                    break
-                }
+                dropOptionalEvidence(&admitted[index])
             }
-            visibleScalars = allowance
         }
-        if workItems > maximumWorkItemsPerRun {
-            clipped = true
-            clippedWorkItems += workItems - maximumWorkItemsPerRun
+        var remainingScalars = maximumVisibleScalarsPerRun
+        for index in admitted.indices {
+            let before = remainingScalars
+            clipVisibleScalars(&admitted[index], remaining: &remainingScalars,
+                               clipped: &clipped)
+            if before == remainingScalars, retainedScalarCount(admitted[index]) > 0 {
+                clipped = true
+            }
         }
+        // UTF-8 bytes are a separate hard budget. Specialist evidence is
+        // already admitted by its own codecs; when this shelf saturates, drop
+        // only those optional evidence containers and compact visible strings
+        // by a bounded UTF-8 prefix.
+        var bytes = retainedByteCount(admitted)
+        var clippedBytes = 0
         if bytes > maximumBytesPerRun {
             clipped = true
+            clippedBytes = bytes - maximumBytesPerRun
+            for index in admitted.indices {
+                for callIndex in admitted[index].toolCalls.indices {
+                    dropOptionalEvidence(&admitted[index].toolCalls[callIndex])
+                }
+            }
+            var remainingBytes = maximumBytesPerRun
+            for index in admitted.indices {
+                clipVisibleBytes(&admitted[index], remaining: &remainingBytes,
+                                 clipped: &clipped)
+            }
+            bytes = retainedByteCount(admitted)
+            clippedBytes = max(clippedBytes, max(0, bytes - maximumBytesPerRun))
         }
-        if clippedMessages == 0, source.count > admitted.count {
-            clippedMessages = source.count - admitted.count
-        }
+
+        let visibleScalars = retainedScalarCount(admitted)
+        let workItems = admitted.reduce(0) { $0 + 1 + $1.toolCalls.count }
+        bytes = retainedByteCount(admitted)
         return AssistantResponseAlternativeRun(
-            id: id, messages: admitted, isClipped: clipped,
+            id: id, messages: admitted, visibleScalars: visibleScalars,
+            workItems: workItems, bytes: bytes, isClipped: clipped,
             clippedMessages: clippedMessages,
             clippedVisibleScalars: clippedVisibleScalars,
             clippedWorkItems: clippedWorkItems,
-            clippedBytes: max(0, bytes - maximumBytesPerRun))
+            clippedBytes: clippedBytes)
+    }
+
+    private static func boundedMessage(_ source: ChatMessage,
+                                       clipped: inout Bool) -> ChatMessage {
+        var message = source
+        let text = boundedText(message.text, maximum: maximumTextScalarsPerMessage)
+        message.text = text.text
+        clipped = clipped || text.truncated
+        if let time = message.time {
+            let bounded = boundedText(time, maximum: maximumToolScalars)
+            message.time = bounded.text
+            clipped = clipped || bounded.truncated
+        }
+        if let reasoning = message.reasoning {
+            let bounded = boundedText(reasoning, maximum: maximumTextScalarsPerMessage)
+            message.reasoning = bounded.text
+            clipped = clipped || bounded.truncated
+        }
+        if var failure = message.failure {
+            let bounded = boundedText(failure.message, maximum: maximumToolScalars)
+            failure.message = bounded.text
+            message.failure = failure
+            clipped = clipped || bounded.truncated
+        }
+        message.card = boundedCard(message.card, clipped: &clipped)
+        message.toolCalls = message.toolCalls.prefix(128).map { call in
+            boundedToolCall(call, clipped: &clipped)
+        }
+        if source.toolCalls.count > message.toolCalls.count { clipped = true }
+        return message
+    }
+
+    private static func boundedToolCall(_ source: ToolCall,
+                                        clipped: inout Bool) -> ToolCall {
+        var call = source
+        func bound(_ value: String, maximum: Int) -> String {
+            let result = boundedText(value, maximum: maximum)
+            clipped = clipped || result.truncated
+            return result.text
+        }
+        call.id = bound(call.id, maximum: 256)
+        call.gatewayToolID = call.gatewayToolID.map { bound($0, maximum: 256) }
+        call.name = bound(call.name, maximum: 160)
+        call.context = bound(call.context, maximum: maximumToolScalars)
+        call.summary = call.summary.map { bound($0, maximum: maximumToolScalars) }
+        call.resultText = call.resultText.map { bound($0, maximum: maximumToolScalars) }
+        call.diagnostic = call.diagnostic.map { bound($0, maximum: maximumToolScalars) }
+        call.webSearchQuery = call.webSearchQuery.map { bound($0, maximum: maximumToolScalars) }
+        call.arguments = boundedPayload(call.arguments, clipped: &clipped)
+        call.result = boundedPayload(call.result, clipped: &clipped)
+        return call
+    }
+
+    private static func boundedPayload(_ source: ToolPayload?, clipped: inout Bool)
+        -> ToolPayload? {
+        guard var payload = source else { return nil }
+        if let text = payload.text {
+            let bounded = boundedText(text, maximum: maximumToolScalars)
+            payload.text = bounded.text
+            payload.isTruncated = payload.isTruncated || bounded.truncated
+            clipped = clipped || bounded.truncated
+            // A clipped textual projection is not a safe complete JSON value.
+            if bounded.truncated { payload.json = nil }
+        }
+        if let json = payload.json, !jsonFitsBudget(json) {
+            payload.json = nil
+            payload.isTruncated = true
+            clipped = true
+        }
+        return payload
+    }
+
+    private static func jsonFitsBudget(_ value: JSONValue) -> Bool {
+        var remaining = maximumToolScalars
+        func visit(_ value: JSONValue, depth: Int) -> Bool {
+            guard depth <= 32, remaining > 0 else { return false }
+            switch value {
+            case .null, .bool, .number:
+                remaining -= 1
+                return true
+            case .string(let string):
+                let count = string.unicodeScalars.prefix(remaining + 1).count
+                guard count <= remaining else { return false }
+                remaining -= count
+                return true
+            case .array(let values):
+                for item in values where !visit(item, depth: depth + 1) { return false }
+            case .object(let values):
+                for (key, item) in values {
+                    let keyCount = key.unicodeScalars.prefix(remaining + 1).count
+                    guard keyCount <= remaining else { return false }
+                    remaining -= keyCount
+                    guard visit(item, depth: depth + 1) else { return false }
+                }
+            }
+            return true
+        }
+        return visit(value, depth: 0)
+    }
+
+    private static func boundedCard(_ source: MessageCard?, clipped: inout Bool)
+        -> MessageCard? {
+        guard let source else { return nil }
+        switch source {
+        case .approvalRef(let ref):
+            let bounded = boundedText(ref, maximum: maximumToolScalars)
+            clipped = clipped || bounded.truncated
+            return .approvalRef(bounded.text)
+        case .papers(let papers):
+            let bounded = papers.prefix(64).map { paper -> MessageCard.Paper in
+                let title = boundedText(paper.title, maximum: maximumToolScalars)
+                let meta = boundedText(paper.meta, maximum: maximumToolScalars)
+                let summary = boundedText(paper.summary, maximum: maximumToolScalars)
+                clipped = clipped || title.truncated || meta.truncated || summary.truncated
+                return .init(title: title.text, meta: meta.text, summary: summary.text)
+            }
+            clipped = clipped || papers.count > bounded.count
+            return .papers(Array(bounded))
+        }
+    }
+
+    private static func consumeScalars(_ source: String, maximum: Int,
+                                       remaining: inout Int)
+        -> (text: String, truncated: Bool) {
+        let allowed = min(maximum, max(0, remaining))
+        let bounded = boundedText(source, maximum: allowed)
+        remaining -= bounded.text.unicodeScalars.count
+        return bounded
+    }
+
+    private static func clipVisibleScalars(_ message: inout ChatMessage,
+                                           remaining: inout Int,
+                                           clipped: inout Bool) {
+        func take(_ value: String, maximum: Int) -> String {
+            let result = consumeScalars(value, maximum: maximum, remaining: &remaining)
+            clipped = clipped || result.truncated
+            return result.text
+        }
+        message.text = take(message.text, maximum: maximumTextScalarsPerMessage)
+        message.time = message.time.map { take($0, maximum: maximumToolScalars) }
+        if let reasoning = message.reasoning {
+            message.reasoning = take(reasoning, maximum: maximumTextScalarsPerMessage)
+        }
+        if var failure = message.failure {
+            failure.message = take(failure.message, maximum: maximumToolScalars)
+            message.failure = failure
+        }
+        if let card = message.card {
+            switch card {
+            case .approvalRef(let ref):
+                message.card = .approvalRef(take(ref, maximum: maximumToolScalars))
+            case .papers(let papers):
+                message.card = .papers(papers.map { paper in
+                    .init(title: take(paper.title, maximum: maximumToolScalars),
+                          meta: take(paper.meta, maximum: maximumToolScalars),
+                          summary: take(paper.summary, maximum: maximumToolScalars))
+                })
+            }
+        }
+        for index in message.toolCalls.indices {
+            var call = message.toolCalls[index]
+            call.id = take(call.id, maximum: 256)
+            call.gatewayToolID = call.gatewayToolID.map { take($0, maximum: 256) }
+            call.name = take(call.name, maximum: 160)
+            call.context = take(call.context, maximum: maximumToolScalars)
+            call.summary = call.summary.map { take($0, maximum: maximumToolScalars) }
+            call.resultText = call.resultText.map { take($0, maximum: maximumToolScalars) }
+            call.diagnostic = call.diagnostic.map { take($0, maximum: maximumToolScalars) }
+            call.webSearchQuery = call.webSearchQuery.map {
+                take($0, maximum: maximumToolScalars)
+            }
+            call.arguments = clipPayloadScalars(call.arguments, remaining: &remaining,
+                                                clipped: &clipped)
+            call.result = clipPayloadScalars(call.result, remaining: &remaining,
+                                              clipped: &clipped)
+            message.toolCalls[index] = call
+        }
+    }
+
+    private static func clipPayloadScalars(_ source: ToolPayload?, remaining: inout Int,
+                                           clipped: inout Bool) -> ToolPayload? {
+        guard var payload = source else { return nil }
+        if let text = payload.text {
+            let bounded = consumeScalars(text, maximum: maximumToolScalars,
+                                          remaining: &remaining)
+            payload.text = bounded.text
+            payload.isTruncated = payload.isTruncated || bounded.truncated
+            clipped = clipped || bounded.truncated
+            if bounded.truncated { payload.json = nil }
+        }
+        if let json = payload.json {
+            let count = jsonScalarCount(json)
+            if count <= remaining {
+                remaining -= count
+            } else {
+                payload.json = nil
+                payload.isTruncated = true
+                clipped = true
+            }
+        }
+        return payload
+    }
+
+    private static func consumeBytes(_ source: String, maximum: Int,
+                                     remaining: inout Int)
+        -> (text: String, truncated: Bool) {
+        let allowed = min(maximum, max(0, remaining))
+        let bounded = boundedUTF8Text(source, maximumBytes: allowed)
+        remaining -= bounded.text.utf8.count
+        return bounded
+    }
+
+    private static func clipVisibleBytes(_ message: inout ChatMessage,
+                                         remaining: inout Int,
+                                         clipped: inout Bool) {
+        func take(_ value: String, maximum: Int = maximumBytesPerRun) -> String {
+            let result = consumeBytes(value, maximum: maximum, remaining: &remaining)
+            clipped = clipped || result.truncated
+            return result.text
+        }
+        message.text = take(message.text)
+        message.time = message.time.map { take($0, maximum: maximumToolScalars) }
+        if let reasoning = message.reasoning { message.reasoning = take(reasoning) }
+        if var failure = message.failure {
+            failure.message = take(failure.message)
+            message.failure = failure
+        }
+        if let card = message.card {
+            switch card {
+            case .approvalRef(let ref): message.card = .approvalRef(take(ref))
+            case .papers(let papers):
+                message.card = .papers(papers.map {
+                    .init(title: take($0.title), meta: take($0.meta), summary: take($0.summary))
+                })
+            }
+        }
+        for index in message.toolCalls.indices {
+            var call = message.toolCalls[index]
+            call.id = take(call.id, maximum: 256)
+            call.gatewayToolID = call.gatewayToolID.map { take($0, maximum: 256) }
+            call.name = take(call.name, maximum: 160)
+            call.context = take(call.context, maximum: maximumToolScalars)
+            call.summary = call.summary.map { take($0, maximum: maximumToolScalars) }
+            call.resultText = call.resultText.map { take($0, maximum: maximumToolScalars) }
+            call.diagnostic = call.diagnostic.map { take($0, maximum: maximumToolScalars) }
+            call.arguments?.json = nil
+            call.result?.json = nil
+            call.arguments = clipPayloadBytes(call.arguments, remaining: &remaining,
+                                               clipped: &clipped)
+            call.result = clipPayloadBytes(call.result, remaining: &remaining,
+                                            clipped: &clipped)
+            message.toolCalls[index] = call
+        }
+    }
+
+    private static func clipPayloadBytes(_ source: ToolPayload?, remaining: inout Int,
+                                         clipped: inout Bool) -> ToolPayload? {
+        guard var payload = source else { return nil }
+        if let text = payload.text {
+            let bounded = consumeBytes(text, maximum: maximumToolScalars * 4,
+                                       remaining: &remaining)
+            payload.text = bounded.text
+            payload.isTruncated = payload.isTruncated || bounded.truncated
+            clipped = clipped || bounded.truncated
+        }
+        payload.json = nil
+        return payload
     }
 
     private static func boundedText(_ source: String, maximum: Int)
         -> (text: String, truncated: Bool) {
         guard maximum >= 0 else { return ("", !source.isEmpty) }
-        let scalars = Array(source.unicodeScalars)
+        let scalars = source.unicodeScalars.prefix(maximum + 1)
         guard scalars.count > maximum else { return (source, false) }
         let marker = clippedMarker.unicodeScalars
         var retained = String.UnicodeScalarView()
@@ -385,34 +720,252 @@ public enum AssistantResponseAlternativesPolicy {
         return (String(retained) + clippedMarker, true)
     }
 
-    private static func visibleScalarCount(_ message: ChatMessage) -> Int {
-        var count = message.text.unicodeScalars.count
-        count += message.reasoning?.unicodeScalars.count ?? 0
-        count += message.failure?.message.unicodeScalars.count ?? 0
-        for call in message.toolCalls {
-            count += call.context.unicodeScalars.count
-            count += call.summary?.unicodeScalars.count ?? 0
-            count += call.resultText?.unicodeScalars.count ?? 0
-            count += call.diagnostic?.unicodeScalars.count ?? 0
-            count += call.arguments?.displayText?.unicodeScalars.count ?? 0
-            count += call.result?.displayText?.unicodeScalars.count ?? 0
+    private static func boundedUTF8Text(_ source: String, maximumBytes: Int)
+        -> (text: String, truncated: Bool) {
+        guard maximumBytes >= 0 else { return ("", !source.isEmpty) }
+        var retained = String.UnicodeScalarView()
+        var used = 0
+        var truncated = false
+        for scalar in source.unicodeScalars {
+            let scalarBytes = String(scalar).utf8.count
+            guard used + scalarBytes <= maximumBytes else {
+                truncated = true
+                break
+            }
+            retained.append(scalar)
+            used += scalarBytes
         }
-        return count
+        if !truncated { return (source, false) }
+        return (String(retained), true)
     }
 
-    private static func visibleByteCount(_ message: ChatMessage) -> Int {
-        var count = message.text.utf8.count
-        count += message.reasoning?.utf8.count ?? 0
-        count += message.failure?.message.utf8.count ?? 0
-        for call in message.toolCalls {
-            count += call.context.utf8.count
-            count += call.summary?.utf8.count ?? 0
-            count += call.resultText?.utf8.count ?? 0
-            count += call.diagnostic?.utf8.count ?? 0
-            count += call.arguments?.displayText?.utf8.count ?? 0
-            count += call.result?.displayText?.utf8.count ?? 0
+    /// Complete-value specialist fields and structural JSON cannot be
+    /// prefix-clipped without changing their meaning.  They remain present
+    /// while the aggregate budget allows them, then are removed atomically.
+    private static func dropOptionalEvidence(_ message: inout ChatMessage) {
+        for index in message.toolCalls.indices {
+            dropOptionalEvidence(&message.toolCalls[index])
         }
-        return count
+    }
+
+    private static func dropOptionalEvidence(_ call: inout ToolCall) {
+        if call.arguments?.json != nil {
+            call.arguments?.json = nil
+            call.arguments?.isTruncated = true
+        }
+        if call.result?.json != nil {
+            call.result?.json = nil
+            call.result?.isTruncated = true
+        }
+        call.fileDiff = nil
+        call.structuredOutput = nil
+        call.deferredStructuredOutput = nil
+        call.deferredFileDiff = nil
+        call.webSearchOutput = nil
+        call.deferredWebSearchOutput = nil
+        call.generatedImage = nil
+        call.deferredGeneratedImage = nil
+    }
+
+    private static func jsonScalarCount(_ value: JSONValue, depth: Int = 0) -> Int {
+        guard depth <= 32 else { return 0 }
+        switch value {
+        case .null, .bool, .number: return 0
+        case .string(let value): return value.unicodeScalars.count
+        case .array(let values):
+            return values.reduce(0) { $0 + jsonScalarCount($1, depth: depth + 1) }
+        case .object(let values):
+            return values.reduce(0) {
+                $0 + $1.key.unicodeScalars.count
+                    + jsonScalarCount($1.value, depth: depth + 1)
+            }
+        }
+    }
+
+    private static func jsonByteCount(_ value: JSONValue) -> Int {
+        (try? JSONEncoder().encode(value).count) ?? jsonScalarCount(value)
+    }
+
+    private static func optionalScalarCount(_ value: String?) -> Int {
+        value?.unicodeScalars.count ?? 0
+    }
+
+    private static func optionalByteCount(_ value: String?) -> Int {
+        value?.utf8.count ?? 0
+    }
+
+    private static func scalarCount(_ stream: ToolOutputStream?) -> Int {
+        guard let stream else { return 0 }
+        return stream.segments.reduce(0) { $0 + $1.text.unicodeScalars.count }
+            + optionalScalarCount(stream.diagnostic)
+    }
+
+    private static func byteCount(_ stream: ToolOutputStream?) -> Int {
+        guard let stream else { return 0 }
+        return stream.segments.reduce(0) { $0 + $1.text.utf8.count }
+            + optionalByteCount(stream.diagnostic)
+    }
+
+    private static func scalarCount(_ value: ToolFileDiff?) -> Int {
+        guard let value else { return 0 }
+        return optionalScalarCount(value.path)
+            + optionalScalarCount(value.unifiedDiff)
+            + optionalScalarCount(value.diagnostic)
+    }
+
+    private static func byteCount(_ value: ToolFileDiff?) -> Int {
+        guard let value else { return 0 }
+        return optionalByteCount(value.path)
+            + optionalByteCount(value.unifiedDiff)
+            + optionalByteCount(value.diagnostic)
+    }
+
+    private static func scalarCount(_ value: ToolStructuredOutput?) -> Int {
+        guard let value else { return 0 }
+        return scalarCount(value.stdout) + scalarCount(value.stderr)
+            + optionalScalarCount(value.residualText)
+            + optionalScalarCount(value.diagnostic)
+    }
+
+    private static func byteCount(_ value: ToolStructuredOutput?) -> Int {
+        guard let value else { return 0 }
+        return byteCount(value.stdout) + byteCount(value.stderr)
+            + optionalByteCount(value.residualText)
+            + optionalByteCount(value.diagnostic)
+    }
+
+    private static func scalarCount(_ value: ToolWebSearchOutput?) -> Int {
+        guard let value else { return 0 }
+        return optionalScalarCount(value.query)
+            + value.hits.reduce(0) {
+                $0 + $1.title.unicodeScalars.count
+                    + optionalScalarCount($1.url)
+                    + optionalScalarCount($1.snippet)
+            }
+            + optionalScalarCount(value.diagnostic)
+    }
+
+    private static func byteCount(_ value: ToolWebSearchOutput?) -> Int {
+        guard let value else { return 0 }
+        return optionalByteCount(value.query)
+            + value.hits.reduce(0) {
+                $0 + $1.title.utf8.count
+                    + optionalByteCount($1.url)
+                    + optionalByteCount($1.snippet)
+            }
+            + optionalByteCount(value.diagnostic)
+    }
+
+    private static func scalarCount(_ value: ToolGeneratedImage?) -> Int {
+        guard let value else { return 0 }
+        return value.source.unicodeScalars.count
+            + value.echoSources.reduce(0) { $0 + $1.unicodeScalars.count }
+    }
+
+    private static func byteCount(_ value: ToolGeneratedImage?) -> Int {
+        guard let value else { return 0 }
+        return value.source.utf8.count
+            + value.echoSources.reduce(0) { $0 + $1.utf8.count }
+    }
+
+    private static func retainedScalarCount(_ payload: ToolPayload?) -> Int {
+        guard let payload else { return 0 }
+        return optionalScalarCount(payload.text)
+            + (payload.json.map { jsonScalarCount($0) } ?? 0)
+    }
+
+    private static func retainedByteCount(_ payload: ToolPayload?) -> Int {
+        guard let payload else { return 0 }
+        return optionalByteCount(payload.text)
+            + (payload.json.map { jsonByteCount($0) } ?? 0)
+    }
+
+    private static func retainedScalarCount(_ call: ToolCall) -> Int {
+        optionalScalarCount(call.id)
+            + optionalScalarCount(call.gatewayToolID)
+            + call.name.unicodeScalars.count
+            + call.context.unicodeScalars.count
+            + optionalScalarCount(call.summary)
+            + optionalScalarCount(call.resultText)
+            + optionalScalarCount(call.diagnostic)
+            + optionalScalarCount(call.webSearchQuery)
+            + retainedScalarCount(call.arguments)
+            + retainedScalarCount(call.result)
+            + scalarCount(call.fileDiff)
+            + scalarCount(call.structuredOutput)
+            + scalarCount(call.deferredStructuredOutput)
+            + scalarCount(call.deferredFileDiff)
+            + scalarCount(call.webSearchOutput)
+            + scalarCount(call.deferredWebSearchOutput)
+            + scalarCount(call.generatedImage)
+            + scalarCount(call.deferredGeneratedImage)
+    }
+
+    private static func retainedByteCount(_ call: ToolCall) -> Int {
+        optionalByteCount(call.id)
+            + optionalByteCount(call.gatewayToolID)
+            + call.name.utf8.count
+            + call.context.utf8.count
+            + optionalByteCount(call.summary)
+            + optionalByteCount(call.resultText)
+            + optionalByteCount(call.diagnostic)
+            + optionalByteCount(call.webSearchQuery)
+            + retainedByteCount(call.arguments)
+            + retainedByteCount(call.result)
+            + byteCount(call.fileDiff)
+            + byteCount(call.structuredOutput)
+            + byteCount(call.deferredStructuredOutput)
+            + byteCount(call.deferredFileDiff)
+            + byteCount(call.webSearchOutput)
+            + byteCount(call.deferredWebSearchOutput)
+            + byteCount(call.generatedImage)
+            + byteCount(call.deferredGeneratedImage)
+    }
+
+    private static func retainedScalarCount(_ message: ChatMessage) -> Int {
+        optionalScalarCount(message.time)
+            + message.text.unicodeScalars.count
+            + optionalScalarCount(message.reasoning)
+            + optionalScalarCount(message.failure?.message)
+            + (message.card.map { card in
+                switch card {
+                case .approvalRef(let value): return value.unicodeScalars.count
+                case .papers(let papers):
+                    return papers.reduce(0) {
+                        $0 + $1.title.unicodeScalars.count
+                            + $1.meta.unicodeScalars.count
+                            + $1.summary.unicodeScalars.count
+                    }
+                }
+            } ?? 0)
+            + message.toolCalls.reduce(0) { $0 + retainedScalarCount($1) }
+    }
+
+    private static func retainedByteCount(_ message: ChatMessage) -> Int {
+        optionalByteCount(message.time)
+            + message.text.utf8.count
+            + optionalByteCount(message.reasoning)
+            + optionalByteCount(message.failure?.message)
+            + (message.card.map { card in
+                switch card {
+                case .approvalRef(let value): return value.utf8.count
+                case .papers(let papers):
+                    return papers.reduce(0) {
+                        $0 + $1.title.utf8.count
+                            + $1.meta.utf8.count
+                            + $1.summary.utf8.count
+                    }
+                }
+            } ?? 0)
+            + message.toolCalls.reduce(0) { $0 + retainedByteCount($1) }
+    }
+
+    private static func retainedScalarCount(_ messages: [ChatMessage]) -> Int {
+        messages.reduce(0) { $0 + retainedScalarCount($1) }
+    }
+
+    private static func retainedByteCount(_ messages: [ChatMessage]) -> Int {
+        messages.reduce(0) { $0 + retainedByteCount($1) }
     }
 }
 

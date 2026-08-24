@@ -768,6 +768,8 @@ struct AssistantResponseAlternativeStage: Equatable {
     var botID: String
     var chatID: ObjectIdentifier
     var binding: AssistantResponseAlternativesBinding
+    var previousSourceUserID: UUID
+    var invalidatedSourceUserIDs: Set<UUID>
     var previousAssistantRun: [ChatMessage]
     var committed = false
 }
@@ -2893,7 +2895,7 @@ extension AppModel {
         let optimistic = ChatMessage(author: .user, time: AppModel.clock(), text: plan.text)
         chat.messages.append(optimistic)
         if plan.kind == .regenerate,
-           plan.sourceUserID != nil,
+           let previousSourceUserID = plan.sourceUserID,
            !plan.previousAssistantRun.isEmpty {
             // The destructive submit replaces the old durable source row with
             // this new local identity. The plan still captures the old source
@@ -2910,6 +2912,10 @@ extension AppModel {
                 AssistantResponseAlternativeStage(
                     operationID: operationID, botID: botID,
                     chatID: ObjectIdentifier(chat), binding: binding,
+                    previousSourceUserID: previousSourceUserID,
+                    invalidatedSourceUserIDs: Set(
+                        baseline.dropFirst(plan.sourceIndex + 1)
+                            .filter { $0.author == .user }.map(\.id)),
                     previousAssistantRun: plan.previousAssistantRun)
         }
         chat.isRunning = true
@@ -3141,7 +3147,7 @@ extension AppModel {
         _ lease: TranscriptActionLease
     ) -> Bool {
         let runtime = ChatRuntime.shared
-        guard var stage = runtime.assistantResponseAlternativeStages[lease.botID],
+        guard let stage = runtime.assistantResponseAlternativeStages[lease.botID],
               stage.operationID == lease.id, !stage.committed,
               let chat = chats[lease.botID], ObjectIdentifier(chat) == stage.chatID,
               chat.chatIdentity == stage.binding.chatID,
@@ -3150,22 +3156,31 @@ extension AppModel {
               let route = gatewayRoute(for: lease.botID),
               route.gatewayID == stage.binding.gatewayID,
               route.profile == stage.binding.profile else { return false }
+        var shelf = AssistantResponseAlternativesPolicy.pruning(
+            sourceUserIDs: stage.invalidatedSourceUserIDs,
+            in: chat.assistantResponseAlternatives)
+        shelf = AssistantResponseAlternativesPolicy.rebindSourceUserID(
+            from: stage.previousSourceUserID,
+            to: stage.binding.sourceUserID,
+            matching: stage.binding,
+            in: shelf)
         chat.assistantResponseBinding = stage.binding
         chat.assistantResponseAlternatives = AssistantResponseAlternativesPolicy.record(
             stage.previousAssistantRun, binding: stage.binding,
-            state: chat.assistantResponseAlternatives)
-        stage.committed = true
-        runtime.assistantResponseAlternativeStages[lease.botID] = stage
+            state: shelf)
+        // The stage is one-shot evidence. Once the run is admitted, removing
+        // it prevents a later definite refusal/cleanup callback from wiping
+        // committed shelves and makes repeated commit attempts fail closed.
+        runtime.assistantResponseAlternativeStages[lease.botID] = nil
         return true
     }
 
-    private func clearAssistantResponseAlternativeIfOwned(_ lease: TranscriptActionLease) {
+    func clearAssistantResponseAlternativeIfOwned(_ lease: TranscriptActionLease) {
         let runtime = ChatRuntime.shared
         guard let stage = runtime.assistantResponseAlternativeStages[lease.botID],
               stage.operationID == lease.id else { return }
-        if let chat = chats[lease.botID], ObjectIdentifier(chat) == stage.chatID {
-            chat.clearAssistantResponseAlternatives()
-        }
+        // A definite refusal owns only this uncommitted stage. Previously
+        // committed groups are independent local history and must survive.
         runtime.assistantResponseAlternativeStages[lease.botID] = nil
     }
 

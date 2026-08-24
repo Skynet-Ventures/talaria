@@ -953,8 +953,8 @@ public struct ChatView: View {
     }
 
     @ViewBuilder private var transcriptRows: some View {
-        assistantResponseControls
         ForEach(transcriptMessages) { message in
+            assistantResponseControls(for: message)
             messageRow(message)
                 .id(message.id.uuidString)
         }
@@ -975,14 +975,27 @@ public struct ChatView: View {
             )
     }
 
-    @ViewBuilder private var assistantResponseControls: some View {
-        if let chat,
+    @ViewBuilder private func assistantResponseControls(for source: ChatMessage) -> some View {
+        if let chat, source.author == .user,
+           let group = chat.assistantResponseGroups.first(where: {
+               $0.binding.sourceUserID == source.id
+           }),
            let position = AssistantResponseAlternativesPolicy.responsePosition(
-               in: chat.assistantResponseAlternatives) {
+               groupID: group.id, in: chat.assistantResponseAlternatives) {
+            let selected = chat.assistantResponseAlternatives.selectedGroupID == group.id
             let previousDisabled = position.current <= 1
             let nextDisabled = position.current >= position.total
             HStack(spacing: 4) {
-                Button { chat.selectPreviousAssistantResponse() } label: {
+                Button {
+                    if selected {
+                        chat.selectPreviousAssistantResponse()
+                    } else {
+                        chat.selectAssistantResponseGroup(
+                            group.id, archivedIndex: group.alternatives.last.map { _ in
+                                group.alternatives.count - 1
+                            })
+                    }
+                } label: {
                     Image(systemName: "chevron.left")
                         .frame(minWidth: TranscriptFindPolicy.minimumInteractiveDimension,
                                minHeight: TranscriptFindPolicy.minimumInteractiveDimension)
@@ -996,7 +1009,13 @@ public struct ChatView: View {
                     .foregroundStyle(theme.sub)
                     .frame(maxWidth: .infinity)
                     .accessibilityLabel(Text("Response \(position.current) of \(position.total)"))
-                Button { chat.selectNextAssistantResponse() } label: {
+                Button {
+                    if selected {
+                        chat.selectNextAssistantResponse()
+                    } else {
+                        chat.selectAssistantResponseGroup(group.id, archivedIndex: nil)
+                    }
+                } label: {
                     Image(systemName: "chevron.right")
                         .frame(minWidth: TranscriptFindPolicy.minimumInteractiveDimension,
                                minHeight: TranscriptFindPolicy.minimumInteractiveDimension)
@@ -1008,11 +1027,11 @@ public struct ChatView: View {
             .foregroundStyle(theme.accent)
             .padding(.horizontal, 4)
             .frame(maxWidth: .infinity, minHeight: 44)
-            .opacity(chat.isShowingArchivedResponseAlternative ? 0.94 : 1)
+            .opacity(selected && chat.isShowingArchivedResponseAlternative ? 0.94 : 1)
             .animation(TalariaMotionTokens.opacityAnimation(.fast,
                                                               reducedMotion: reducedMotion),
-                       value: chat.isShowingArchivedResponseAlternative)
-            if chat.isShowingArchivedResponseAlternative {
+                       value: selected && chat.isShowingArchivedResponseAlternative)
+            if selected && chat.isShowingArchivedResponseAlternative {
                 Text("Local snapshot · current model context remains newest")
                     .font(theme.id == .control ? theme.mono(9) : theme.body(11))
                     .foregroundStyle(theme.faint)

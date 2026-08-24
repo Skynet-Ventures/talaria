@@ -4,6 +4,36 @@ import XCTest
 
 final class AssistantResponseAlternativesRuntimeTests: XCTestCase {
     @MainActor
+    private func stage(
+        botID: String, chat: ChatState,
+        operationID: UUID = UUID(), previousSourceUserID: UUID,
+        sourceUserID: UUID, previousAssistantRun: [ChatMessage],
+        invalidatedSourceUserIDs: Set<UUID> = []
+    ) -> TranscriptActionLease {
+        let route = try! XCTUnwrap(GatewayBotRoute(qualifiedID: botID))
+        let binding = AssistantResponseAlternativesBinding(
+            chatID: chat.chatIdentity, sourceUserID: sourceUserID,
+            storedSessionID: chat.storedSessionID ?? "stored",
+            runtimeSessionID: chat.sessionID ?? "runtime",
+            gatewayID: route.gatewayID, profile: route.profile)
+        ChatRuntime.shared.assistantResponseAlternativeStages[botID] =
+            AssistantResponseAlternativeStage(
+                operationID: operationID, botID: botID,
+                chatID: ObjectIdentifier(chat), binding: binding,
+                previousSourceUserID: previousSourceUserID,
+                invalidatedSourceUserIDs: invalidatedSourceUserIDs,
+                previousAssistantRun: previousAssistantRun)
+        return TranscriptActionLease(
+            id: operationID, botID: botID,
+            sessionID: chat.sessionID ?? "runtime",
+            storedID: chat.storedSessionID ?? "stored",
+            gatewayID: route.gatewayID, profile: route.profile,
+            generation: LiveRuntime.shared.generation,
+            chatID: ObjectIdentifier(chat), optimisticID: sourceUserID,
+            baseline: chat.messages)
+    }
+
+    @MainActor
     func testRegeneratePlanCapturesSourceAndCompleteOldAssistantRun() throws {
         let source = ChatMessage(author: .user, text: "prompt", rowID: 1)
         let first = ChatMessage(author: .bot, text: "first", reasoning: "thought", rowID: 2)
@@ -112,6 +142,8 @@ final class AssistantResponseAlternativesRuntimeTests: XCTestCase {
             AssistantResponseAlternativeStage(
                 operationID: operationID, botID: botID,
                 chatID: ObjectIdentifier(chat), binding: binding,
+                previousSourceUserID: source.id,
+                invalidatedSourceUserIDs: [],
                 previousAssistantRun: [ChatMessage(author: .bot, text: "old")])
         let lease = TranscriptActionLease(
             id: operationID, botID: botID, sessionID: "runtime", storedID: "stored",
@@ -130,5 +162,166 @@ final class AssistantResponseAlternativesRuntimeTests: XCTestCase {
                        "the same accepted/effect-proof lease cannot append twice")
         XCTAssertEqual(chat.assistantResponseAlternatives.groups.count, 1)
         XCTAssertEqual(chat.assistantResponseAlternatives.groups[0].alternatives.count, 1)
+    }
+
+    @MainActor
+    func testThreeSuccessiveRegeneratesMigrateOneGroupAndAppendAllRuns() throws {
+        let model = AppModel()
+        let botID = "gateway::alternatives-three-\(UUID().uuidString)"
+        let chat = model.chat(for: botID)
+        chat.sessionID = "runtime"
+        chat.storedSessionID = "stored"
+        var source = ChatMessage(author: .user, text: "prompt 0")
+        var current = ChatMessage(author: .bot, text: "answer 0")
+        chat.messages = [source, current]
+        var groupID: UUID?
+
+        for index in 1...3 {
+            let replacement = ChatMessage(author: .user, text: "prompt \(index)")
+            let next = ChatMessage(author: .bot, text: "answer \(index)")
+            chat.messages = [replacement, next]
+            let lease = stage(
+                botID: botID, chat: chat,
+                previousSourceUserID: source.id, sourceUserID: replacement.id,
+                previousAssistantRun: [current])
+            XCTAssertTrue(model.commitAssistantResponseAlternativeIfProven(lease))
+            groupID = groupID ?? chat.assistantResponseAlternatives.groups.first?.id
+            source = replacement
+            current = next
+        }
+        defer {
+            ChatRuntime.shared.assistantResponseAlternativeStages[botID] = nil
+            model.chats.removeValue(forKey: botID)
+        }
+
+        let group = try XCTUnwrap(chat.assistantResponseAlternatives.groups.first)
+        XCTAssertEqual(chat.assistantResponseAlternatives.groups.count, 1)
+        XCTAssertEqual(group.id, groupID)
+        XCTAssertEqual(group.alternatives.count, 3)
+        XCTAssertEqual(group.alternatives.map { $0.messages[0].text },
+                       ["answer 0", "answer 1", "answer 2"])
+        XCTAssertNil(chat.assistantResponseAlternatives.selectedAlternativeIndex)
+        XCTAssertEqual(
+            AssistantResponseAlternativesPolicy.responsePosition(groupID: group.id,
+                                                                  in: chat.assistantResponseAlternatives)?.total,
+            4)
+    }
+
+    @MainActor
+    func testDefiniteRefusalDropsOnlyUncommittedStage() throws {
+        let model = AppModel()
+        let botID = "gateway::alternatives-refusal-\(UUID().uuidString)"
+        let chat = model.chat(for: botID)
+        chat.sessionID = "runtime"
+        chat.storedSessionID = "stored"
+        let firstSource = ChatMessage(author: .user, text: "prompt 0")
+        let firstReplacement = ChatMessage(author: .user, text: "prompt 1")
+        let firstRun = ChatMessage(author: .bot, text: "answer 0")
+        chat.messages = [firstReplacement, ChatMessage(author: .bot, text: "answer 1")]
+        let firstLease = stage(
+            botID: botID, chat: chat,
+            previousSourceUserID: firstSource.id, sourceUserID: firstReplacement.id,
+            previousAssistantRun: [firstRun])
+        XCTAssertTrue(model.commitAssistantResponseAlternativeIfProven(firstLease))
+        let committed = try XCTUnwrap(chat.assistantResponseAlternatives.groups.first)
+
+        let secondSource = firstReplacement
+        let secondReplacement = ChatMessage(author: .user, text: "prompt 2")
+        chat.messages = [secondReplacement, ChatMessage(author: .bot, text: "answer 2")]
+        let refusalLease = stage(
+            botID: botID, chat: chat,
+            previousSourceUserID: secondSource.id, sourceUserID: secondReplacement.id,
+            previousAssistantRun: [ChatMessage(author: .bot, text: "answer 1")])
+        model.clearAssistantResponseAlternativeIfOwned(refusalLease)
+        defer {
+            ChatRuntime.shared.assistantResponseAlternativeStages[botID] = nil
+            model.chats.removeValue(forKey: botID)
+        }
+
+        XCTAssertEqual(chat.assistantResponseAlternatives.groups.count, 1)
+        XCTAssertEqual(chat.assistantResponseAlternatives.groups[0], committed)
+    }
+
+    @MainActor
+    func testRegeneratePrunesOnlyGroupsFromDestructivelyTruncatedLaterTurns() throws {
+        let model = AppModel()
+        let botID = "gateway::alternatives-prune-\(UUID().uuidString)"
+        let chat = model.chat(for: botID)
+        chat.sessionID = "runtime"
+        chat.storedSessionID = "stored"
+        let older = ChatMessage(author: .user, text: "older")
+        let later = ChatMessage(author: .user, text: "later")
+        let replacement = ChatMessage(author: .user, text: "older replacement")
+        chat.messages = [replacement, ChatMessage(author: .bot, text: "current")]
+        let route = try XCTUnwrap(GatewayBotRoute(qualifiedID: botID))
+        let olderBinding = AssistantResponseAlternativesBinding(
+            chatID: chat.chatIdentity, sourceUserID: older.id,
+            storedSessionID: "stored", runtimeSessionID: "runtime",
+            gatewayID: route.gatewayID, profile: route.profile)
+        let laterBinding = AssistantResponseAlternativesBinding(
+            chatID: chat.chatIdentity, sourceUserID: later.id,
+            storedSessionID: "stored", runtimeSessionID: "runtime",
+            gatewayID: route.gatewayID, profile: route.profile)
+        var shelf = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "older answer")], binding: olderBinding)
+        shelf = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "later answer")], binding: laterBinding,
+            state: shelf)
+        chat.assistantResponseAlternatives = shelf
+        chat.assistantResponseBinding = laterBinding
+
+        let lease = stage(
+            botID: botID, chat: chat,
+            previousSourceUserID: older.id, sourceUserID: replacement.id,
+            previousAssistantRun: [ChatMessage(author: .bot, text: "current")],
+            invalidatedSourceUserIDs: [later.id])
+        XCTAssertTrue(model.commitAssistantResponseAlternativeIfProven(lease))
+        defer {
+            ChatRuntime.shared.assistantResponseAlternativeStages[botID] = nil
+            model.chats.removeValue(forKey: botID)
+        }
+
+        XCTAssertEqual(chat.assistantResponseAlternatives.groups.count, 1)
+        XCTAssertEqual(chat.assistantResponseAlternatives.groups[0].binding.sourceUserID,
+                       replacement.id)
+        XCTAssertEqual(chat.assistantResponseAlternatives.groups[0].alternatives.count, 2)
+        XCTAssertFalse(chat.assistantResponseAlternatives.groups.contains {
+            $0.binding.sourceUserID == later.id
+        })
+    }
+
+    @MainActor
+    func testSelectionCanAddressEveryGroupWithOneArchivedProjection() throws {
+        let chat = ChatState()
+        let source1 = ChatMessage(author: .user, text: "one")
+        let source2 = ChatMessage(author: .user, text: "two")
+        let current1 = ChatMessage(author: .bot, text: "current one")
+        let current2 = ChatMessage(author: .bot, text: "current two")
+        chat.messages = [source1, current1, source2, current2]
+        let key1 = AssistantResponseAlternativesBinding(
+            chatID: chat.chatIdentity, sourceUserID: source1.id,
+            storedSessionID: "stored", runtimeSessionID: "runtime",
+            gatewayID: "gateway", profile: "worker")
+        let key2 = AssistantResponseAlternativesBinding(
+            chatID: chat.chatIdentity, sourceUserID: source2.id,
+            storedSessionID: "stored", runtimeSessionID: "runtime",
+            gatewayID: "gateway", profile: "worker")
+        var state = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "old one")], binding: key1)
+        state = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "old two")], binding: key2, state: state)
+        chat.assistantResponseAlternatives = state
+        chat.assistantResponseBinding = key2
+
+        XCTAssertTrue(chat.selectAssistantResponseGroup(
+            try XCTUnwrap(state.groups.first?.id), archivedIndex: 0))
+        XCTAssertEqual(chat.displayedMessages().map(\.text),
+                       ["one", "old one", "two", "current two"])
+        XCTAssertTrue(chat.selectAssistantResponseGroup(
+            try XCTUnwrap(state.groups.last?.id), archivedIndex: 0))
+        XCTAssertEqual(chat.displayedMessages().map(\.text),
+                       ["one", "current one", "two", "old two"])
+        XCTAssertEqual(chat.assistantResponseAlternatives.selectedGroupID,
+                       state.groups.last?.id)
     }
 }

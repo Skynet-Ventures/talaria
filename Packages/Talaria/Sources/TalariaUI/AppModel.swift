@@ -72,15 +72,35 @@ public final class ChatState {
         assistantResponseAlternatives.isShowingArchived
     }
 
+    public var assistantResponseGroups: [AssistantResponseAlternativeGroup] {
+        assistantResponseAlternatives.groups
+    }
+
     public func displayedMessages() -> [ChatMessage] {
         AssistantResponseAlternativesPolicy.displayedMessages(
             current: messages, state: assistantResponseAlternatives,
-            binding: assistantResponseBinding)
+            // `assistantResponseBinding` is the latest live source used for
+            // lifecycle/hydration fencing.  Display selection is instead
+            // group-addressable: an older surviving source turn may be
+            // selected while a newer group remains in the same shelf.
+            binding: assistantResponseAlternatives.selectedGroup?.binding)
     }
 
     public func selectPreviousAssistantResponse() {
         assistantResponseAlternatives = AssistantResponseAlternativesPolicy.previous(
             in: assistantResponseAlternatives)
+    }
+
+    @discardableResult
+    public func selectAssistantResponseGroup(
+        _ groupID: UUID, archivedIndex: Int? = nil
+    ) -> Bool {
+        let next = AssistantResponseAlternativesPolicy.select(
+            groupID: groupID, archivedIndex: archivedIndex,
+            in: assistantResponseAlternatives)
+        guard next != assistantResponseAlternatives else { return false }
+        assistantResponseAlternatives = next
+        return true
     }
 
     public func selectNextAssistantResponse() {

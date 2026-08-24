@@ -114,4 +114,68 @@ final class AssistantResponseAlternativesTests: XCTestCase {
             AssistantResponseAlternativesPolicy.maximumVisibleScalarsPerRun)
         XCTAssertGreaterThan(run.clippedVisibleScalars, 0)
     }
+
+    func testRebindPreservesGroupIdentityAndPruningKeepsEarlierTurns() throws {
+        let firstSource = UUID()
+        let laterSource = UUID()
+        let replacementSource = UUID()
+        let firstBinding = binding(source: firstSource)
+        let laterBinding = binding(source: laterSource, chat: firstBinding.chatID,
+                                   stored: firstBinding.storedSessionID,
+                                   runtime: firstBinding.runtimeSessionID)
+        let first = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "first")], binding: firstBinding)
+        var state = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "later")], binding: laterBinding,
+            state: first)
+        let firstGroupID = try XCTUnwrap(state.groups.first?.id)
+        let firstRunID = try XCTUnwrap(state.groups.first?.alternatives.first?.id)
+
+        state = AssistantResponseAlternativesPolicy.pruning(
+            sourceUserIDs: [laterSource], in: state)
+        let replacementBinding = binding(source: replacementSource,
+                                         chat: firstBinding.chatID,
+                                         stored: firstBinding.storedSessionID,
+                                         runtime: firstBinding.runtimeSessionID)
+        state = AssistantResponseAlternativesPolicy.rebindSourceUserID(
+            from: firstSource, to: replacementSource,
+            matching: replacementBinding, in: state)
+
+        XCTAssertEqual(state.groups.count, 1)
+        XCTAssertEqual(state.groups[0].id, firstGroupID)
+        XCTAssertEqual(state.groups[0].alternatives[0].id, firstRunID)
+        XCTAssertEqual(state.groups[0].binding.sourceUserID, replacementSource)
+    }
+
+    func testBoundedRunCapsPayloadTextMultiByteAndWork() throws {
+        let hostile = String(repeating: "🧑🏽‍💻", count: 50_000)
+        let payload = ToolPayload(kind: .text, text: hostile)
+        let calls = (0..<20_000).map { index in
+            ToolCall(id: "tool-(index)", name: "terminal",
+                     context: hostile, arguments: payload, result: payload)
+        }
+        let run = AssistantResponseAlternativesPolicy.boundedRun([
+            ChatMessage(author: .bot, text: hostile, toolCalls: calls),
+            ChatMessage(author: .bot, text: hostile),
+        ])
+
+        XCTAssertLessThanOrEqual(run.messages.count,
+                                 AssistantResponseAlternativesPolicy.maximumMessagesPerRun)
+        XCTAssertLessThanOrEqual(run.workItems,
+                                 AssistantResponseAlternativesPolicy.maximumWorkItemsPerRun)
+        XCTAssertLessThanOrEqual(run.visibleScalars,
+                                 AssistantResponseAlternativesPolicy.maximumVisibleScalarsPerRun)
+        XCTAssertLessThanOrEqual(run.bytes,
+                                 AssistantResponseAlternativesPolicy.maximumBytesPerRun)
+        let retainedPayloadText = run.messages.flatMap(\.toolCalls).flatMap {
+            [$0.arguments?.text, $0.result?.text].compactMap { $0 }
+        }.joined()
+        XCTAssertLessThanOrEqual(
+            retainedPayloadText.unicodeScalars.count,
+            AssistantResponseAlternativesPolicy.maximumVisibleScalarsPerRun)
+        XCTAssertLessThanOrEqual(
+            retainedPayloadText.utf8.count,
+            AssistantResponseAlternativesPolicy.maximumBytesPerRun)
+        XCTAssertTrue(run.isClipped)
+    }
 }
