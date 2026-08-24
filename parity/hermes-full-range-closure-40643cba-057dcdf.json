@@ -24,7 +24,7 @@
       "checkerFile": "scripts/check_hermes_client_wire_delta.py",
       "documentationFile": "docs/HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md",
       "metadataSha256": "4eb018f0662d6cf9ff5d050c8feced0cb78de8d2f39095d0ef791c399be11d8a",
-      "entriesSha256": "8e3827138bdf6898f04d9fb232d19af05416767990443a80d040ac30862a9510",
+      "entriesSha256": "3bf3a78488d3760d04e7028c561ae22ccc1a59a60a8b442ed908146836d1be5d",
       "scopedCommitCount": 71
     },
     {
@@ -73,7 +73,7 @@
       "entriesFile": "parity/hermes-residual-runtime-delta-40643cba-057dcdf.tsv",
       "checkerFile": "scripts/check_hermes_residual_runtime_delta.py",
       "documentationFile": "docs/HERMES-RESIDUAL-RUNTIME-DELTA-40643CBA-057DCDF.md",
-      "metadataSha256": "d9a38736dcf6d3b56ae2095f573926e576a51a6882728472d522cf24415ba497",
+      "metadataSha256": "44e531de0fe17486cf8ba58929b24f70714dab9665a572d6275b2b356a8fe68f",
       "entriesSha256": "5338d9646b1e518b1badafc0b300e25800e9e16372b922e6fff6662583479b46",
       "scopedCommitCount": 201
     }
@@ -84,7 +84,7 @@
       {
         "pullRequest": 73,
         "branch": "codex/gateway-heartbeat",
-        "head": "64c595025202bfc5be028c23c95030c07298deb9",
+        "head": "5658b57c21c45a5b9c6108c7de55439984e0a40f",
         "status": "implemented-unmerged-device-proof-pending"
       },
       {

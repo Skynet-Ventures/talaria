@@ -172,7 +172,7 @@ CLUSTER_DEFINITIONS: dict[str, dict[str, str]] = {
         "disposition": "covered-by-open-talaria-slice",
         "talariaStatus": "gateway-heartbeat-current",
         "contract": "Silent socket failure is detected with a bounded gateway.ping heartbeat and socket-generation invalidation; reconnect ownership stays with the client transport.",
-        "evidence": "Talaria codex/gateway-heartbeat@64c595025202bfc5be028c23c95030c07298deb9 adds bounded silent-socket detection, immediate foreground validation, superseded-transport retirement, and exact active-transport-epoch inbound recovery.",
+        "evidence": "Talaria codex/gateway-heartbeat@5658b57c21c45a5b9c6108c7de55439984e0a40f adds bounded silent-socket detection, immediate foreground validation, superseded-transport retirement, adopted event-authority fencing, bounded OAuth preflight, and fail-closed credential rotation.",
         "required": "Run transport heartbeat tests plus an authenticated sleep/proxy-idle reconnect proof before certification.",
     },
     "R03-model-presentation-pr94": {
@@ -558,7 +558,7 @@ def _validate_talaria_references(metadata: dict[str, Any]) -> None:
     expected = {
         "rich-transcript-hydration": ("codex/rich-transcript-hydration", "d5bad705f1c19d716eea4abb8de1ba4206659dde", "99c203cd516491d94d255b46943315a5169f39a1"),
         "rich-transcript-structured-output": ("codex/rich-transcript-structured-output", "fdee839fdc1fda8a4a8233ff5e459795d09752b0", "79ccf0f5aaaaa8fac2efd742aba1a4a7a720c649"),
-        "gateway-heartbeat": ("codex/gateway-heartbeat", "64c595025202bfc5be028c23c95030c07298deb9", "73ab2bc9884f7223964d43c7db68d1260f7356fa"),
+        "gateway-heartbeat": ("codex/gateway-heartbeat", "5658b57c21c45a5b9c6108c7de55439984e0a40f", "64c595025202bfc5be028c23c95030c07298deb9"),
         "model-contract-copy": ("codex/model-contract-copy", "27a12f11c3825cc8ada4860b60e298acdcc4fa37", "ccb945a03bc1f9dda9a50b151becef8636fa88f4"),
         "message-agent-projection-v2": ("codex/current-hermes-message-agent-projection-v2", "d6024e26a805c35f9cba91c0c6b1c9e9813f13b4", "f332d263d9bb2d5a53feed3727a52a5e2dd89c88"),
         "mcp-live-reload": ("codex/mcp-live-reload", "9851fca979f40b08df283855de290de4e3f04568", "ccb945a03bc1f9dda9a50b151becef8636fa88f4"),

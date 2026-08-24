@@ -617,7 +617,7 @@
       "disposition": "covered-by-open-talaria-slice",
       "talariaStatus": "gateway-heartbeat-current",
       "contract": "Silent socket failure is detected with a bounded gateway.ping heartbeat and socket-generation invalidation; reconnect ownership stays with the client transport.",
-      "evidence": "Talaria codex/gateway-heartbeat@64c595025202bfc5be028c23c95030c07298deb9 adds bounded silent-socket detection, immediate foreground validation, superseded-transport retirement, and exact active-transport-epoch inbound recovery.",
+      "evidence": "Talaria codex/gateway-heartbeat@5658b57c21c45a5b9c6108c7de55439984e0a40f adds bounded silent-socket detection, immediate foreground validation, superseded-transport retirement, adopted event-authority fencing, bounded OAuth preflight, and fail-closed credential rotation.",
       "required": "Run transport heartbeat tests plus an authenticated sleep/proxy-idle reconnect proof before certification."
     },
     "R03-model-presentation-pr94": {
@@ -806,8 +806,8 @@
     {
       "id": "gateway-heartbeat",
       "branch": "codex/gateway-heartbeat",
-      "commit": "64c595025202bfc5be028c23c95030c07298deb9",
-      "parent": "73ab2bc9884f7223964d43c7db68d1260f7356fa",
+      "commit": "5658b57c21c45a5b9c6108c7de55439984e0a40f",
+      "parent": "64c595025202bfc5be028c23c95030c07298deb9",
       "state": "open-unmerged",
       "upstreamCommits": [
         "9153be2a5126f8280839a58d143ddcf80afc6d12",

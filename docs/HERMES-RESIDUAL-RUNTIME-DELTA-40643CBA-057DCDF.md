@@ -64,7 +64,7 @@ row 390, not a newly introduced `057dcdf` wire contract.
 `9153be2a5126f8280839a58d143ddcf80afc6d12` and
 `e3f695e5e00ef8718d8829fbe44fd3d2e36ed236` add shared/TUI heartbeat and
 reconnect behavior. The narrow existing Talaria basis is
-`codex/gateway-heartbeat@64c595025202bfc5be028c23c95030c07298deb9`; it adds
+`codex/gateway-heartbeat@5658b57c21c45a5b9c6108c7de55439984e0a40f`; it adds
 bounded heartbeat/foreground validation, retires superseded transports, and
 lets exact-current authenticated inbound traffic reconcile a stale offline
 publication. It remains a transport slice, not a mutation authority.
