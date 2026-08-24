@@ -665,6 +665,86 @@ final class MessageBranchingFlowTests: XCTestCase {
         }
     }
 
+    func testWholeSessionBranchPublishesLineageOnlyFromAuthoritativeRefresh() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, sessionID in
+                XCTAssertEqual(sessionID, "parent-runtime")
+                // The acknowledgement deliberately carries no lineage fields.
+                return self.branch(count: 2)
+            }
+            SessionsRuntime.shared.listSessionsForTesting = { client, profile in
+                XCTAssertTrue(client === fixture.client)
+                XCTAssertEqual(profile, fixture.profile)
+                listCalls += 1
+                return [
+                    StoredSession(.object([
+                        "id": .string("parent-stored"),
+                        "title": .string("Parent"),
+                        "message_count": .number(4),
+                    ])),
+                    StoredSession(.object([
+                        "id": .string("child-stored"),
+                        "title": .string("Authoritative child"),
+                        "message_count": .number(2),
+                        "parent_session_id": .string("parent-stored"),
+                        "branch_parent_root_id": .string("parent-stored"),
+                    ])),
+                ]
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertTrue(outcome.ok)
+            XCTAssertEqual(listCalls, 1)
+            let child = try XCTUnwrap(fixture.chat.storedSessions.first(where: {
+                $0.id == "child-stored"
+            }))
+            XCTAssertEqual(child.title, "Authoritative child")
+            XCTAssertEqual(child.parentSessionID, "parent-stored")
+            XCTAssertEqual(child.branchParentRootID, "parent-stored")
+        }
+    }
+
+    func testWholeSessionBranchRejectsMismatchedAckBeforeListRefresh() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, _ in
+                self.branch(parent: "wrong-parent", count: 2)
+            }
+            SessionsRuntime.shared.listSessionsForTesting = { _, _ in
+                listCalls += 1
+                return self.listedSessions
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertFalse(outcome.ok)
+            XCTAssertEqual(listCalls, 0)
+            XCTAssertTrue(fixture.chat.storedSessions.isEmpty)
+        }
+    }
+
+    func testWholeSessionBranchProfileSupersessionCannotPublishRefresh() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, _ in
+                fixture.model.invalidateProfileLifecycleRouteForTesting(fixture.route)
+                return self.branch(count: 2)
+            }
+            SessionsRuntime.shared.listSessionsForTesting = { _, _ in
+                listCalls += 1
+                return self.listedSessions
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertFalse(outcome.ok)
+            XCTAssertEqual(listCalls, 0)
+            XCTAssertTrue(fixture.chat.storedSessions.isEmpty)
+        }
+    }
+
     func testCompressionFailureReleasesClaimAndRestoresMessageBranchAdmission() async throws {
         try await withPrimaryFixture { fixture in
             var compressions = 0

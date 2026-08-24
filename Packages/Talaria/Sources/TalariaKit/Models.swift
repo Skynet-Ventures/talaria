@@ -864,9 +864,28 @@ public struct SessionSummary: Identifiable, Codable, Sendable, Equatable {
     public var title: String
     public var when: String
     public var messageCount: Int
+    /// Optional first-line preview. Existing UI keeps previews in its session
+    /// runtime cache; carrying it here lets pure search policy work without
+    /// reaching into that cache when a caller has the value.
+    public var preview: String?
+    /// Optional stamps used by deterministic sibling ordering. They remain
+    /// optional for demo and legacy rows.
+    public var startedAt: Double?
+    public var lastActive: Double?
+    /// The durable compression root and branch-parent evidence carried by the
+    /// gateway. These are Swift projections of the wire keys.
+    public var lineageRootID: String?
+    public var parentSessionID: String?
+    public var branchParentRootID: String?
 
-    public init(id: String, title: String, when: String, messageCount: Int) {
+    public init(id: String, title: String, when: String, messageCount: Int,
+                preview: String? = nil, startedAt: Double? = nil,
+                lastActive: Double? = nil, lineageRootID: String? = nil,
+                parentSessionID: String? = nil, branchParentRootID: String? = nil) {
         self.id = id; self.title = title; self.when = when; self.messageCount = messageCount
+        self.preview = preview; self.startedAt = startedAt; self.lastActive = lastActive
+        self.lineageRootID = lineageRootID; self.parentSessionID = parentSessionID
+        self.branchParentRootID = branchParentRootID
     }
 }
 

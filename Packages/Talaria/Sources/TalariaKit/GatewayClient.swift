@@ -286,7 +286,7 @@ public struct HermesProfile: Sendable, Identifiable {
     }
 }
 
-public struct StoredSession: Sendable, Identifiable {
+public struct StoredSession: Sendable, Identifiable, Equatable {
     public var id: String
     /// Live compression tip returned by exact-title lookup. The durable `id`
     /// remains the root registry row used for future title lookups.
@@ -298,6 +298,17 @@ public struct StoredSession: Sendable, Identifiable {
     public var lastActive: Double?
     public var messageCount: Int
     public var source: String?
+    /// Stable id of the original row at the head of a compression lineage.
+    /// When absent, `id` is itself the lineage root. The field is optional
+    /// because older gateways projected compression tips without exposing it.
+    public var lineageRootID: String?
+    /// Durable id of the conversation this row was branched from. This is
+    /// separate from `lineageRootID`: a branch can itself be a compressed tip.
+    public var parentSessionID: String?
+    /// Server-normalized root id for the branch parent. New gateways include
+    /// this so a child stays attached after its parent compresses again;
+    /// absent or malformed values are treated as no extra evidence.
+    public var branchParentRootID: String?
 
     init(_ v: JSONValue) {
         id = v["id"]?.stringValue ?? ""
@@ -310,6 +321,18 @@ public struct StoredSession: Sendable, Identifiable {
         lastActive = v["last_active"]?.doubleValue
         messageCount = v["message_count"]?.intValue ?? 0
         source = v["source"]?.stringValue
+        lineageRootID = Self.optionalIdentifier(v["_lineage_root_id"])
+        parentSessionID = Self.optionalIdentifier(v["parent_session_id"])
+        branchParentRootID = Self.optionalIdentifier(v["branch_parent_root_id"])
+    }
+
+    /// Optional wire fields are advisory. A bad value must not quarantine a
+    /// whole otherwise-valid row: callers simply lose that piece of lineage
+    /// evidence and the pure projection fails closed at the top level.
+    private static func optionalIdentifier(_ value: JSONValue?) -> String? {
+        guard let raw = value?.stringValue else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     public var resumeID: String { resolvedID ?? id }
@@ -319,6 +342,34 @@ public struct StoredSession: Sendable, Identifiable {
         return title == expected
     }
 }
+
+/// A bounded `session.list` page. Older Hermes gateways return only a
+/// `sessions` array; in that case `total` is nil and `hasMore` is false. The
+/// optional total preserves the distinction between a server-provided count
+/// and a compatibility projection inferred by the client.
+public struct SessionListPage: Sendable, Equatable {
+    public static let maximumRows = 200
+
+    public var sessions: [StoredSession]
+    public var total: Int?
+    public var hasMore: Bool
+
+    public init(sessions: [StoredSession], total: Int? = nil, hasMore: Bool = false) {
+        self.sessions = Array(sessions.prefix(Self.maximumRows))
+        self.total = total.map { max(0, $0) }
+        self.hasMore = hasMore
+    }
+
+    /// Source-compatible spelling for callers that call the rows `rows`.
+    public var rows: [StoredSession] { sessions }
+    /// Whether the gateway supplied explicit paging controls. A legacy page
+    /// has no count or continuation signal and therefore fails closed.
+    public var hasPagingMetadata: Bool { total != nil || hasMore }
+}
+
+/// Alternate names used by callers during the session-list migration.
+public typealias StoredSessionPage = SessionListPage
+public typealias SessionListResponse = SessionListPage
 
 public struct SessionTitleReceipt: Sendable, Equatable {
     public var title: String
@@ -903,14 +954,63 @@ public actor GatewayClient {
     public func listSessions(limit: Int = 200, profile: String? = nil,
                              title: String? = nil,
                              includeHidden: Bool = false) async throws -> [StoredSession] {
+        try await listSessionPage(limit: limit, profile: profile, title: title,
+                                  includeHidden: includeHidden).sessions
+    }
+
+    /// Fetch the bounded page and retain the optional response controls newer
+    /// gateways expose. `listSessions` above remains the source-compatible
+    /// rows-only facade used by older UI callers.
+    public func listSessionPage(limit: Int = 200, profile: String? = nil,
+                                title: String? = nil,
+                                includeHidden: Bool = false) async throws -> SessionListPage {
         let admittedLimit = min(max(limit, 1), 200)
         let params = Self.sessionListParams(
             limit: admittedLimit, profile: profile, title: title, includeHidden: includeHidden)
         let result = try await rpc("session.list", params)
+        return try Self.decodeStoredSessionPage(result, limit: admittedLimit, title: title)
+    }
+
+    /// Plural compatibility spelling matching `listSessions`.
+    public func listSessionsPage(limit: Int = 200, profile: String? = nil,
+                                 title: String? = nil,
+                                 includeHidden: Bool = false) async throws -> SessionListPage {
+        try await listSessionPage(limit: limit, profile: profile, title: title,
+                                  includeHidden: includeHidden)
+    }
+
+    /// Decode a complete `session.list` response. Response controls are
+    /// optional for compatibility; malformed controls are discarded while
+    /// valid rows continue through the same bounded decoder.
+    static func decodeStoredSessionPage(_ result: JSONValue, limit: Int,
+                                         title: String?) throws -> SessionListPage {
         guard let rawRows = result["sessions"]?.arrayValue else {
             throw GatewayError(code: -8, message: "session.list malformed response")
         }
-        return try Self.decodeStoredSessionRows(rawRows, limit: admittedLimit, title: title)
+
+        let rows = try decodeStoredSessionRows(rawRows, limit: limit, title: title)
+        let total = decodeOptionalNonnegativeInt(result["total"])
+        // An old gateway omits both fields. In particular, do not infer a
+        // continuation from a full page: doing so can make an old peer drive
+        // an unbounded fetch loop.
+        let hasMore = result["has_more"]?.boolValue ?? false
+        return SessionListPage(sessions: rows, total: total, hasMore: hasMore)
+    }
+
+    /// Compatibility spelling for tests and callers that use the response's
+    /// protocol name rather than its concrete model name.
+    static func decodeSessionListResponse(_ result: JSONValue, limit: Int = 200,
+                                          title: String? = nil) throws -> SessionListPage {
+        try decodeStoredSessionPage(result, limit: limit, title: title)
+    }
+
+    private static func decodeOptionalNonnegativeInt(_ value: JSONValue?) -> Int? {
+        guard let value,
+              let number = value.doubleValue,
+              number.isFinite,
+              let integer = Int(exactly: number),
+              integer >= 0 else { return nil }
+        return integer
     }
 
     static func decodeStoredSessionRows(_ rawRows: [JSONValue], limit: Int,
