@@ -110,6 +110,7 @@ public struct ChatView: View {
     @State private var transcriptFindResultSource = TranscriptFindSourceIdentity(
         botID: "", storedSessionID: "", liveSessionID: "")
     @State private var transcriptFindOrdinal = 0
+    @State private var transcriptFindSelectionScrollRevision: UInt64 = 0
     @FocusState private var composerFocused: Bool
     @FocusState private var transcriptFindFocused: Bool
 
@@ -661,7 +662,7 @@ public struct ChatView: View {
     }
 
     private var activeTranscriptFindKey: String {
-        "\(activeTranscriptFindMessageID?.uuidString ?? "")|\(transcriptFindOrdinal)"
+        "\(activeTranscriptFindMessageID?.uuidString ?? "")|\(transcriptFindOrdinal)|\(transcriptFindSelectionScrollRevision)"
     }
 
     private func openTranscriptFind() {
@@ -688,6 +689,7 @@ public struct ChatView: View {
         transcriptFindResultIndexRevision = -1
         transcriptFindResultMessageGeneration = -1
         transcriptFindOrdinal = 0
+        transcriptFindSelectionScrollRevision = 0
     }
 
     private func clearTranscriptFind() {
@@ -696,6 +698,7 @@ public struct ChatView: View {
         transcriptFindResultIndexRevision = -1
         transcriptFindResultMessageGeneration = -1
         transcriptFindOrdinal = 0
+        transcriptFindSelectionScrollRevision = 0
         transcriptFindFocused = true
     }
 
@@ -704,6 +707,8 @@ public struct ChatView: View {
         guard count > 0 else { return }
         transcriptFindOrdinal = TranscriptFindPolicy.movedOrdinal(
             current: transcriptFindOrdinal, delta: delta, total: count)
+        transcriptFindSelectionScrollRevision = TranscriptFindPolicy.nextSelectionScrollRevision(
+            transcriptFindSelectionScrollRevision)
         _ = initialTranscriptAnchor.userDeparted(botID: botID,
                                                  messageCount: messages.count)
         followingLatest = false
@@ -835,8 +840,10 @@ public struct ChatView: View {
     }
 
     private var showsJumpToLatest: Bool {
-        ChatTranscriptLayoutPolicy.showsJumpControl(
-            isFollowingLatest: followingLatest, messageCount: messages.count)
+        TranscriptFindPolicy.allowsJumpToLatest(
+            isFindOwningScroll: transcriptFindOwnsScroll)
+            && ChatTranscriptLayoutPolicy.showsJumpControl(
+                isFollowingLatest: followingLatest, messageCount: messages.count)
     }
 
     private var jumpToLatestButton: some View {

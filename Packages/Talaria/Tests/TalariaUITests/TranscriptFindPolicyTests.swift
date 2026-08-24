@@ -125,8 +125,50 @@ final class TranscriptFindPolicyTests: XCTestCase {
         XCTAssertLessThanOrEqual(TranscriptFindPolicy.maximumSegmentsPerMessage, 512)
         XCTAssertLessThanOrEqual(TranscriptFindPolicy.maximumIndexedSegments, 4_096)
         XCTAssertLessThanOrEqual(TranscriptFindPolicy.maximumIndexedMessages, 1_000)
+        XCTAssertLessThanOrEqual(TranscriptFindPolicy.maximumTraversedMessages, 1_000)
+        XCTAssertLessThanOrEqual(TranscriptFindPolicy.maximumSearchedEntries, 1_000)
         XCTAssertLessThanOrEqual(TranscriptFindPolicy.maximumMatchGroups, 2_048)
         XCTAssertLessThanOrEqual(TranscriptFindPolicy.maximumMatches, 10_000)
+    }
+
+    func testRawTraversalBudgetCountsExcludedAndEmptyRowsBeforeFiltering() throws {
+        let excluded = (0..<TranscriptFindPolicy.maximumIndexedMessages).map { offset in
+            offset.isMultiple(of: 2)
+                ? ChatMessage(author: .system, text: "system-\(offset)", rowID: offset)
+                : ChatMessage(author: .user, text: "", rowID: offset)
+        }
+        let index = try TranscriptFindPolicy.makeIndex(messages: [
+            ChatMessage(author: .user, text: "before-newest-window", rowID: 99_999)
+        ] + excluded)
+        XCTAssertTrue(index.isTruncated)
+        XCTAssertEqual(try TranscriptFindPolicy.search("before-newest-window", in: index).total, 0)
+
+        let latest = try TranscriptFindPolicy.makeIndex(messages: excluded + [
+            ChatMessage(author: .user, text: "inside-newest-window", rowID: 100_000)
+        ])
+        XCTAssertTrue(latest.isTruncated)
+        XCTAssertEqual(try TranscriptFindPolicy.search("inside-newest-window", in: latest).total, 1)
+
+        let ordered = try TranscriptFindPolicy.makeIndex(messages: [
+            ChatMessage(author: .user, text: "first", rowID: 1),
+            ChatMessage(author: .system, text: "ignored", rowID: 2),
+            ChatMessage(author: .bot, text: "last", rowID: 3)
+        ])
+        XCTAssertEqual(ordered.entries.map(\.address.rowID), [1, 3])
+    }
+
+    func testSearchBoundsOuterEntriesEvenWhenSegmentsHaveNoSearchableText() throws {
+        let emptyEntries = (0..<TranscriptFindPolicy.maximumIndexedSegments).map { offset in
+            TranscriptFindIndex.Entry(rowID: offset, author: .user,
+                                      revisionID: UUID(), segments: [""])
+        }
+        let index = TranscriptFindIndex(entries: emptyEntries + [
+            .init(rowID: 99_999, author: .user, revisionID: UUID(),
+                  segments: ["after-entry-bound"])
+        ])
+        let result = try TranscriptFindPolicy.search("after-entry-bound", in: index)
+        XCTAssertTrue(result.isTruncated)
+        XCTAssertEqual(result.total, 0)
     }
 
     func testResultOccurrencesAndGroupsStopAtIndependentHardCaps() throws {
@@ -279,6 +321,21 @@ final class TranscriptFindPolicyTests: XCTestCase {
         XCTAssertFalse(TranscriptFindPolicy.allowsInitialAnchor(isFindOwningScroll: true))
         XCTAssertTrue(TranscriptFindPolicy.allowsInitialAnchor(isFindOwningScroll: false))
         XCTAssertTrue((150...200).contains(Int(TranscriptFindPolicy.debounceMilliseconds)))
+    }
+
+    func testSingleMatchSelectionZeroRemainsAnActiveScrollTarget() throws {
+        let result = try TranscriptFindPolicy.search("only", in: TranscriptFindIndex(entries: [
+            .init(rowID: 1, author: .bot, revisionID: UUID(), segments: ["only"])
+        ]))
+        XCTAssertEqual(result.total, 1)
+        XCTAssertNotNil(TranscriptFindPolicy.selection(in: result, ordinal: 0))
+        XCTAssertEqual(TranscriptFindPolicy.movedOrdinal(current: 0, delta: 1, total: 1), 0)
+        let revision: UInt64 = 41
+        XCTAssertEqual(TranscriptFindPolicy.nextSelectionScrollRevision(revision), 42)
+        XCTAssertFalse(TranscriptFindPolicy.allowsAutomaticFollow(hasSelection: true))
+        XCTAssertFalse(TranscriptFindPolicy.allowsInitialAnchor(isFindOwningScroll: true))
+        XCTAssertFalse(TranscriptFindPolicy.allowsJumpToLatest(isFindOwningScroll: true))
+        XCTAssertTrue(TranscriptFindPolicy.allowsJumpToLatest(isFindOwningScroll: false))
     }
 
     func testReducedMotionUsesOpacityOnlyForFindTransitionsWhenPolicyIsExposed() {

@@ -123,6 +123,8 @@ public enum TranscriptFindPolicy {
     public static let maximumSegmentsPerMessage = 512
     public static let maximumIndexedSegments = 4_096
     public static let maximumIndexedMessages = 1_000
+    public static let maximumTraversedMessages = 1_000
+    public static let maximumSearchedEntries = 1_000
     public static let maximumMatchGroups = 2_048
     public static let maximumMatches = 10_000
     public static let maximumQueryCharacters = 256
@@ -137,6 +139,12 @@ public enum TranscriptFindPolicy {
     }
     public static func usesAnimatedNavigation(reducedMotion: Bool) -> Bool { !reducedMotion }
     public static func allowsHiddenDetailExpansion() -> Bool { false }
+    public static func allowsJumpToLatest(isFindOwningScroll: Bool) -> Bool {
+        !isFindOwningScroll
+    }
+    public static func nextSelectionScrollRevision(_ current: UInt64) -> UInt64 {
+        current &+ 1
+    }
 
     public static func isIndexReady(indexMessageGeneration: Int,
                                     currentMessageGeneration: Int,
@@ -165,11 +173,16 @@ public enum TranscriptFindPolicy {
         var remainingCharacters = maximumIndexedCharacters
         var remainingSegments = maximumIndexedSegments
         var indexedMessages = 0
-        var truncated = false
+        var truncated = messages.count > maximumTraversedMessages
         var entries: [TranscriptFindIndex.Entry] = []
-        entries.reserveCapacity(min(messages.count, maximumIndexedMessages))
+        entries.reserveCapacity(min(
+            messages.count, maximumTraversedMessages, maximumIndexedMessages))
 
-        for (offset, message) in messages.enumerated() {
+        // Search the newest bounded window, in ordinary transcript order.
+        // Raw traversal is capped before author/empty filtering so excluded
+        // rows cannot manufacture unbounded foreground indexing work.
+        let window = messages.suffix(maximumTraversedMessages)
+        for (offset, message) in window.enumerated() {
             if offset.isMultiple(of: 16) { try Task.checkCancellation() }
             guard message.author == .user || message.author == .bot else { continue }
             guard !message.text.isEmpty else { continue }
@@ -248,7 +261,8 @@ public enum TranscriptFindPolicy {
         var total = 0
         var inspected = 0
         var truncated = index.isTruncated
-        outer: for entry in index.entries {
+        if index.entries.count > maximumSearchedEntries { truncated = true }
+        outer: for entry in index.entries.prefix(maximumSearchedEntries) {
             for (segment, text) in entry.segments.enumerated() {
                 guard inspected < maximumIndexedSegments else {
                     truncated = true

@@ -17,7 +17,10 @@ REST/RPC call, searches no other bot or session, and writes nothing to Hermes.
 - Query input is bounded before grapheme work (256 characters and 1 KiB of
   UTF-8). The index is bounded to 1,000 messages, 4,096 segments, and
   1,000,000 indexed characters, with per-message source/field/line caps and
-  bounded match groups/occurrences.
+  bounded match groups/occurrences. The raw message traversal budget is
+  applied before author/empty-text filtering to the newest bounded window,
+  which remains in chronological transcript order. Search independently
+  bounds outer entries even when entries contain no searchable segments.
   Oversized raw Markdown is omitted as a whole rather than prefix-parsed, so a
   cutoff cannot expose a hidden link destination or turn a table fragment into
   paragraph text. A clipped index reports `+` in its count.
@@ -43,6 +46,11 @@ session change invalidates stale results and prevents an old row from driving
 scroll. Find owns transcript scrolling while a match is selected: initial
 anchoring and live-edge follow are suppressed, while closing find clears its
 query/highlight without changing the user’s scroll position.
+
+Selecting the sole match is still an active selection (ordinal `0`); its
+explicit navigation revision drives a centered scroll/recenter on every
+Previous or Next activation, and jump-to-latest remains hidden while find owns
+the scroll.
 
 Find controls expose at least a 44-point hit target and status text reports an
 accessible one-based position. When reduced motion is enabled, find
