@@ -1179,36 +1179,48 @@ public struct ChatView: View {
                         .padding(.bottom, 4)
                 }
                 let visibleText = GeneratedImageEchoPolicy.suppress(in: message)
-                let mediaProjection = AssistantMediaProjection.project(
-                    visibleText, isStreaming: message.isStreaming)
-                if let reasoning = message.reasoning, !reasoning.isEmpty,
-                   transcriptPolicy.showsReasoning(isLive: message.isStreaming) {
-                    ThoughtBlock(reasoning: reasoning, theme: theme,
-                                 isLive: message.isStreaming && mediaProjection.runs.isEmpty)
-                        .padding(.bottom, mediaProjection.runs.isEmpty ? 0 : 5)
-                }
-                if mediaProjection.isClipped {
-                    botBubble("This response was too large to project media safely.",
-                              findHighlight: nil)
+                if let orderedParts = message.orderedParts,
+                   OrderedTranscriptPresentation.shouldRenderOrdered(
+                       orderedParts, legacyText: message.text,
+                       projectedVisibleText: visibleText) {
+                    let orderedRuns = OrderedTranscriptPresentation.project(
+                        orderedParts, toolCalls: message.toolCalls)
+                    orderedBotRuns(
+                        orderedRuns,
+                        message: message, archived: archived)
                         .contextMenu { messageMenu(message) }
-                } else if mediaProjection.references.isEmpty {
-                    if !visibleText.isEmpty {
-                        botBubble(visibleText, findHighlight: findHighlight(for: message))
+                } else {
+                    let mediaProjection = AssistantMediaProjection.project(
+                        visibleText, isStreaming: message.isStreaming)
+                    if let reasoning = message.reasoning, !reasoning.isEmpty,
+                       transcriptPolicy.showsReasoning(isLive: message.isStreaming) {
+                        ThoughtBlock(reasoning: reasoning, theme: theme,
+                                     isLive: message.isStreaming && mediaProjection.runs.isEmpty)
+                            .padding(.bottom, mediaProjection.runs.isEmpty ? 0 : 5)
+                    }
+                    if mediaProjection.isClipped {
+                        botBubble("This response was too large to project media safely.",
+                                  findHighlight: nil)
+                            .contextMenu { messageMenu(message) }
+                    } else if mediaProjection.references.isEmpty {
+                        if !visibleText.isEmpty {
+                            botBubble(visibleText, findHighlight: findHighlight(for: message))
+                                .contextMenu { messageMenu(message) }
+                        }
+                    } else {
+                        assistantMediaRuns(mediaProjection.runs, message: message,
+                                           visibleText: visibleText)
                             .contextMenu { messageMenu(message) }
                     }
-                } else {
-                    assistantMediaRuns(mediaProjection.runs, message: message,
-                                       visibleText: visibleText)
-                        .contextMenu { messageMenu(message) }
-                }
-                let visibleToolCalls = transcriptPolicy.visibleToolCalls(message.toolCalls)
-                if !visibleToolCalls.isEmpty {
-                    ToolCallList(calls: visibleToolCalls, theme: theme, copy: copy,
-                                 accent: botColor,
-                                 generatedImageSource: archived ? nil
-                                     : generatedImageSource(for: message))
-                        .padding(.top, mediaProjection.runs.isEmpty ? 0 : 7)
-                        .padding(.leading, theme.id == .ink ? 12 : 0)
+                    let visibleToolCalls = transcriptPolicy.visibleToolCalls(message.toolCalls)
+                    if !visibleToolCalls.isEmpty {
+                        ToolCallList(calls: visibleToolCalls, theme: theme, copy: copy,
+                                     accent: botColor,
+                                     generatedImageSource: archived ? nil
+                                         : generatedImageSource(for: message))
+                            .padding(.top, mediaProjection.runs.isEmpty ? 0 : 7)
+                            .padding(.leading, theme.id == .ink ? 12 : 0)
+                    }
                 }
                 if let card = message.card {
                     if archived {
@@ -1246,6 +1258,114 @@ public struct ChatView: View {
             Spacer(minLength: 44) // ≈ the prototype's 86% max width
         }
         .modifier(ChatEntrance())
+    }
+
+    @ViewBuilder private func orderedBotRuns(
+        _ runs: [OrderedTranscriptRun], message: ChatMessage, archived: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(runs.enumerated()), id: \.offset) { index, run in
+                switch run {
+                case .text(let text):
+                    if !text.isEmpty {
+                        botBubble(text, findHighlight: orderedFindHighlight(
+                            runs: runs, runIndex: index,
+                            selection: findHighlight(for: message)))
+                    }
+                case .reasoning(let reasoning):
+                    if transcriptPolicy.showsReasoning(isLive: message.isStreaming) {
+                        ThoughtBlock(reasoning: reasoning, theme: theme,
+                                     isLive: message.isStreaming)
+                    }
+                case .attachment(let kind, let ref, let mimeType, let clipped):
+                    orderedPartEvidence(
+                        title: orderedAttachmentTitle(kind),
+                        detail: ref ?? mimeType ?? (clipped ? "Reference clipped" : "Reference unavailable"),
+                        systemImage: orderedAttachmentIcon(kind))
+                case .tools(let calls):
+                    let visible = transcriptPolicy.visibleToolCalls(calls)
+                    if !OrderedTranscriptInteractionPolicy.allowsToolInteraction(
+                        archived: archived) {
+                        orderedPartEvidence(
+                            title: "Archived tool evidence",
+                            detail: visible.map(\.name).joined(separator: ", "),
+                            systemImage: "wrench.and.screwdriver")
+                    } else if !visible.isEmpty {
+                        ToolCallList(calls: visible, theme: theme, copy: copy,
+                                     accent: botColor,
+                                     generatedImageSource: generatedImageSource(for: message))
+                            .padding(.leading, theme.id == .ink ? 12 : 0)
+                    }
+                case .evidence(let label):
+                    orderedPartEvidence(title: label, detail: nil,
+                                        systemImage: "exclamationmark.circle")
+                }
+            }
+        }
+    }
+
+    private func orderedFindHighlight(
+        runs: [OrderedTranscriptRun], runIndex: Int,
+        selection: TranscriptFindSelection?
+    ) -> TranscriptFindSelection? {
+        guard var selection else { return nil }
+        var segmentOffset = 0
+        for (index, run) in runs.enumerated() {
+            guard case .text(let text) = run, !text.isEmpty else { continue }
+            let count = MarkdownParser.searchSegments(text).count
+            if index == runIndex {
+                guard selection.address.segment >= segmentOffset,
+                      selection.address.segment < segmentOffset + count else { return nil }
+                selection.address.segment -= segmentOffset
+                return selection
+            }
+            segmentOffset += count
+        }
+        return nil
+    }
+
+    private func orderedAttachmentTitle(_ kind: TranscriptPart.Kind) -> String {
+        switch kind {
+        case .image: return "Image reference"
+        case .audio: return "Audio reference"
+        case .file: return "File reference"
+        default: return "Attachment reference"
+        }
+    }
+
+    private func orderedAttachmentIcon(_ kind: TranscriptPart.Kind) -> String {
+        switch kind {
+        case .image: return "photo"
+        case .audio: return "waveform"
+        case .file: return "doc"
+        default: return "paperclip"
+        }
+    }
+
+    private func orderedPartEvidence(title: String, detail: String?,
+                                     systemImage: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: systemImage)
+                .foregroundStyle(theme.faint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(theme.id == .control ? theme.mono(10, weight: .semibold)
+                                               : theme.body(12, weight: .semibold))
+                    .foregroundStyle(theme.sub)
+                if let detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(theme.id == .control ? theme.mono(9) : theme.body(11))
+                        .foregroundStyle(theme.faint)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(10)
+        .background(theme.panel,
+                    in: RoundedRectangle(cornerRadius: theme.cardRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: theme.cardRadius, style: .continuous)
+            .strokeBorder(theme.line, lineWidth: 1))
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder private func assistantMediaRuns(
@@ -1537,8 +1657,17 @@ public struct ChatView: View {
         return HStack(spacing: 0) {
             Spacer(minLength: 70) // ≈ the prototype's 78% max width
             VStack(alignment: .trailing, spacing: 3) {
-                userBubble(message.text, findHighlight: findHighlight(for: message))
-                    .contextMenu { messageMenu(message) }
+                if let ordered = message.orderedParts,
+                   OrderedTranscriptPresentation.shouldRenderOrdered(
+                       ordered, legacyText: message.text,
+                       projectedVisibleText: message.text) {
+                    orderedUserRuns(OrderedTranscriptPresentation.project(
+                        ordered, toolCalls: []), message: message)
+                        .contextMenu { messageMenu(message) }
+                } else {
+                    userBubble(message.text, findHighlight: findHighlight(for: message))
+                        .contextMenu { messageMenu(message) }
+                }
                 if queued {
                     Text(copy.queued)
                         .font(theme.id == .soft ? theme.body(11, weight: .medium) : theme.mono(9))
@@ -1548,6 +1677,34 @@ public struct ChatView: View {
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .modifier(ChatEntrance())
+    }
+
+    @ViewBuilder private func orderedUserRuns(
+        _ runs: [OrderedTranscriptRun], message: ChatMessage
+    ) -> some View {
+        VStack(alignment: .trailing, spacing: 7) {
+            ForEach(Array(runs.enumerated()), id: \.offset) { index, run in
+                switch run {
+                case .text(let text), .reasoning(let text):
+                    if !text.isEmpty {
+                        userBubble(text, findHighlight: orderedFindHighlight(
+                            runs: runs, runIndex: index,
+                            selection: findHighlight(for: message)))
+                    }
+                case .attachment(let kind, let ref, let mimeType, let clipped):
+                    orderedPartEvidence(
+                        title: orderedAttachmentTitle(kind),
+                        detail: ref ?? mimeType ?? (clipped ? "Reference clipped" : "Reference unavailable"),
+                        systemImage: orderedAttachmentIcon(kind))
+                case .tools:
+                    orderedPartEvidence(title: "Inert tool evidence", detail: nil,
+                                        systemImage: "wrench.and.screwdriver")
+                case .evidence(let label):
+                    orderedPartEvidence(title: label, detail: nil,
+                                        systemImage: "exclamationmark.circle")
+                }
+            }
+        }
     }
 
     @ViewBuilder private func userBubble(

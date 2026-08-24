@@ -1374,6 +1374,10 @@ extension AppModel {
             }
         }
         chat.messages[index].toolCalls = calls
+        if let parts = tool.parts {
+            chat.messages[index].orderedParts = TranscriptPartsCodec.apply(
+                parts, to: chat.messages[index].orderedParts)
+        }
     }
 
     private func completeTool(_ tool: ToolCompletePayload, payload: JSONValue?,
@@ -1515,6 +1519,10 @@ extension AppModel {
                 calls[hit].context = summary
             }
             chat.messages[index].toolCalls = calls
+            if let parts = tool.parts {
+                chat.messages[index].orderedParts = TranscriptPartsCodec.apply(
+                    parts, to: chat.messages[index].orderedParts)
+            }
             return
         }
         let result = tool.result ?? ToolPayloadCodec.unavailable(
@@ -1548,6 +1556,10 @@ extension AppModel {
                 ?? tool.deferredGeneratedImage,
             provenance: .unmatchedResult,
             diagnostic: "No exact live tool-call id matched this completion; Talaria did not pair it by name."))
+        if let parts = tool.parts {
+            chat.messages[index].orderedParts = TranscriptPartsCodec.apply(
+                parts, to: chat.messages[index].orderedParts)
+        }
     }
 
     /// A finished turn can hold no running tools — a stop or an error leaves

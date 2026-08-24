@@ -26,9 +26,10 @@ public struct GatewayEvent: Sendable {
 /// through as `.other` so screens can opt in without protocol churn.
 public enum TypedGatewayEvent: Sendable {
     case gatewayReady(skin: JSONValue?, changeEvents: Bool)
-    case messageStart
-    case messageDelta(text: String)
-    case messageInterim(text: String, alreadyStreamed: Bool)
+    case messageStart(parts: TranscriptPartsUpdate?)
+    case messageDelta(text: String, parts: TranscriptPartsUpdate?)
+    case messageInterim(text: String, alreadyStreamed: Bool,
+                        parts: TranscriptPartsUpdate?)
     case thinkingDelta(text: String)
     case reasoningDelta(text: String)
     case messageComplete(MessageCompletePayload)
@@ -57,12 +58,22 @@ public enum TypedGatewayEvent: Sendable {
         case "gateway.ready":
             self = .gatewayReady(skin: p?["skin"], changeEvents: p?["change_events"]?.boolValue ?? false)
         case "message.start":
-            self = .messageStart
+            self = .messageStart(parts: TranscriptPartsCodec.update(
+                from: p, defaultMode: .replace))
         case "message.delta":
-            self = .messageDelta(text: p?["text"]?.stringValue ?? "")
+            let text = p?["text"]?.stringValue ?? ""
+            self = .messageDelta(
+                text: text,
+                parts: TranscriptPartsCodec.update(
+                    from: p, legacyText: text, defaultMode: .append))
         case "message.interim":
-            self = .messageInterim(text: p?["text"]?.stringValue ?? "",
-                                   alreadyStreamed: p?["already_streamed"]?.boolValue ?? false)
+            let text = p?["text"]?.stringValue ?? ""
+            let alreadyStreamed = p?["already_streamed"]?.boolValue ?? false
+            self = .messageInterim(
+                text: text, alreadyStreamed: alreadyStreamed,
+                parts: TranscriptPartsCodec.update(
+                    from: p, legacyText: text,
+                    defaultMode: alreadyStreamed ? .seal : .append))
         case "thinking.delta":
             self = .thinkingDelta(text: p?["text"]?.stringValue ?? "")
         case "reasoning.delta":
@@ -283,6 +294,7 @@ public struct MessageCompletePayload: Sendable {
     public var recoverable: Bool
     public var partial: Bool
     public var errorSurfaceAdmission: TurnErrorSurfaceAdmission
+    public var parts: TranscriptPartsUpdate?
 
     public var errorSurface: TurnErrorSurface? { errorSurfaceAdmission.surface }
 
@@ -301,6 +313,9 @@ public struct MessageCompletePayload: Sendable {
         recoverable = v?["recoverable"]?.boolValue ?? false
         partial = v?["partial"]?.boolValue ?? false
         errorSurfaceAdmission = TurnErrorSurfaceCodec.admit(v?["error_surface"])
+        parts = TranscriptPartsCodec.update(
+            from: v, legacyText: text, legacyReasoning: reasoning,
+            defaultMode: .replace)
     }
 }
 
@@ -349,6 +364,8 @@ public struct RetainedInflightTurn: Sendable, Equatable {
     public var status: MessageCompletePayload.Status?
     public var recoverable: Bool?
     public var errorSurfaceAdmission: TurnErrorSurfaceAdmission
+    public var parts: TranscriptPartsEnvelope?
+    public var userParts: TranscriptPartsEnvelope?
 
     public var errorSurface: TurnErrorSurface? { errorSurfaceAdmission.surface }
 
@@ -372,6 +389,21 @@ public struct RetainedInflightTurn: Sendable, Equatable {
         }
         recoverable = object["recoverable"]?.boolValue
         errorSurfaceAdmission = TurnErrorSurfaceCodec.admit(object["error_surface"])
+        let inheritedVersion = object["parts_version"] == nil
+            ? TranscriptPartsCodec.version : Self.exactPartsVersion(object)
+        parts = TranscriptPartsCodec.update(
+            from: value, inheritedVersion: Self.exactPartsVersion(object),
+            legacyText: assistant, defaultMode: .replace)?.envelope
+        userParts = TranscriptPartsCodec.update(
+            from: value, partsKey: "user_parts", clippedKey: "user_parts_clipped",
+            inheritedVersion: inheritedVersion,
+            legacyText: user, defaultMode: .replace)?.envelope
+    }
+
+    private static func exactPartsVersion(_ object: [String: JSONValue]) -> Int? {
+        guard let number = object["parts_version"]?.doubleValue,
+              number == Double(TranscriptPartsCodec.version) else { return nil }
+        return TranscriptPartsCodec.version
     }
 
     /// Keep retained turn bodies finite before projection performs trimming,
@@ -528,6 +560,7 @@ public struct ToolStartPayload: Sendable {
     public var context: String
     public var arguments: ToolPayload?
     public var webSearchQuery: String?
+    public var parts: TranscriptPartsUpdate?
 
     public init(_ v: JSONValue?) {
         toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
@@ -545,6 +578,7 @@ public struct ToolStartPayload: Sendable {
         arguments = ToolPayloadCodec.directArguments(from: rawArguments)
         webSearchQuery = ToolWebSearchCodec.isWebSearchTool(name)
             ? ToolWebSearchCodec.query(from: rawArguments) : nil
+        parts = TranscriptPartsCodec.update(from: v, defaultMode: .append)
     }
 }
 
@@ -566,6 +600,7 @@ public struct ToolCompletePayload: Sendable {
     public var webSearchHasExplicitError: Bool
     public var generatedImage: ToolGeneratedImage?
     public var deferredGeneratedImage: ToolGeneratedImage?
+    public var parts: TranscriptPartsUpdate?
 
     public init(_ v: JSONValue?) {
         toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
@@ -618,6 +653,7 @@ public struct ToolCompletePayload: Sendable {
         deferredGeneratedImage = (name.isEmpty
             || ToolGeneratedImageCodec.isGeneratedImageTool(name))
             ? generatedCandidate : nil
+        parts = TranscriptPartsCodec.update(from: v, defaultMode: .append)
     }
 }
 

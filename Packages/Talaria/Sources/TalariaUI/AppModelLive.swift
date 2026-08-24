@@ -1165,23 +1165,34 @@ extension AppModel {
         var pending: [ToolCall] = []
         var pendingTime: String?
         var pendingRowID: Int?
+        var pendingParts: TranscriptPartsEnvelope?
         var possibleRunningPresentationIDs: Set<String> = []
 
         func appendPending() {
             guard !pending.isEmpty else { return }
             messages.append(ChatMessage(author: .bot, time: pendingTime, text: "",
-                                        toolCalls: pending, rowID: pendingRowID))
-            pending.removeAll(); pendingTime = nil; pendingRowID = nil
+                                        toolCalls: pending, rowID: pendingRowID,
+                                        orderedParts: pendingParts))
+            pending.removeAll(); pendingTime = nil; pendingRowID = nil; pendingParts = nil
         }
 
-        func retain(_ calls: [ToolCall], time: String?, rowID: Int?) {
+        func mergeParts(_ newer: TranscriptPartsEnvelope?,
+                        into existing: TranscriptPartsEnvelope?) -> TranscriptPartsEnvelope? {
+            guard let newer else { return existing }
+            return TranscriptPartsCodec.apply(
+                TranscriptPartsUpdate(envelope: newer, mode: .append), to: existing)
+        }
+
+        func retain(_ calls: [ToolCall], time: String?, rowID: Int?,
+                    parts: TranscriptPartsEnvelope? = nil) {
             guard !calls.isEmpty else { return }
             pending.append(contentsOf: calls)
+            pendingParts = mergeParts(parts, into: pendingParts)
             if pendingTime == nil { pendingTime = time }
             if pendingRowID == nil { pendingRowID = rowID }
         }
 
-        func apply(_ result: ToolCall) -> Bool {
+        func apply(_ result: ToolCall, parts: TranscriptPartsEnvelope?) -> Bool {
             guard let wireID = result.gatewayToolID else { return false }
             // Repeated exact ids are not an identity proof. Pairing one of
             // several calls/results would silently attach output to the wrong
@@ -1193,6 +1204,7 @@ extension AppModel {
                     && ($0.result == nil || $0.result?.kind == .unavailable)
             }) {
                 mergeStoredResult(result, into: &pending[hit])
+                pendingParts = mergeParts(parts, into: pendingParts)
                 possibleRunningPresentationIDs.remove(pending[hit].id)
                 return true
             }
@@ -1202,6 +1214,8 @@ extension AppModel {
                         && ($0.result == nil || $0.result?.kind == .unavailable)
                 }) else { continue }
                 mergeStoredResult(result, into: &messages[index].toolCalls[hit])
+                messages[index].orderedParts = mergeParts(
+                    parts, into: messages[index].orderedParts)
                 possibleRunningPresentationIDs.remove(messages[index].toolCalls[hit].id)
                 return true
             }
@@ -1236,6 +1250,8 @@ extension AppModel {
             let time = row["timestamp"]?.doubleValue.map { shortTime($0) }
             let reasoning = row["reasoning"]?.stringValue
                 ?? row["reasoning_content"]?.stringValue
+            let orderedParts = TranscriptPartsCodec.update(
+                from: row, legacyText: text, legacyReasoning: reasoning)?.envelope
             // Durable row identity (_history_to_messages stamps `row_id` from
             // _rows_to_conversation; the DB column it comes from is `id`).
             // Without it only the newest assistant row is addressable by
@@ -1248,7 +1264,9 @@ extension AppModel {
                     row, index: index, rowID: rowID,
                     ambiguousWireIDs: ambiguousToolIDs,
                     exactToolName: exactPendingToolName(for: wireID))
-                if !apply(result) { retain([result], time: time, rowID: rowID) }
+                if !apply(result, parts: orderedParts) {
+                    retain([result], time: time, rowID: rowID, parts: orderedParts)
+                }
 
             case "assistant":
                 let calls = storedToolCalls(
@@ -1267,25 +1285,28 @@ extension AppModel {
                 if !visible {
                     guard !calls.isEmpty else { continue }
                     appendPending()
-                    retain(calls, time: time, rowID: rowID)
+                    retain(calls, time: time, rowID: rowID, parts: orderedParts)
                     continue
                 }
                 let allCalls = pending + calls
+                let allParts = mergeParts(orderedParts, into: pendingParts)
                 pending.removeAll(); pendingTime = nil; pendingRowID = nil
                 messages.append(ChatMessage(author: .bot, time: time, text: text,
                                             reasoning: reasoning, toolCalls: allCalls,
-                                            rowID: rowID))
+                                            rowID: rowID, orderedParts: allParts))
+                pendingParts = nil
 
             case "user":
                 appendPending(); possibleRunningPresentationIDs = []
                 guard !text.isEmpty else { continue }
                 messages.append(ChatMessage(author: .user, time: time, text: text,
-                                            rowID: rowID))
+                                            rowID: rowID, orderedParts: orderedParts))
 
             case "system":
                 appendPending(); possibleRunningPresentationIDs = []
                 guard !text.isEmpty else { continue }
-                messages.append(ChatMessage(author: .system, time: time, text: text))
+                messages.append(ChatMessage(author: .system, time: time, text: text,
+                                            orderedParts: orderedParts))
 
             default: continue
             }
@@ -1676,6 +1697,7 @@ extension AppModel {
             chat.messages[index].text = partial
             chat.messages[index].isStreaming = retained.streaming && failure == nil
             chat.messages[index].failure = failure
+            chat.messages[index].orderedParts = retained.parts
             ChatRuntime.shared.failedRetryRows[botID] = nil
             chat.hasUnresolvedRetry = false
             if retainedFailure != nil {
@@ -1736,6 +1758,9 @@ extension AppModel {
             chat.messages[index].isStreaming = retained.streaming && failure == nil
             chat.messages[index].failure = TurnFailureLifecycle.merge(
                 chat.messages[index].failure, failure)
+            if let parts = retained.parts {
+                chat.messages[index].orderedParts = parts
+            }
             if retainedFailure != nil {
                 let start = min(ChatRuntime.shared.turnFloor[botID] ?? index, index)
                 ChatRuntime.shared.retainedFailureRows[ObjectIdentifier(chat)] =
@@ -1762,6 +1787,9 @@ extension AppModel {
                 if let rowID = row.rowID,
                    chat.messages[retainedUserIndex].rowID == nil {
                     chat.messages[retainedUserIndex].rowID = rowID
+                }
+                if chat.messages[retainedUserIndex].orderedParts == nil {
+                    chat.messages[retainedUserIndex].orderedParts = row.orderedParts
                 }
                 if retainedFailure != nil {
                     retainedIDs.insert(chat.messages[retainedUserIndex].id)
@@ -1799,14 +1827,20 @@ extension AppModel {
         let persistedTail = Array(persistedUsers.suffix(expectedUserTexts.count))
         let persistedMatches = persistedTail.map(\.text) == expectedUserTexts
         var persistedIndex = 0
+        var assignedInitialUserParts = false
 
         func userRow(_ text: String) -> ChatMessage? {
             guard !text.isEmpty else { return nil }
             defer { persistedIndex += 1 }
+            let parts = assignedInitialUserParts ? nil : retained.userParts
+            assignedInitialUserParts = true
             if persistedMatches, persistedIndex < persistedTail.count {
-                return persistedTail[persistedIndex]
+                var row = persistedTail[persistedIndex]
+                if row.orderedParts == nil { row.orderedParts = parts }
+                return row
             }
-            return ChatMessage(author: .user, time: AppModel.clock(), text: text)
+            return ChatMessage(author: .user, time: AppModel.clock(), text: text,
+                               orderedParts: parts)
         }
 
         var rows: [ChatMessage] = []
@@ -1820,6 +1854,7 @@ extension AppModel {
         let offsetsUsable = !retained.correctionsMalformed
             && !corrections.isEmpty
             && offsets?.count == corrections.count
+        let assistantParts = corrections.isEmpty ? retained.parts : nil
 
         if offsetsUsable, let offsets {
             var cursor = 0
@@ -1837,14 +1872,14 @@ extension AppModel {
                 rows.append(ChatMessage(
                     author: .bot, time: AppModel.clock(), text: tail,
                     isStreaming: retained.streaming && failure == nil,
-                    failure: failure))
+                    failure: failure, orderedParts: assistantParts))
             }
         } else {
             if !assistant.isEmpty || retained.streaming || failure != nil {
                 rows.append(ChatMessage(
                     author: .bot, time: AppModel.clock(), text: assistant,
                     isStreaming: retained.streaming && failure == nil,
-                    failure: failure))
+                    failure: failure, orderedParts: assistantParts))
             }
             for correction in corrections {
                 if let row = userRow(correction) { rows.append(row) }
@@ -1887,7 +1922,7 @@ extension AppModel {
     func handle(event: GatewayEvent, sourceGatewayID: String?) {
         let botID = botID(forSession: event.sessionID, sourceGatewayID: sourceGatewayID)
         switch TypedGatewayEvent(event) {
-        case .messageStart:
+        case .messageStart(let parts):
             if let botID, currentChatOwnsMessageEvent(
                 botID: botID, sessionID: event.sessionID,
                 sourceGatewayID: sourceGatewayID) {
@@ -1908,6 +1943,7 @@ extension AppModel {
                     chat.messages[index].text = ""
                     chat.messages[index].reasoning = nil
                     chat.messages[index].toolCalls = []
+                    chat.messages[index].orderedParts = nil
                     chat.messages[index].card = nil
                     chat.messages[index].failure = nil
                     chat.messages[index].isStreaming = true
@@ -1928,19 +1964,39 @@ extension AppModel {
                         }) ?? chat.messages.count
                 }
                 setWorking(botID, true)
+                if let parts,
+                   let userIndex = chat.messages.indices.reversed().first(where: {
+                       chat.messages[$0].author == .user
+                   }) {
+                    chat.messages[userIndex].orderedParts = TranscriptPartsCodec.apply(
+                        parts, to: chat.messages[userIndex].orderedParts)
+                }
             }
 
-        case .messageDelta(let text):
-            guard let botID, !text.isEmpty,
+        case .messageDelta(let text, let parts):
+            guard let botID, !text.isEmpty || parts != nil,
                   currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
                                               sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
             chat.isTyping = false
             if let last = chat.messages.last, last.isStreaming {
                 chat.messages[chat.messages.count - 1].text += text
+                if let parts {
+                    if chat.messages[chat.messages.count - 1].orderedParts == nil,
+                       let reasoning = chat.messages[chat.messages.count - 1].reasoning {
+                        chat.messages[chat.messages.count - 1].orderedParts =
+                            TranscriptPartsCodec.appendLocalStreamText(
+                                reasoning, kind: .reasoning, id: "reasoning-stream",
+                                to: nil)
+                    }
+                    chat.messages[chat.messages.count - 1].orderedParts =
+                        TranscriptPartsCodec.apply(
+                            parts, to: chat.messages[chat.messages.count - 1].orderedParts)
+                }
             } else {
                 chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(),
-                                                 text: text, isStreaming: true))
+                                                 text: text, isStreaming: true,
+                                                 orderedParts: parts?.envelope))
             }
 
         case .thinkingDelta(let text), .reasoningDelta(let text):
@@ -1954,23 +2010,36 @@ extension AppModel {
             if let last = chat.messages.last, last.isStreaming {
                 chat.messages[chat.messages.count - 1].reasoning =
                     (last.reasoning ?? "") + text
+                if last.orderedParts != nil {
+                    chat.messages[chat.messages.count - 1].orderedParts =
+                        TranscriptPartsCodec.appendLocalStreamText(
+                            text, kind: .reasoning, id: "reasoning-stream",
+                            to: last.orderedParts)
+                }
             } else {
                 chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(),
                                                  text: "", isStreaming: true, reasoning: text))
             }
 
-        case .messageInterim(let text, let alreadyStreamed):
+        case .messageInterim(let text, let alreadyStreamed, let parts):
             // Complete assistant segment between tool calls: finalize the
             // streaming bubble, or append when it never streamed.
-            guard let botID, !text.isEmpty,
+            guard let botID, !text.isEmpty || parts != nil,
                   currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
                                               sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
             if let last = chat.messages.last, last.isStreaming {
                 chat.messages[chat.messages.count - 1].text = text
                 chat.messages[chat.messages.count - 1].isStreaming = false
+                if let parts {
+                    chat.messages[chat.messages.count - 1].orderedParts =
+                        TranscriptPartsCodec.apply(
+                            parts, to: chat.messages[chat.messages.count - 1].orderedParts)
+                }
             } else if !alreadyStreamed {
-                chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(), text: text))
+                chat.messages.append(ChatMessage(
+                    author: .bot, time: AppModel.clock(), text: text,
+                    orderedParts: parts?.envelope))
             }
             chat.isTyping = true   // the turn continues (tools next)
 
@@ -2038,6 +2107,10 @@ extension AppModel {
                 if let reasoning = payload.reasoning, !reasoning.isEmpty {
                     chat.messages[retryIndex].reasoning = reasoning
                 }
+                if let parts = payload.parts {
+                    chat.messages[retryIndex].orderedParts = TranscriptPartsCodec.apply(
+                        parts, to: chat.messages[retryIndex].orderedParts)
+                }
                 ChatRuntime.shared.failedRetryRows[botID] = nil
                 chat.hasUnresolvedRetry = false
             } else if let last = chat.messages.last, last.isStreaming {
@@ -2049,9 +2122,82 @@ extension AppModel {
                    chat.messages[chat.messages.count - 1].reasoning == nil {
                     chat.messages[chat.messages.count - 1].reasoning = reasoning
                 }
-            } else if !visibleText.isEmpty, chat.messages.last?.text != visibleText {
+                if let parts = payload.parts {
+                    chat.messages[chat.messages.count - 1].orderedParts =
+                        TranscriptPartsCodec.apply(
+                            parts, to: chat.messages[chat.messages.count - 1].orderedParts)
+                }
+            } else if (!visibleText.isEmpty || payload.parts != nil),
+                      chat.messages.last?.text != visibleText {
                 chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(),
-                                                 text: visibleText, failure: failure))
+                                                 text: visibleText, failure: failure,
+                                                 orderedParts: payload.parts?.envelope))
+            } else if let parts = payload.parts {
+                let inferredFloor = chat.messages.indices.reversed().first(where: {
+                    chat.messages[$0].author == .user
+                }).map { $0 + 1 } ?? 0
+                let floor = min(ChatRuntime.shared.turnFloor[botID] ?? inferredFloor,
+                                chat.messages.count)
+                if let index = chat.messages.indices.reversed().first(where: {
+                    $0 >= floor && chat.messages[$0].author == .bot
+                }) {
+                    // A sealed interim commonly has the same legacy text as
+                    // the terminal frame. The terminal replace envelope is
+                    // still authoritative and must not be discarded by text
+                    // de-duplication.
+                    chat.messages[index].orderedParts = TranscriptPartsCodec.apply(
+                        parts, to: chat.messages[index].orderedParts)
+                    chat.messages[index].isStreaming = false
+                }
+            }
+            if payload.parts?.mode == .replace,
+               retainedFailure == nil, retryIndex == nil {
+                let inferredFloor = chat.messages.indices.reversed().first(where: {
+                    chat.messages[$0].author == .user
+                }).map { $0 + 1 } ?? 0
+                let floor = min(ChatRuntime.shared.turnFloor[botID] ?? inferredFloor,
+                                chat.messages.count)
+                let indices = Array(chat.messages.indices.filter {
+                    $0 >= floor && chat.messages[$0].author == .bot
+                })
+                let replacement = payload.parts?.envelope
+                let replacementText = replacement.map {
+                    TranscriptPartsCodec.legacyText(in: $0)
+                } ?? ""
+                let existingText = indices.map { chat.messages[$0].text }.joined()
+                if indices.count > 1,
+                   let replacement, !replacement.clipped,
+                   !replacement.parts.contains(where: {
+                       $0.kind == .clipped || $0.kind == .malformed
+                   }),
+                   replacementText == existingText,
+                   chat.messages[floor...].allSatisfy({ $0.author == .bot }),
+                   indices.allSatisfy({
+                       chat.messages[$0].card == nil && chat.messages[$0].failure == nil
+                   }), let target = indices.last {
+                    // Terminal parts describe the complete assistant/tool run.
+                    // Collapse only the ordinary all-bot live segment so its
+                    // earlier interim rows cannot render beside the canonical
+                    // replacement. Protected cards/failures and correction
+                    // rows deliberately keep their established identities.
+                    var calls: [ToolCall] = []
+                    var seen = Set<String>()
+                    for index in indices {
+                        for call in chat.messages[index].toolCalls
+                            where seen.insert(call.id).inserted {
+                            calls.append(call)
+                        }
+                    }
+                    chat.messages[target].toolCalls = calls
+                    chat.messages[target].text = replacementText.isEmpty
+                        ? visibleText : replacementText
+                    if let reasoning = payload.reasoning, !reasoning.isEmpty {
+                        chat.messages[target].reasoning = reasoning
+                    }
+                    for index in indices.dropLast().reversed() {
+                        chat.messages.remove(at: index)
+                    }
+                }
             }
             if retainedFailure != nil {
                 let inferredFloor = chat.messages.indices.reversed().first(where: {

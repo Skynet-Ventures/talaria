@@ -682,6 +682,9 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     public var reasoning: String?
     /// Tools this turn ran, in call order (tool.start / tool.complete).
     public var toolCalls: [ToolCall]
+    /// Additive ordered presentation evidence from current Hermes. Nil keeps
+    /// the exact legacy text/reasoning/tool rendering path for older gateways.
+    public var orderedParts: TranscriptPartsEnvelope?
     /// Durable transcript row id — needed for reactions and rewind.
     public var rowID: Int?
     /// Terminal failure metadata belongs to the assistant turn rather than a
@@ -691,11 +694,13 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     public init(id: UUID = UUID(), author: MessageAuthor, time: String? = nil,
                 text: String, card: MessageCard? = nil, isStreaming: Bool = false,
                 reasoning: String? = nil, toolCalls: [ToolCall] = [], rowID: Int? = nil,
-                failure: TurnFailure? = nil) {
+                failure: TurnFailure? = nil,
+                orderedParts: TranscriptPartsEnvelope? = nil) {
         self.id = id; self.author = author; self.time = time
         self.text = text; self.card = card; self.isStreaming = isStreaming
         self.reasoning = reasoning; self.toolCalls = toolCalls; self.rowID = rowID
         self.failure = failure
+        self.orderedParts = orderedParts
     }
 }
 
