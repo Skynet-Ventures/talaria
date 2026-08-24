@@ -32,7 +32,7 @@ behavior.
 
 ## Portable work still open
 
-- PR73 `73ab2bc9884f7223964d43c7db68d1260f7356fa`: heartbeat, foreground
+- PR73 `64c595025202bfc5be028c23c95030c07298deb9`: heartbeat, foreground
   validation, replacement-transport retirement, and exact-current inbound
   recovery. Local suites pass; corrected physical-device installation and
   lock/return certification remain open.

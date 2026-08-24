@@ -24,7 +24,7 @@ The independent production client-wire slice over `tui_gateway/**`,
 71 exact commits partition into 64 new ledger rows plus 7 authority-ledger
 cross-references. It identifies durable restart-crossing update receipt
 recovery as a separate runtime gap, and credits gateway heartbeat to open PR73
-exact head `73ab2bc9884f7223964d43c7db68d1260f7356fa` rather than duplicating it.
+exact head `64c595025202bfc5be028c23c95030c07298deb9` rather than duplicating it.
 That audit also remained too narrow to repin the canonical manifest by itself.
 An implementation row is not certified merely because it is checked below:
 the evidence column names the remaining gateway or device proof explicitly.
