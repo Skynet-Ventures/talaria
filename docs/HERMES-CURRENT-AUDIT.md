@@ -289,6 +289,120 @@ lifecycle leases across each await, revalidate profile/id/revision before
 publication and mutation, require an explicit destructive confirmation, and
 purge protected row/export bytes whenever source authority changes.
 
+## Targeted auxiliary-model administration audit at `057dcdf23`
+
+Auxiliary model assignment, goal judging/contract drafting, vision, and their
+timeouts were audited directly against exact Hermes source
+`057dcdf236f8a6a26721c10fcc6ccb72726e272a`, on serialized Talaria
+management head `1ec216d77e156f72d6184b82c252cdff26bb6eda`. This is distinct
+from Talaria's existing main inference-provider/OAuth/custom-endpoint settings
+and operator controls. The current auxiliary administration contract is
+**blocked upstream**, so no phone editor, credential flow, config mutation, or
+restart is added.
+
+Hermes has two overlapping administration paths. The dedicated
+`GET /api/model/auxiliary?profile=...` returns a fixed set of 12 task rows
+(`vision`, `web_extract`, `compression`, `skills_hub`, `approval`, `mcp`,
+`title_generation`, `review`, `triage_specifier`, `kanban_decomposer`,
+`profile_describer`, and `curator`) with provider, model, and base URL.
+`POST /api/model/set` can assign or reset those same slots, taking profile in
+the body with precedence over the query. The list is bounded by that static
+server tuple and the read does not return stored API keys, but its returned
+provider/model/base-URL strings have no declared text or wire bounds.
+
+That narrower path still lacks mutation authority. Neither response echoes a
+canonical resolved profile, config revision, per-slot revision, or model-
+catalog revision. The write accepts arbitrary unbounded provider/model/base
+URL strings rather than requiring an id from the profile-scoped
+`/api/model/options` snapshot, has no expected revision or 409 conflict, and
+returns only the submitted assignment—not a revisioned read-back
+postcondition. A blank task bulk-writes every declared slot, while
+`task="__reset__"` resets every slot. Credential clearing is coupled to some
+provider changes or the all-slot reset; there is no explicit, independently
+confirmed clear for one custom endpoint. A same-provider custom credential
+cannot be cleared through this route. Assignments apply to new sessions only;
+they do not require or trigger a gateway restart.
+
+### Goal judge, contract drafting, and the generic config route
+
+`auxiliary.goal_judge` is not in the dedicated 12-slot tuple, so the dedicated
+read omits it and the dedicated write rejects it as an unknown task. Goal
+evaluation and goal-contract drafting both use the same `goal_judge` auxiliary
+task. At this snapshot they correctly consume
+`auxiliary.goal_judge.{provider,model,base_url,api_key,timeout,extra_body,
+reasoning_effort}`; `max_tokens` is also honored when hand-authored even though
+it is absent from the default/schema record. A positive timeout is accepted as
+an arbitrary float with no upper bound, and a positive max-token value as an
+arbitrary integer with no upper bound.
+
+Those values are reachable only through generic `GET/PUT /api/config` and the
+schema/default endpoints. The schema is recursively inferred from defaults:
+auxiliary providers and models are ordinary strings rather than options tied
+to the live model catalog, numeric fields carry no declared range, and empty
+`extra_body` objects do not declare an allowed nested shape. `ConfigUpdate`
+accepts an arbitrary dictionary, deep-merges it into the profile config, and
+returns only `{ok:true}`. It has no admitted-field enforcement, expected
+revision, conflict response, or canonical postcondition.
+
+The generic read is also not a safe secret surface. It normalizes only the
+main-model shape and otherwise returns the nested config record, including a
+literal `auxiliary.<task>.api_key` when one is stored there. The schema may
+be rendered by a client as a password field, but client-side masking does not
+make the wire write-only. A phone must not fetch this record into model state,
+logs, toasts, retry state, or persistence merely to edit one timeout. The
+dedicated model setter accepts a transient key but persists it in config and
+exposes no `credential_configured` fact or one-slot clear operation.
+
+The same split affects other declared auxiliary tasks. Defaults also contain
+`memory_query_rewrite`, `tts_audio_tags`, `monitor`, `background_review`,
+`moa_reference`, and `moa_aggregator`, but they are absent from the dedicated
+auxiliary snapshot. MoA has a separate API and remains a separate parity
+slice. Plugin-registered auxiliary tasks can be resolved at runtime but are
+also absent from this administration tuple. Talaria must not copy either the
+12-slot tuple or the larger defaults list into a static mobile catalog and
+pretend it is gateway authority.
+
+### Required portable contract
+
+Mobile work can resume only after Hermes provides:
+
+- a bounded, profile-scoped auxiliary snapshot that declares every manageable
+  task id, display/risk metadata, allowed fields, numeric ranges, clear
+  semantics, and the current assignment while echoing canonical profile and
+  one config/snapshot revision;
+- gateway-driven bounded provider/model options tied to that snapshot (or a
+  stable catalog revision), including task capability such as vision, without
+  accepting a stale or undeclared selection silently;
+- write-only credential inputs, `credential_configured` booleans on reads,
+  and a separate explicit per-slot credential clear that never returns raw
+  secret text;
+- exact profile/task/expected-revision mutations with 409 conflicts and a
+  bounded canonical revisioned postcondition, plus a separately confirmed
+  all-slot reset if bulk reset remains supported;
+- declared finite bounds for provider/model/base URL, timeout, token,
+  concurrency, and any structured provider options—no arbitrary `extra_body`
+  pass-through on the mobile route; and
+- an exact-source change event or an explicit manual-refresh contract. No
+  polling or restart is required merely to configure new-session defaults.
+
+Talaria can then hold its exact gateway/client/pool-generation/profile-
+lifecycle leases across discovery and mutation awaits, admit only
+snapshot-declared task/field/option identities, revalidate the revision before
+and after writes, keep credentials transient, and disclose honestly that an
+assignment affects new sessions rather than a currently running chat.
+
+### Targeted current movement after `e400e008`
+
+The exact `e400e008..057dcdf23` movement does not close this blocker.
+`7dde1b8b0` adds runtime MCP tool-call timeout precedence (per-server timeout,
+then `timeouts.mcp.tool_call`, then 300 seconds) but exposes no new bounded,
+profile-scoped client wire or revisioned mutation contract; it is not authority
+for a mobile auxiliary/MCP timeout control. The six Linux Desktop HUD
+geometry, input, zoom, reset, and documentation commits are native
+window/compositor behavior with no portable iOS management surface. The final
+`057dcdf23` commit is their merge plus the MCP timeout change. The auxiliary
+API, secret exposure, task-list split, and revision gaps above are unchanged.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit
@@ -460,7 +574,7 @@ therefore never inferred as removal.
 | Unknown explicit Project profile | Hermes currently falls back to the launch profile. Talaria revalidates the selected route immediately before writes and fails closed, but Hermes should reject an explicit unknown profile. |
 | Cron per-job reasoning effort | Implemented as an explicitly authorized mobile REST mutation. Talaria decodes and displays the raw field, preserves unknown values on unrelated edits, and sends only canonical/clear values through the exact REST PUT normalizer, which delegates to Hermes' canonical `cron.jobs.update_job` validation. The model tool remains read-only and cannot set this job-owned field. Live certification remains open. |
 | Rich transcript parity | Partial: markdown, tables, code, working avatar, transcript actions, jump-to-bottom, exact-source message-level child creation, and bounded typed tool-history hydration now exist. The mobile generic fallback groups larger runs and discloses status, arguments, result, provenance, and diagnostics without name/prose pairing. Explicit file-edit diffs now hydrate and overlay only by exact tool id, then render as bounded, sanitized, selectable mobile disclosures with +/- counts; live gateway/device proof remains open. Persistent multimodal parts, generated images/lightbox, specialist ANSI/search/math/diagram renderers, per-message TTS, whole-turn timing, the N/M alternative-branch picker, lineage presentation, and tour/activity remain. |
-| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. Profile import/export is also explicitly blocked: Desktop exchanges host paths, export has no bounded credential-free byte receipt/download, and import has no bounded preview/prepare/revision contract. Existing duplicate and whole-backup flows do not supply that authority. Learned-memory curation/import/export is explicitly blocked by the targeted audit above: memory ids are positional, mutations rewrite whole files without CAS, graph/detail payloads are unpaginated or unbounded, and the Star Map share code is visualization-only. |
+| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, MCP per-server logs, auxiliary model administration, and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. Profile import/export is also explicitly blocked: Desktop exchanges host paths, export has no bounded credential-free byte receipt/download, and import has no bounded preview/prepare/revision contract. Existing duplicate and whole-backup flows do not supply that authority. Learned-memory curation/import/export is explicitly blocked by the targeted audit above: memory ids are positional, mutations rewrite whole files without CAS, graph/detail payloads are unpaginated or unbounded, and the Star Map share code is visualization-only. Auxiliary administration is explicitly blocked by the exact `057dcdf23` audit above: the dedicated endpoint exposes only 12 revisionless slots and omits goal judge, while the generic config route returns raw nested API keys and has no allowlist, bounds, CAS, conflict, or postcondition. |
 | Git/System depth | Partial: core review and guarded mutations exist. Base/commit/ship context, dirty-worktree recovery, worktree-session integration, usage periods/daily/model/skill detail, and multi-gateway backend update orchestration remain. |
 | Artifact completeness | Exact retained-source discovery is implemented with atomic no-dial snapshots, sequential reads, compacted rows, collision isolation, and explicit bounded/stale/failure state. Retained bodies use the exact captured client only after `/api/files` proves one canonical locked root; root and body responses are wire-bounded, authority is rechecked after awaits, and sign-out purges source-owned bytes. Hermes `session.list` still has no global continuation, transcript offsets remain informational under Talaria's 150-item cap, and gateways returning `locked_root: nil` remain fail-closed. Live certification remains open. |
 
