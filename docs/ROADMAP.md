@@ -379,8 +379,11 @@ implemented. Desktop's N/M regenerate alternatives are client-local response
 siblings; selecting one does not switch Hermes' durable context and a normal
 resume cannot reconstruct them. The separate `session.branch` durable child
 contract is already implemented. Remaining depth includes a bounded current-
-chat N/M response picker, separate durable session-tree lineage presentation,
-persistent multimodal parts, grouped generic tool runs,
+chat N/M response picker. Separate durable session-tree presentation is blocked
+until Hermes `session.list` returns normalized branch-parent lineage: its current
+JSON-RPC rows drop all parent/root fields, and an exact intermediate compression
+tip is not enough to keep the branch attached after that parent compresses again.
+Other remaining depth includes persistent multimodal parts, grouped generic tool runs,
 math/diagram presentation, per-message TTS, whole-turn timing, tours, and
 transcript-wide activity. Bounded diff, ANSI terminal, web-search, generated-
 image lightbox/share, and explicit assistant image/audio/video/file cards are
