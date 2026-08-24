@@ -322,6 +322,18 @@ partial until the unchecked certification gates are recorded.
       revisioned mutation contract required before a phone editor can ship.
       Talaria's existing gateway-declared MoA preset selection remains an
       explicit session-only invocation path and is not management parity.
+      Relay deployment lifecycle likewise remains fail-closed after the exact
+      `057dcdf23` audit. Enrollment is a host CLI flow that consumes an
+      external single-use token before sequential local credential writes and
+      exposes no prepare/CAS/postcondition/revoke API. Relay credentials and
+      ids are profile-scoped, but routing/deployment stamps are process-global
+      and can disable direct adapters process-wide; generic profile env/config
+      routes cannot prove that topology changed. Talaria therefore renders the
+      messaging catalog's relay row as read-only **Deployment managed** and
+      rejects profile-platform mutation/test authority. The audit records the
+      bounded canonical process/profile snapshot, write-only secret,
+      revisioned prepare/confirm/recovery, topology-risk, and explicit restart
+      contract required for a truthful mobile equivalent.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source
       discovery, explicit bounded/stale/failure state, and conditionally locked
       retained-body reads are implemented. Gateways returning `locked_root: nil`

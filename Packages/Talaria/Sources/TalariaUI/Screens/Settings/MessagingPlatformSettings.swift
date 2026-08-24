@@ -106,8 +106,10 @@ public struct MessagingPlatformSettingsSection: View {
     }
 
     private var profilePicker: some View {
-        SettingsSection(theme: theme, title: "MESSAGING PROFILE",
-                        footnote: "Credentials and enablement are isolated to this exact Hermes profile.") {
+        SettingsSection(
+            theme: theme, title: "MESSAGING PROFILE",
+            footnote: "Direct-channel credentials and enablement are isolated to this exact Hermes profile. Relay routing is deployment-managed and process-wide."
+        ) {
             SettingsGroup(theme: theme) {
                 Picker("Profile", selection: Binding(
                     get: { targetProfile }, set: { selectedProfile = $0 })) {
@@ -136,14 +138,27 @@ public struct MessagingPlatformSettingsSection: View {
                         subtitle: emptySubtitle, isLast: true)
                 } else {
                     ForEach(Array(lifecycle.platforms.enumerated()), id: \.element.id) { index, platform in
-                        SettingsRow(
-                            theme: theme, title: platform.name,
-                            subtitle: rowSubtitle(platform), value: rowValue(platform),
-                            valueTone: rowTone(platform), showsChevron: true,
-                            isLast: index == lifecycle.platforms.count - 1,
-                            action: { selection = PlatformSelection(id: platform.id) })
-                        .frame(minHeight: 44)
-                        .accessibilityHint(Text("Opens channel configuration for \(platform.name)"))
+                        if platform.isDeploymentManaged {
+                            SettingsRow(
+                                theme: theme, title: platform.name,
+                                subtitle: "Enrollment and routing belong to the gateway host or "
+                                    + "orchestrator, not this profile.",
+                                value: "Deployment managed", valueTone: theme.faint,
+                                isLast: index == lifecycle.platforms.count - 1)
+                            .frame(minHeight: 44)
+                            .accessibilityHint(Text(
+                                "Read only. Manage relay on the gateway deployment."
+                            ))
+                        } else {
+                            SettingsRow(
+                                theme: theme, title: platform.name,
+                                subtitle: rowSubtitle(platform), value: rowValue(platform),
+                                valueTone: rowTone(platform), showsChevron: true,
+                                isLast: index == lifecycle.platforms.count - 1,
+                                action: { selection = PlatformSelection(id: platform.id) })
+                            .frame(minHeight: 44)
+                            .accessibilityHint(Text("Opens channel configuration for \(platform.name)"))
+                        }
                     }
                 }
             }
