@@ -1,8 +1,8 @@
-# Subagent live-event foundation
+# Subagent live events and mobile presentation
 
 Talaria now has a bounded, foreground-only reducer for Hermes parent-session
-`subagent.*` events. This is model and routing groundwork only: it does not add
-a screen, controls, a child-session opener, persistence, or reconnect replay.
+`subagent.*` events plus a source-qualified, read-only mobile presentation.
+This does not add subagent controls, persistence, or reconnect replay.
 
 ## Wire contract and identity
 
@@ -90,3 +90,47 @@ runtime session could prove the prior live tree. On reconnect/rebind Talaria
 therefore clears only the exact old fence and starts fresh; it does not invent
 recovery or persist advisory branch state. Reconnect persistence requires an
 upstream snapshot/list contract with source and parent-session provenance.
+
+## Mobile presentation
+
+Current Hermes Desktop supplies two related views: the compact composer
+status stack in `apps/desktop/src/app/chat/composer/status-stack` and the full
+hierarchy/evidence view in `apps/desktop/src/app/agents`. Talaria keeps that
+information split but adapts it to a phone instead of reproducing a desktop
+pane:
+
+- A 44-point chat-adjacent row exists only while the exact current
+  `(gateway_id, parent_runtime_session_id)` snapshot contains nodes. It shows
+  total, active, and failed counts and opens a bottom sheet.
+- The sheet shows a stable, bounded hierarchy with status, goal, model, task
+  position, latest tool/progress activity, duration, cost, token/API counts,
+  file evidence, result, and output tail. Dynamic Type is semantic, hierarchy
+  indentation is capped, and no status animation is required when Reduced
+  Motion is enabled.
+- The presentation shows at most 64 retained agents, six file rows per agent,
+  and the latest four output-tail rows. It states when nodes were dropped or
+  hidden, when earlier wire fields were clipped/conflicted, and when file or
+  output rows are omitted. The reducer retains its larger safety bounds; these
+  are phone presentation limits only.
+- Store mutations advance an observable revision. The chat and an open sheet
+  therefore update from admitted WebSocket events without polling the gateway.
+  Exact source teardown removes the row and dismisses its sheet.
+
+### Child-session navigation
+
+`child_session_id` alone never becomes a link. Immediately before opening a
+child, Talaria re-proves all of the following on the main actor:
+
+1. the node and child reference match the sheet's exact source;
+2. the current bot still owns that gateway and parent runtime session; and
+3. the current bot/profile's source-qualified `session.list` result contains
+   the exact durable child key.
+
+Only then does the presentation call the existing `openStoredSession` path.
+If any proof is absent or stale, the child key remains visible as inert
+evidence; Talaria does not guess a profile, gateway, runtime sid, or session.
+
+The surface is intentionally read-only and does not start, update, or end a
+Live Activity. A delegated event is useful in the open chat and sheet, but is
+not by itself lock-screen-worthy work under Talaria's Live Activity admission
+policy.
