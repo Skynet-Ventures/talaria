@@ -1135,6 +1135,7 @@ extension AppModel {
             clearWatchdog(botID)
             chat.isRunning = false
             finishRunningTools(in: chat, interrupted: payload.status != .complete)
+            LiveActivityController.shared.endAllOperationalWork(botID: botID)
 
         case .errorEvent:
             noteQueuedPromptCompletion(botID: botID, sessionID: event.sessionID)
@@ -1142,6 +1143,7 @@ extension AppModel {
             clearWatchdog(botID)
             chat.isRunning = false
             finishRunningTools(in: chat, interrupted: true)
+            LiveActivityController.shared.endAllOperationalWork(botID: botID)
 
         case .sessionInfo(let info):
             // Authoritative after a resume: the turn may have kept running
@@ -1167,9 +1169,15 @@ extension AppModel {
         case .toolStart(let tool):
             guard !tool.name.isEmpty || !tool.toolID.isEmpty else { return }
             startTool(tool, in: chat, botID: botID)
+            LiveActivityController.shared.beginOperationalWork(
+                botID: botID,
+                operationID: tool.toolID.isEmpty ? "tool:\(tool.name)" : tool.toolID)
 
         case .toolComplete(let tool):
             completeTool(tool, payload: event.payload, in: chat)
+            LiveActivityController.shared.endOperationalWork(
+                botID: botID,
+                operationID: tool.toolID.isEmpty ? "tool:\(tool.name)" : tool.toolID)
 
         default:
             break

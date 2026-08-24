@@ -336,15 +336,15 @@ extension AppModel {
             runtime.reconnectParkedSessionIDs.removeAll()
         }
         let departingGatewayID = runtime.gatewayID
+        let departingPrimaryBots = Set(chats.keys.filter {
+            stateRoute(for: $0)?.gatewayID == departingGatewayID
+                || (GatewayBotRoute(qualifiedID: $0)?.gatewayID == departingGatewayID)
+        })
         if !ConnectionSupervisor.shared.isReconnecting, let departingGatewayID {
-            let primaryBots = Set(chats.keys.filter {
-                stateRoute(for: $0)?.gatewayID == departingGatewayID
-                    || GatewayBotRoute(qualifiedID: $0)?.gatewayID == departingGatewayID
-            })
             ChatRuntime.shared.clearPendingStops(forGatewayID: departingGatewayID)
             ChatRuntime.shared.retirePrimaryMutationState(
-                gatewayID: departingGatewayID, botIDs: primaryBots)
-            reconcileComposeQueueIDs(sources: primaryBots, destination: nil)
+                gatewayID: departingGatewayID, botIDs: departingPrimaryBots)
+            reconcileComposeQueueIDs(sources: departingPrimaryBots, destination: nil)
         }
         runtime.generation += 1
         let transitionGeneration = runtime.generation
@@ -361,6 +361,15 @@ extension AppModel {
         runtime.eventPump?.cancel(); runtime.eventPump = nil
         if let gatewayID = runtime.gatewayID { dropApprovalScope(gatewayID: gatewayID) }
         runtime.resetSessionState()
+        for botID in departingPrimaryBots {
+            if let idx = bots.firstIndex(where: { $0.id == botID }) {
+                bots[idx].task = nil
+                bots[idx].status = .idle
+            }
+            chats[botID]?.isTyping = false
+            chats[botID]?.isRunning = false
+            LiveActivityController.shared.endAllOperationalWork(botID: botID)
+        }
         // Canonical summaries are source-scoped and were dropped above. The
         // next roster/open resolves the exact title registry again.
         CanonicalChatRuntime.shared.resetPrimaryScope(
@@ -641,6 +650,15 @@ extension AppModel {
                 gatewayID: departingGatewayID, botIDs: departingPrimaryBots)
         }
         runtime.resetSessionState()
+        for botID in departingPrimaryBots {
+            if let idx = bots.firstIndex(where: { $0.id == botID }) {
+                bots[idx].task = nil
+                bots[idx].status = .idle
+            }
+            chats[botID]?.isTyping = false
+            chats[botID]?.isRunning = false
+            LiveActivityController.shared.endAllOperationalWork(botID: botID)
+        }
         // Teardown while both the captured source id and its client still
         // exist. Clearing either first makes A2A mistake a deliberate primary
         // disconnect for an unknown-source reset and cancel retained remotes.
@@ -1636,6 +1654,7 @@ extension AppModel {
             chat.usage = payload.usage
             pruneApprovals(sessionID: event.sessionID, sourceGatewayID: sourceGatewayID)
             setWorking(botID, false)
+            LiveActivityController.shared.endAllOperationalWork(botID: botID)
             if let idx = bots.firstIndex(where: { $0.id == botID }) {
                 if !visibleText.isEmpty {
                     bots[idx].preview = Self.previewLine(visibleText)
@@ -1678,6 +1697,8 @@ extension AppModel {
         case .errorEvent(let message):
             if let botID, !message.isEmpty {
                 chat(for: botID).messages.append(ChatMessage(author: .system, text: message))
+                setWorking(botID, false)
+                LiveActivityController.shared.endAllOperationalWork(botID: botID)
             }
 
         case .changed(let what):
@@ -1726,6 +1747,7 @@ extension AppModel {
                         forKey: GatewaySessionRoute(gatewayID: sourceGatewayID, sessionID: sid))
                 }
                 setWorking(owner, false)
+                LiveActivityController.shared.endAllOperationalWork(botID: owner)
             }
 
         default:
