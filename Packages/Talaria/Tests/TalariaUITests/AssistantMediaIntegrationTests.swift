@@ -16,6 +16,8 @@ final class AssistantMediaIntegrationTests: XCTestCase {
         XCTAssertFalse(AssistantMediaPresentationPolicy.loadsAutomatically)
         XCTAssertTrue(AssistantMediaPresentationPolicy.rendersUnavailableWithoutAuthority)
         XCTAssertTrue(AssistantMediaPresentationPolicy.pausesWhenInactive)
+        XCTAssertTrue(AssistantMediaPresentationPolicy.waitingOwnsPlayback)
+        XCTAssertTrue(AssistantMediaPresentationPolicy.observesNativePlayerStatus)
         XCTAssertTrue(AssistantMediaPresentationPolicy.accessibilityAnnouncements)
 
         let local = try XCTUnwrap(AssistantMediaSourcePolicy.admit("/tmp/voice.mp3"))
@@ -55,6 +57,21 @@ final class AssistantMediaIntegrationTests: XCTestCase {
             duration: 60, trackCount: 1, width: 0, height: 1_080))
         XCTAssertFalse(AssistantMediaAVPolicy.admits(
             duration: 60, trackCount: 1, width: 8_192, height: 8_192))
+        XCTAssertFalse(AssistantMediaAVPolicy.admitsVideoTracks(
+            duration: 60, totalTrackCount: 2,
+            dimensions: [CGSize(width: 1_920, height: 1_080),
+                         CGSize(width: 8_192, height: 8_192)]))
+    }
+
+    func testAVMetadataDeadlineReturnsWithoutWaitingForCancelledWorker() async {
+        let start = ContinuousClock.now
+        let admitted = await AppModel.boundedAssistantMediaValidation(
+            deadlineSeconds: 0.01) {
+                do { try await Task.sleep(for: .seconds(30)) } catch {}
+                return true
+            }
+        XCTAssertFalse(admitted)
+        XCTAssertLessThan(start.duration(to: .now), .seconds(1))
     }
 
     func testPlaybackCoordinatorDeactivatesPreviousOwnerAndClearsCurrentOwner() {

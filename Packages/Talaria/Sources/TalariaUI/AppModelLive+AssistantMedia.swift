@@ -9,6 +9,63 @@ final class AssistantMediaRuntime {
     private init() {}
 }
 
+private final class AssistantMediaValidationAttempt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var worker: Task<Void, Never>?
+    private var deadline: DispatchWorkItem?
+    private var result: Bool?
+
+    func install(_ continuation: CheckedContinuation<Bool, Never>) {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(returning: result)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func setWorker(_ worker: Task<Void, Never>) {
+        lock.lock()
+        if result != nil {
+            lock.unlock()
+            worker.cancel()
+            return
+        }
+        self.worker = worker
+        lock.unlock()
+    }
+
+    func setDeadline(_ deadline: DispatchWorkItem) {
+        lock.lock()
+        if result != nil {
+            lock.unlock()
+            deadline.cancel()
+            return
+        }
+        self.deadline = deadline
+        lock.unlock()
+    }
+
+    func finish(_ value: Bool) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
+        let continuation = self.continuation
+        self.continuation = nil
+        let worker = self.worker
+        self.worker = nil
+        let deadline = self.deadline
+        self.deadline = nil
+        lock.unlock()
+        deadline?.cancel()
+        worker?.cancel()
+        continuation?.resume(returning: value)
+    }
+}
+
 @MainActor
 struct AssistantMediaPresentationSource {
     let model: AppModel
@@ -45,7 +102,7 @@ enum AssistantMediaAVPolicy {
     static let maximumTracks = 8
     static let maximumDimension: Double = 8_192
     static let maximumPixels: Double = 40_000_000
-    static let metadataDeadline: Duration = .seconds(5)
+    static let metadataDeadlineSeconds: TimeInterval = 5
 
     static func admits(duration: Double, trackCount: Int,
                        width: Double? = nil, height: Double? = nil) -> Bool {
@@ -56,6 +113,14 @@ enum AssistantMediaAVPolicy {
         return w.isFinite && h.isFinite && w > 0 && h > 0
             && w <= maximumDimension && h <= maximumDimension
             && w <= maximumPixels / h
+    }
+
+    static func admitsVideoTracks(duration: Double, totalTrackCount: Int,
+                                  dimensions: [CGSize]) -> Bool {
+        !dimensions.isEmpty && dimensions.allSatisfy { size in
+            admits(duration: duration, trackCount: totalTrackCount,
+                   width: size.width, height: size.height)
+        }
     }
 }
 
@@ -325,26 +390,43 @@ extension AppModel {
         return matches.count == 1 ? matches[0] : nil
     }
 
-    private static func playableMediaIsValid(
+    nonisolated private static func playableMediaIsValid(
         _ url: URL, kind: AssistantMediaProjection.Kind
     ) async -> Bool {
-        await withTaskGroup(of: Bool.self, returning: Bool.self) { group in
-            group.addTask { await inspectPlayableMedia(url, kind: kind) }
-            group.addTask {
-                do {
-                    try await Task.sleep(for: AssistantMediaAVPolicy.metadataDeadline)
-                } catch {
-                    return false
-                }
-                return false
-            }
-            let result = await group.next() ?? false
-            group.cancelAll()
-            return result
+        await boundedAssistantMediaValidation {
+            await inspectPlayableMedia(url, kind: kind)
         }
     }
 
-    private static func inspectPlayableMedia(
+    nonisolated static func boundedAssistantMediaValidation(
+        deadlineSeconds: TimeInterval = AssistantMediaAVPolicy.metadataDeadlineSeconds,
+        operation: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+        let attempt = AssistantMediaValidationAttempt()
+        let value = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                attempt.install(continuation)
+                guard !Task.isCancelled else {
+                    attempt.finish(false)
+                    return
+                }
+                let deadline = DispatchWorkItem { attempt.finish(false) }
+                attempt.setDeadline(deadline)
+                DispatchQueue.global(qos: .utility).asyncAfter(
+                    deadline: .now() + max(0, deadlineSeconds), execute: deadline)
+                let worker = Task.detached(priority: .utility) {
+                    let result = await operation()
+                    attempt.finish(result)
+                }
+                attempt.setWorker(worker)
+            }
+        } onCancel: {
+            attempt.finish(false)
+        }
+        return !Task.isCancelled && value
+    }
+
+    nonisolated private static func inspectPlayableMedia(
         _ url: URL, kind: AssistantMediaProjection.Kind
     ) async -> Bool {
         let asset = AVURLAsset(url: url)
@@ -358,14 +440,20 @@ extension AppModel {
                     duration: duration, trackCount: allTracks.count)
             case .video:
                 let tracks = try await asset.loadTracks(withMediaType: .video)
-                guard let track = tracks.first else { return false }
-                let size = try await track.load(.naturalSize)
-                let transform = try await track.load(.preferredTransform)
-                let transformed = CGRect(origin: .zero, size: size)
-                    .applying(transform).standardized.size
-                return AssistantMediaAVPolicy.admits(
-                    duration: duration, trackCount: allTracks.count,
-                    width: transformed.width, height: transformed.height)
+                guard !tracks.isEmpty else { return false }
+                var dimensions: [CGSize] = []
+                dimensions.reserveCapacity(tracks.count)
+                for track in tracks {
+                    try Task.checkCancellation()
+                    let size = try await track.load(.naturalSize)
+                    let transform = try await track.load(.preferredTransform)
+                    let transformed = CGRect(origin: .zero, size: size)
+                        .applying(transform).standardized.size
+                    dimensions.append(transformed)
+                }
+                return AssistantMediaAVPolicy.admitsVideoTracks(
+                    duration: duration, totalTrackCount: allTracks.count,
+                    dimensions: dimensions)
             case .image, .file:
                 return false
             }

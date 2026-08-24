@@ -564,6 +564,16 @@ final class GeneratedMediaTests: XCTestCase {
                 XCTFail("malformed managed media must fail")
             } catch {}
         }
+        let bounded = GatewayClient(
+            baseURL: URL(string: "https://gateway.example")!,
+            credential: .sessionToken("secret"))
+        do {
+            _ = try await bounded.assistantManagedFile(
+                path: "/tmp/x", maximumDecodedBytes: .max)
+            XCTFail("an arithmetic-hostile caller limit must fail before request creation")
+        } catch let error as GatewayError {
+            XCTAssertEqual(error.code, -11)
+        }
     }
 
     func testNoRedirectTransportDoesNotReplaySensitiveRequest() async {

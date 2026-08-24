@@ -16,13 +16,15 @@ enum AssistantMediaPresentationPolicy {
     static let loadsAutomatically = false
     static let rendersUnavailableWithoutAuthority = true
     static let pausesWhenInactive = true
+    static let waitingOwnsPlayback = true
+    static let observesNativePlayerStatus = true
     static let accessibilityAnnouncements = true
 }
 
 @MainActor
 final class AssistantMediaPlaybackCoordinator {
     static let shared = AssistantMediaPlaybackCoordinator()
-    private weak var current: AVPlayer?
+    private var current: AVPlayer?
     private var currentID: String?
     private var deactivateCurrent: (() -> Void)?
     var activeIDForTesting: String? { currentID }
@@ -63,6 +65,7 @@ struct AssistantMediaCard: View {
     @State private var state: LoadState = .idle
     @State private var loadTask: Task<Void, Never>?
     @State private var player: AVPlayer?
+    @State private var playerStatusObservation: NSKeyValueObservation?
     @State private var playing = false
     @State private var viewerPresented = false
     @State private var sharedFile: ExportedFile?
@@ -127,7 +130,6 @@ struct AssistantMediaCard: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { pause() }
         }
-        .task(id: playerMonitorIdentity) { await monitorPlayer() }
         .onDisappear { reset() }
         .sheet(item: $sharedFile, onDismiss: cleanupShare) { file in
             #if os(iOS)
@@ -245,7 +247,7 @@ struct AssistantMediaCard: View {
             } else {
                 actionButton("Prepare video", symbol: "play.rectangle") {
                     let next = AVPlayer(url: url)
-                    player = next
+                    installPlayer(next)
                 }
             }
         }
@@ -306,7 +308,7 @@ struct AssistantMediaCard: View {
         case .image(let data, let raster): state = .image(data, raster)
         case .localFile(let url, let kind):
             state = .file(url, kind)
-            if kind == .video { player = AVPlayer(url: url) }
+            if kind == .video { installPlayer(AVPlayer(url: url)) }
         case .externalApprovalRequired(let host): state = .permission(host: host)
         case .unavailable(let message): state = .failure(message)
         }
@@ -314,7 +316,7 @@ struct AssistantMediaCard: View {
 
     private func togglePlayback(_ url: URL) {
         let active = player ?? AVPlayer(url: url)
-        player = active
+        if player == nil { installPlayer(active) }
         if playing {
             active.pause()
             playing = false
@@ -333,28 +335,28 @@ struct AssistantMediaCard: View {
         playing = false
     }
 
-    private var playerMonitorIdentity: String {
-        guard let player else { return "\(source.identity):none" }
-        return "\(source.identity):\(ObjectIdentifier(player).hashValue)"
-    }
-
-    private func monitorPlayer() async {
-        guard let player else { return }
-        while !Task.isCancelled {
-            let isPlaying = player.timeControlStatus == .playing
-            if isPlaying, !playing {
-                AssistantMediaPlaybackCoordinator.shared.activate(
-                    player, id: source.identity, onDeactivated: { playing = false })
-                playing = true
-            } else if !isPlaying, playing {
-                AssistantMediaPlaybackCoordinator.shared.deactivate(
-                    player, id: source.identity)
-                playing = false
-            }
-            do {
-                try await Task.sleep(for: .milliseconds(200))
-            } catch {
-                return
+    private func installPlayer(_ next: AVPlayer) {
+        playerStatusObservation?.invalidate()
+        player = next
+        let identity = source.identity
+        let playing = $playing
+        playerStatusObservation = next.observe(
+            \.timeControlStatus, options: [.initial, .new]) { player, change in
+            guard let status = change.newValue else { return }
+            Task { @MainActor in
+                switch status {
+                case .playing, .waitingToPlayAtSpecifiedRate:
+                    AssistantMediaPlaybackCoordinator.shared.activate(
+                        player, id: identity,
+                        onDeactivated: { playing.wrappedValue = false })
+                    playing.wrappedValue = true
+                case .paused:
+                    AssistantMediaPlaybackCoordinator.shared.deactivate(
+                        player, id: identity)
+                    playing.wrappedValue = false
+                @unknown default:
+                    break
+                }
             }
         }
     }
@@ -387,6 +389,8 @@ struct AssistantMediaCard: View {
 
     private func cleanupLoadedFile() {
         pause()
+        playerStatusObservation?.invalidate()
+        playerStatusObservation = nil
         player = nil
         if case .file(let url, _) = state {
             AppModel.removeOwnedAssistantMedia(url)

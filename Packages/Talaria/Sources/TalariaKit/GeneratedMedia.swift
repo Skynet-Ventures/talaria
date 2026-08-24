@@ -691,7 +691,8 @@ public struct RemoteAssistantMediaPayload: Sendable {
 public extension GatewayClient {
     func assistantManagedFile(path: String, maximumDecodedBytes: Int) async throws
         -> RemoteAssistantMediaPayload {
-        guard maximumDecodedBytes > 0 else {
+        guard maximumDecodedBytes > 0,
+              maximumDecodedBytes <= 100 * 1_024 * 1_024 else {
             throw GatewayError(code: -11, message: "Invalid media response limit.")
         }
         let maximumEncoded = ((maximumDecodedBytes + 2) / 3) * 4
