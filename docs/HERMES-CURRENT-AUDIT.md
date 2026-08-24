@@ -192,6 +192,103 @@ confirmation, keep archive bytes in protected temporary storage, export
 through Files/share sheet, and expose secrets only as boolean risk facts—never
 raw values, previews, toasts, logs, retry state, or persisted model state.
 
+## Targeted learned-memory management audit at `e400e008`
+
+Learned-memory graph/detail/edit/delete and the apparent import/export surfaces
+were audited directly against exact Hermes source
+`e400e0088767a596ee21985d661a924cb087775a`, on serialized Talaria management
+head `6d18411cb654047e1abadb728426cb2762f17de4`. This is distinct from the
+already implemented built-in `MEMORY.md`/`USER.md` enablement, reset controls,
+and external provider settings. The current row-management contract is
+**blocked upstream**, so no phone list/editor/import/export UI or live memory
+mutation is added.
+
+Hermes exposes `GET /api/learning/graph`, `GET /api/learning/node`,
+`PUT /api/learning/node`, and `DELETE /api/learning/node`. REST reads take a
+profile query and mutations take a profile body field, and `_profile_scope`
+rejects an unknown named profile. Responses do not echo the canonical resolved
+profile, client/store generation, graph revision, or row revision, so the
+request scope cannot be revalidated from the result. The parallel gateway RPCs
+`learning.frames/detail/edit/delete` are weaker: they use the gateway process's
+active home and accept no profile at all.
+
+### Positional identity and whole-file mutation
+
+Memory node ids are explicitly `memory:<source>:<global_index>`, where
+`source` selects `MEMORY.md` or `USER.md` and the index is the row's current
+position in the combined graph. Resolution rebuilds the entire card list and
+only checks that the current row at that position still has the requested
+source. If another writer inserts, removes, merges, or reorders a same-source
+entry after the graph/detail read, the old id can edit or delete a different
+memory. There is no content hash, immutable id, file revision, expected value,
+or compare-and-swap precondition.
+
+Memory edit/delete loads every delimiter-separated entry and rewrites the
+whole file. The final rename is atomic for readers, but it does not prevent a
+concurrent agent, curator, CLI, or dashboard writer from being lost. Success
+returns only a prose message—not the affected immutable id, new revision, or a
+postcondition snapshot. Memory deletion is permanent. Learned-skill ids are
+names rather than positions and delete archives them, but detail/edit/archive
+still have no source identity, expected revision, or mutation receipt; name
+resolution and a concurrent file change can race in the same way.
+
+### Bounds and sensitive content
+
+`/api/learning/graph` is a full recursive skill scan plus every memory chunk,
+all derived edges, clusters, and statistics. It has no cursor, page size,
+collection cap, response byte cap, saturation/truncation fact, or snapshot
+revision. Graph labels and memory previews are clipped for presentation, but
+row and edge counts remain unbounded. `/api/learning/node` returns the full
+skill or memory content with no wire/text cap, and the edit model accepts an
+unbounded content string. A client-side limit after receipt cannot prevent
+pathological decode/allocation or prove a complete identity set.
+
+Learned memory is returned as raw user/agent prose with no redaction or
+server-declared sensitive/secret classification. That can be legitimate for a
+local editor, but it is not authority to persist content in phone model state,
+logs, toasts, retry state, or an export artifact. A future mobile surface needs
+protected transient storage and server-side risk facts; it must never infer
+that prose is secret-free.
+
+### Import/export and curator distinction
+
+There is no server learned-memory import or export endpoint at this snapshot.
+Desktop's Star Map share code serializes a visualization, not memory data: it
+drops memory prose, trims labels, quantizes time, synthesizes new positional
+ids on decode, and shows the result locally without writing it to Hermes. It is
+neither a backup nor an import preview and cannot be used as a mutation source.
+
+The existing `/api/curator` pause/run controls operate the background
+**skill** curator and are already represented as an operator-maintenance
+surface. They expose no learned-memory rows, proposed mutation set, revisions,
+or commit token. Running the curator is therefore not a substitute for phone
+memory curation, and no automatic run is added by this slice.
+
+### Required portable contract
+
+Mobile work can resume only after Hermes provides:
+
+- paginated, explicitly wire/row/text-bounded profile snapshots that echo the
+  canonical profile and one stable snapshot revision, with honest saturation;
+- immutable server-generated ids for memory and learned-skill rows, independent
+  of file position or display name, plus per-row revisions/content hashes;
+- bounded detail reads that echo profile/id/revision and classify sensitive
+  content without returning raw secret values in metadata;
+- edit/archive/delete mutations carrying profile, immutable id, and expected
+  revision, returning 409 on conflict and a canonical revisioned postcondition;
+- explicit destructive semantics—archive/restore where possible, permanent
+  delete separately confirmed—and no rewrite-whole-file lost-update window;
+- bounded export bytes with a secret-treatment attestation, and bounded import
+  upload followed by a non-mutating manifest/risk preview plus expiring
+  prepare token and revision-checked commit; and
+- an exact-source change event or manual-refresh contract. Polling an
+  unrevisioned full graph is not a safe freshness strategy.
+
+Talaria can then hold the exact gateway/client/pool-generation/profile-
+lifecycle leases across each await, revalidate profile/id/revision before
+publication and mutation, require an explicit destructive confirmation, and
+purge protected row/export bytes whenever source authority changes.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit
@@ -363,7 +460,7 @@ therefore never inferred as removal.
 | Unknown explicit Project profile | Hermes currently falls back to the launch profile. Talaria revalidates the selected route immediately before writes and fails closed, but Hermes should reject an explicit unknown profile. |
 | Cron per-job reasoning effort | Implemented as an explicitly authorized mobile REST mutation. Talaria decodes and displays the raw field, preserves unknown values on unrelated edits, and sends only canonical/clear values through the exact REST PUT normalizer, which delegates to Hermes' canonical `cron.jobs.update_job` validation. The model tool remains read-only and cannot set this job-owned field. Live certification remains open. |
 | Rich transcript parity | Partial: markdown, tables, code, working avatar, transcript actions, jump-to-bottom, exact-source message-level child creation, and bounded typed tool-history hydration now exist. The mobile generic fallback groups larger runs and discloses status, arguments, result, provenance, and diagnostics without name/prose pairing. Explicit file-edit diffs now hydrate and overlay only by exact tool id, then render as bounded, sanitized, selectable mobile disclosures with +/- counts; live gateway/device proof remains open. Persistent multimodal parts, generated images/lightbox, specialist ANSI/search/math/diagram renderers, per-message TTS, whole-turn timing, the N/M alternative-branch picker, lineage presentation, and tour/activity remain. |
-| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. Profile import/export is also explicitly blocked: Desktop exchanges host paths, export has no bounded credential-free byte receipt/download, and import has no bounded preview/prepare/revision contract. Existing duplicate and whole-backup flows do not supply that authority. |
+| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. Profile import/export is also explicitly blocked: Desktop exchanges host paths, export has no bounded credential-free byte receipt/download, and import has no bounded preview/prepare/revision contract. Existing duplicate and whole-backup flows do not supply that authority. Learned-memory curation/import/export is explicitly blocked by the targeted audit above: memory ids are positional, mutations rewrite whole files without CAS, graph/detail payloads are unpaginated or unbounded, and the Star Map share code is visualization-only. |
 | Git/System depth | Partial: core review and guarded mutations exist. Base/commit/ship context, dirty-worktree recovery, worktree-session integration, usage periods/daily/model/skill detail, and multi-gateway backend update orchestration remain. |
 | Artifact completeness | Exact retained-source discovery is implemented with atomic no-dial snapshots, sequential reads, compacted rows, collision isolation, and explicit bounded/stale/failure state. Retained bodies use the exact captured client only after `/api/files` proves one canonical locked root; root and body responses are wire-bounded, authority is rechecked after awaits, and sign-out purges source-owned bytes. Hermes `session.list` still has no global continuation, transcript offsets remain informational under Talaria's 150-item cap, and gateways returning `locked_root: nil` remain fail-closed. Live certification remains open. |
 
