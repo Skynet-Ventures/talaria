@@ -28,10 +28,65 @@ final class GatewayAuthHTTPAdmissionTests: XCTestCase {
         override func stopLoading() {}
     }
 
+    /// A request that has begun but deliberately never completes. The bounded
+    /// reconnect tests wait for `startLoading` before allowing the auth
+    /// deadline to fire, then prove cancellation reaches URLSession through
+    /// `stopLoading`.
+    private final class HangingURLProtocol: URLProtocol, @unchecked Sendable {
+        nonisolated(unsafe) static var onStart: (() -> Void)?
+        nonisolated(unsafe) static var onStop: (() -> Void)?
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() { Self.onStart?() }
+        override func stopLoading() { Self.onStop?() }
+    }
+
+    private final class LockedCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        func increment() {
+            lock.lock()
+            value += 1
+            lock.unlock()
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    private final class CredentialRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var saved: [GatewayCredential] = []
+
+        func record(_ credential: GatewayCredential) {
+            lock.lock()
+            saved.append(credential)
+            lock.unlock()
+        }
+
+        var credentials: [GatewayCredential] {
+            lock.lock()
+            defer { lock.unlock() }
+            return saved
+        }
+    }
+
+    private enum ReconnectTestError: Error, Sendable {
+        case keychainSaveFailed
+    }
+
     private let baseURL = URL(string: "https://gateway.example")!
 
     override func tearDown() {
         StubURLProtocol.handler = nil
+        HangingURLProtocol.onStart = nil
+        HangingURLProtocol.onStop = nil
         super.tearDown()
     }
 
@@ -42,6 +97,14 @@ final class GatewayAuthHTTPAdmissionTests: XCTestCase {
         configuration.protocolClasses = [StubURLProtocol.self]
         return GatewayAuthClient(baseURL: baseURL,
                                  session: URLSession(configuration: configuration))
+    }
+
+    private func hangingClient(deadline: TimeInterval = 0.25) -> GatewayAuthClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HangingURLProtocol.self]
+        return GatewayAuthClient(
+            baseURL: baseURL, session: URLSession(configuration: configuration),
+            reconnectRequestDeadline: deadline)
     }
 
     private func http(_ request: URLRequest, status: Int,
@@ -252,5 +315,108 @@ final class GatewayAuthHTTPAdmissionTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+    }
+
+    func testHungOAuthRefreshHitsDeadlineAndCancelsURLSessionTask() async {
+        let started = expectation(description: "refresh request started")
+        let stopped = expectation(description: "refresh request cancelled")
+        HangingURLProtocol.onStart = { started.fulfill() }
+        HangingURLProtocol.onStop = { stopped.fulfill() }
+
+        let auth = hangingClient()
+        let tokens = TokenSet(accessToken: "access", refreshToken: "refresh",
+                              expiresAt: 0, provider: "nous", userID: nil)
+        let request = Task { try await auth.refresh(tokens) }
+
+        await fulfillment(of: [started], timeout: 1)
+        switch await request.result {
+        case .success:
+            XCTFail("a hung refresh must time out")
+        case .failure(let error as URLError):
+            XCTAssertEqual(error.code, .timedOut)
+        case .failure(let error):
+            XCTFail("unexpected refresh failure: \(error)")
+        }
+        await fulfillment(of: [stopped], timeout: 1)
+    }
+
+    func testHungWSTicketHitsDeadlineAndCancelsURLSessionTask() async {
+        let started = expectation(description: "ticket request started")
+        let stopped = expectation(description: "ticket request cancelled")
+        HangingURLProtocol.onStart = { started.fulfill() }
+        HangingURLProtocol.onStop = { stopped.fulfill() }
+
+        let auth = hangingClient()
+        let request = Task {
+            try await auth.mintWSTicket(credential: .sessionToken("ticket-secret"))
+        }
+
+        await fulfillment(of: [started], timeout: 1)
+        switch await request.result {
+        case .success:
+            XCTFail("a hung WS-ticket request must time out")
+        case .failure(let error as URLError):
+            XCTAssertEqual(error.code, .timedOut)
+        case .failure(let error):
+            XCTFail("unexpected ticket failure: \(error)")
+        }
+        await fulfillment(of: [stopped], timeout: 1)
+    }
+
+    func testRefreshKeychainSaveFailureStopsBeforeTicketOrCredentialPublication() async {
+        let original = GatewayCredential.oauth(TokenSet(
+            accessToken: "old-access", refreshToken: "old-refresh",
+            expiresAt: 0, provider: "nous", userID: "user"))
+        let refreshed = TokenSet(
+            accessToken: "new-access", refreshToken: "new-refresh",
+            expiresAt: Date().timeIntervalSince1970 + 3_600,
+            provider: "nous", userID: "user")
+        let ticketRequests = LockedCounter()
+        let savedCredentials = CredentialRecorder()
+        let auth = client { request in
+            if request.url?.path.hasSuffix("/auth/native/refresh") == true {
+                let response = JSONValue.object([
+                    "access_token": .string(refreshed.accessToken),
+                    "refresh_token": .string(refreshed.refreshToken),
+                    "expires_at": .number(refreshed.expiresAt),
+                    "provider": .string(refreshed.provider),
+                    "user_id": .string(refreshed.userID!),
+                ])
+                return (self.http(request, status: 200), try JSONEncoder().encode(response))
+            }
+            if request.url?.path.hasSuffix("/api/auth/ws-ticket") == true {
+                ticketRequests.increment()
+                return (self.http(request, status: 503), Data(#"{"error":"must not mint"}"#.utf8))
+            }
+            throw URLError(.badURL)
+        }
+        let keychain = KeychainStore(saveOverrideForTesting: { credential, _ in
+            savedCredentials.record(credential)
+            throw ReconnectTestError.keychainSaveFailed
+        })
+        let client = GatewayClient(
+            baseURL: baseURL, credential: original, keychain: keychain,
+            restExecutor: { request, _ in
+                (Data(), HTTPURLResponse(url: request.url!, statusCode: 500,
+                                         httpVersion: nil, headerFields: nil)!)
+            },
+            authClient: auth)
+
+        do {
+            try await client.connect()
+            XCTFail("a rotated credential must not connect when persistence fails")
+        } catch ReconnectTestError.keychainSaveFailed {
+            // Expected fail-closed persistence boundary.
+        } catch {
+            XCTFail("unexpected connection failure: \(error)")
+        }
+
+        XCTAssertEqual(savedCredentials.credentials, [.oauth(refreshed)])
+        XCTAssertEqual(ticketRequests.count, 0,
+                       "ticket minting would permit a socket with an unadoptable credential")
+        let ownsOriginal = await client.ownsCredential(original)
+        XCTAssertTrue(ownsOriginal)
+        let connected = await client.isConnected
+        XCTAssertFalse(connected)
     }
 }

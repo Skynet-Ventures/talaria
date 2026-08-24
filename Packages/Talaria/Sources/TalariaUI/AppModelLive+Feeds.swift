@@ -467,11 +467,19 @@ public extension AppModel {
     /// Subscribe to the live event stream for the rows events alone can carry:
     /// finished turns, cron changes, produced files, inbound A2A mentions.
     private func subscribe(to client: GatewayClient) {
+        let identity = ObjectIdentifier(client)
         Task { @MainActor in
-            let token = await client.addEventHandler { event in
+            let token = await client.addEpochEventHandler { event, transportEpoch in
                 Task { @MainActor [weak self] in
+                    guard await client.isCurrentReadyTransport(epoch: transportEpoch) else {
+                        return
+                    }
                     self?.journal(event: event, sourceClient: client)
                 }
+            }
+            guard FeedsRuntime.shared.routedClient == identity else {
+                await client.removeEventHandler(token)
+                return
             }
             FeedsRuntime.shared.eventToken = token
         }

@@ -131,13 +131,119 @@ public enum GatewayURL {
 
 // MARK: - Auth API client
 
+/// Owns one reconnect-critical HTTP transaction. `URLRequest.timeoutInterval`
+/// alone is an inactivity timeout, so an endpoint that keeps a connection in a
+/// pending state can otherwise outlive a foreground reconnect attempt. This
+/// wrapper keeps the concrete `URLSessionDataTask` so the absolute deadline
+/// and caller cancellation both retire the underlying request before the
+/// continuation is released.
+private final class GatewayAuthDeadlineRequest: @unchecked Sendable {
+    private typealias ResponseResult = Result<(Data, URLResponse), Error>
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var task: URLSessionDataTask?
+    private var deadlineTask: Task<Void, Never>?
+    /// Retained so cancellation that arrives just before `start` still settles
+    /// the continuation once it has been installed.
+    private var terminalResult: ResponseResult?
+
+    func load(_ request: URLRequest, in session: URLSession,
+              deadline: TimeInterval) async throws -> (Data, URLResponse) {
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                start(request, in: session, deadline: deadline,
+                      continuation: continuation)
+            }
+        } onCancel: {
+            finish(.failure(CancellationError()), cancellingTask: true)
+        }
+    }
+
+    private func start(_ request: URLRequest, in session: URLSession,
+                       deadline: TimeInterval,
+                       continuation: CheckedContinuation<(Data, URLResponse), Error>) {
+        lock.lock()
+        if let terminalResult {
+            lock.unlock()
+            continuation.resume(with: terminalResult)
+            return
+        }
+
+        self.continuation = continuation
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            if let error {
+                self.finish(.failure(error), cancellingTask: false)
+            } else if let data, let response {
+                self.finish(.success((data, response)), cancellingTask: false)
+            } else {
+                self.finish(.failure(URLError(.badServerResponse)), cancellingTask: false)
+            }
+        }
+        self.task = task
+        deadlineTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(deadline))
+                self?.finish(.failure(URLError(.timedOut)), cancellingTask: true)
+            } catch is CancellationError {
+                // The request finished before its absolute deadline.
+            } catch {
+                // `Task.sleep` only throws for cancellation. Keep this branch
+                // explicit so a future implementation cannot strand a request.
+                self?.finish(.failure(error), cancellingTask: true)
+            }
+        }
+        lock.unlock()
+        task.resume()
+    }
+
+    private func finish(_ result: ResponseResult, cancellingTask: Bool) {
+        lock.lock()
+        guard terminalResult == nil else {
+            lock.unlock()
+            return
+        }
+        terminalResult = result
+        let continuation = continuation
+        let task = task
+        let deadlineTask = deadlineTask
+        self.continuation = nil
+        self.task = nil
+        self.deadlineTask = nil
+        lock.unlock()
+
+        if cancellingTask { task?.cancel() }
+        deadlineTask?.cancel()
+        continuation?.resume(with: result)
+    }
+}
+
 public struct GatewayAuthClient: Sendable {
+    /// A foreground reconnect cannot wait for an OAuth endpoint longer than
+    /// this. It matches the other foreground socket establishment bounds.
+    static let reconnectRequestDeadline: TimeInterval = 8
+
     public var baseURL: URL
     private let session: URLSession
+    private let reconnectRequestDeadline: TimeInterval
 
     public init(baseURL: URL, session: URLSession = .shared) {
+        self.init(baseURL: baseURL, session: session,
+                  reconnectRequestDeadline: Self.reconnectRequestDeadline)
+    }
+
+    /// Package-test seam for deterministic deadline coverage. Production uses
+    /// `reconnectRequestDeadline` above; invalid injected values fall back to
+    /// that safe default rather than disabling the reconnect bound.
+    init(baseURL: URL, session: URLSession,
+         reconnectRequestDeadline: TimeInterval) {
         self.baseURL = baseURL
         self.session = session
+        self.reconnectRequestDeadline = reconnectRequestDeadline.isFinite
+            && reconnectRequestDeadline > 0
+            ? reconnectRequestDeadline : Self.reconnectRequestDeadline
     }
 
     public func status() async throws -> GatewayStatus {
@@ -172,7 +278,7 @@ public struct GatewayAuthClient: Sendable {
         var req = URLRequest(url: baseURL.appending(path: "api/auth/ws-ticket"))
         req.httpMethod = "POST"
         apply(credential: credential, to: &req)
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await boundedReconnectData(for: req)
         try Self.admitHTTPResponse(response, data: data, endpoint: "ws-ticket")
         let v: JSONValue
         do {
@@ -198,7 +304,7 @@ public struct GatewayAuthClient: Sendable {
             "refresh_token": .string(tokens.refreshToken),
             "provider": .string(tokens.provider),
         ]))
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await boundedReconnectData(for: req)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         switch code {
         case 200:
@@ -210,6 +316,17 @@ public struct GatewayAuthClient: Sendable {
         default:
             throw AuthError.protocolError("refresh failed with status \(code)")
         }
+    }
+
+    /// Set both URLSession's request timeout and an independent absolute
+    /// deadline. The latter cancels the real data task, so callers return even
+    /// if a peer leaves the HTTP exchange pending without becoming idle.
+    private func boundedReconnectData(for request: URLRequest) async throws
+        -> (Data, URLResponse) {
+        var bounded = request
+        bounded.timeoutInterval = reconnectRequestDeadline
+        return try await GatewayAuthDeadlineRequest().load(
+            bounded, in: session, deadline: reconnectRequestDeadline)
     }
 
     public func me(credential: GatewayCredential) async throws -> JSONValue {

@@ -6,12 +6,26 @@ import Security
 /// passwords never touch UserDefaults, files, or logs.
 public struct KeychainStore: Sendable {
     public var service: String
+    /// Focused package-test seam. Production always leaves this nil and uses
+    /// the Security framework path below.
+    private let saveOverrideForTesting:
+        (@Sendable (GatewayCredential, URL) throws -> Void)?
 
     public init(service: String = "wtf.talaria.gateway-credentials") {
         self.service = service
+        saveOverrideForTesting = nil
+    }
+
+    init(service: String = "wtf.talaria.gateway-credentials",
+         saveOverrideForTesting: @escaping @Sendable (GatewayCredential, URL) throws -> Void) {
+        self.service = service
+        self.saveOverrideForTesting = saveOverrideForTesting
     }
 
     public func save(_ credential: GatewayCredential, for baseURL: URL) throws {
+        if let saveOverrideForTesting {
+            return try saveOverrideForTesting(credential, baseURL)
+        }
         let data = try JSONEncoder().encode(credential)
         let account = Self.account(for: baseURL)
         let query: [String: Any] = [

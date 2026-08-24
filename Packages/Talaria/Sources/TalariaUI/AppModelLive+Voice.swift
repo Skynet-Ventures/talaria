@@ -413,8 +413,11 @@ extension AppModel {
             await oldClient.removeEventHandler(oldID)
         }
         guard runtime.routerFence.accepts(generation: generation, gatewayID: gatewayID) else { return }
-        let id = await target.addEventHandler { event in
+        let id = await target.addEpochEventHandler { event, transportEpoch in
             Task { @MainActor in
+                guard await target.isCurrentReadyTransport(epoch: transportEpoch) else {
+                    return
+                }
                 VoiceRuntime.shared.handle(event, gatewayID: gatewayID, generation: generation)
             }
         }

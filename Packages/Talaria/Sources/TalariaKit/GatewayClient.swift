@@ -699,6 +699,12 @@ public actor GatewayClient {
     /// deliberately reuses this client actor, so object identity alone cannot
     /// distinguish buffered delivery from a superseded socket.
     private var transportEpoch: UInt64 = 0
+    /// Delivery authority changes both when a transport is revoked and when
+    /// its source transaction is published. That second edge distinguishes a
+    /// frame already queued in a UI actor before adoption from a frame emitted
+    /// after the exact same socket became authoritative.
+    private var eventAuthorityEpoch: UInt64 = 0
+    private var adoptedEventAuthorityEpoch: UInt64?
 
     public init(baseURL: URL, credential: GatewayCredential,
                 keychain: KeychainStore = KeychainStore()) {
@@ -728,9 +734,10 @@ public actor GatewayClient {
     init(baseURL: URL, credential: GatewayCredential,
          keychain: KeychainStore = KeychainStore(),
          restExecutor: @escaping RESTExecutor,
-         noRedirectRESTExecutor: RESTExecutor? = nil) {
+         noRedirectRESTExecutor: RESTExecutor? = nil,
+         authClient: GatewayAuthClient? = nil) {
         self.baseURL = baseURL
-        self.auth = GatewayAuthClient(baseURL: baseURL)
+        self.auth = authClient ?? GatewayAuthClient(baseURL: baseURL)
         self.credential = credential
         self.keychain = keychain
         self.restExecutor = restExecutor
@@ -745,8 +752,8 @@ public actor GatewayClient {
         return id
     }
 
-    /// Event delivery carrying the exact transport attempt that received it.
-    /// Consumers that publish link health must pair this with
+    /// Event delivery carrying the exact transport/source publication
+    /// authority that emitted it. Consumers must pair this with
     /// `isCurrentReadyTransport(epoch:)` after crossing their actor boundary.
     public func addEpochEventHandler(
         _ handler: @escaping @Sendable (GatewayEvent, UInt64) -> Void
@@ -763,9 +770,27 @@ public actor GatewayClient {
 
     /// Deterministic package-test seam for event/snapshot ordering. Production
     /// delivery still comes exclusively from the transport event task.
-    func emitEventForTesting(_ event: GatewayEvent) {
+    func emitEventForTesting(
+        _ event: GatewayEvent, eventAuthorityEpoch epoch: UInt64? = nil
+    ) {
+        let epoch = epoch ?? eventAuthorityEpoch
         for handler in handlerSnapshot() { handler(event) }
-        for handler in epochHandlerSnapshot() { handler(event, transportEpoch) }
+        for handler in epochHandlerSnapshot() { handler(event, epoch) }
+    }
+
+    /// Deterministic package-test seam for a reconnect that installs a new
+    /// transport without opening a real socket. Tests retain the prior value
+    /// and can then deliver a genuinely retired-epoch frame to every UI pump.
+    func advanceTransportEpochForTesting() -> UInt64 {
+        let retired = eventAuthorityEpoch
+        adoptedEventAuthorityEpoch = nil
+        transportEpoch &+= 1
+        eventAuthorityEpoch &+= 1
+        return retired
+    }
+
+    func eventAuthorityEpochForTesting() -> UInt64 {
+        eventAuthorityEpoch
     }
 
     /// Install or clear the deterministic RPC seam used by package tests.
@@ -808,12 +833,35 @@ public actor GatewayClient {
         }
     }
 
-    /// True only while `epoch` still names the installed ready transport.
+    /// Publish the installed transport after the owning source transaction has
+    /// been validated and adopted. Test readiness seams model a ready socket
+    /// without network traffic and intentionally follow the same publication.
+    @discardableResult
+    public func publishCurrentTransportForEvents() async -> Bool {
+        let ready: Bool
+        if let foregroundReadinessForTesting {
+            ready = foregroundReadinessForTesting
+        } else if let transport {
+            ready = await transport.state == .ready
+        } else {
+            ready = false
+        }
+        guard ready else {
+            adoptedEventAuthorityEpoch = nil
+            return false
+        }
+        eventAuthorityEpoch &+= 1
+        adoptedEventAuthorityEpoch = eventAuthorityEpoch
+        return true
+    }
+
+    /// True only while `epoch` still names the adopted, installed, ready
+    /// transport.
     /// This closes the reconnect race where an event already buffered by the
     /// prior socket reaches a UI actor after the same GatewayClient has dialed
     /// (or failed to dial) a replacement.
     public func isCurrentReadyTransport(epoch: UInt64) async -> Bool {
-        guard epoch == transportEpoch else { return false }
+        guard epoch == adoptedEventAuthorityEpoch else { return false }
         if let foregroundReadinessForTesting {
             return foregroundReadinessForTesting
         }
@@ -870,11 +918,16 @@ public actor GatewayClient {
     /// Connect (or reconnect). Refreshes OAuth tokens when near expiry and
     /// mints a fresh single-use WS ticket per attempt.
     public func connect() async throws {
+        // Revoke UI delivery before any refresh or ticket request can suspend.
+        // A reconnect attempt has claimed this client; frames from the prior
+        // socket are no longer authoritative even if preflight later fails.
+        adoptedEventAuthorityEpoch = nil
+        eventAuthorityEpoch &+= 1
+
         if case .oauth(let tokens) = credential, tokens.needsRefresh {
             do {
                 let refreshed = try await auth.refresh(tokens)
-                credential = .oauth(refreshed)
-                try? keychain.save(credential, for: baseURL)
+                try persistAndPublishCredential(.oauth(refreshed))
             } catch AuthError.sessionExpired {
                 keychain.delete(for: baseURL)
                 throw AuthError.sessionExpired
@@ -919,14 +972,31 @@ public actor GatewayClient {
 
         eventsTask = Task {
             for await event in transport.events {
+                // A cancelled old pump may already hold a frame while the
+                // actor installs a successor. Never tag it with the new
+                // authority merely because it resumes after that transition.
+                guard installedEpoch == self.transportEpoch,
+                      self.transport === transport else { return }
+                let deliveryEpoch = self.eventAuthorityEpoch
                 for handler in self.handlerSnapshot() {
                     handler(event)
                 }
                 for handler in self.epochHandlerSnapshot() {
-                    handler(event, installedEpoch)
+                    handler(event, deliveryEpoch)
                 }
             }
         }
+    }
+
+    /// A gateway refresh token is rotating and single-use. Persist its
+    /// replacement before exposing it through this actor or minting a socket
+    /// ticket. `KeychainStore.save` is synchronous and this actor cannot
+    /// interleave across it, so a save failure leaves both the old credential
+    /// and transport untouched; no live socket can be connected with a token
+    /// that the reconnect authority cannot subsequently adopt.
+    private func persistAndPublishCredential(_ replacement: GatewayCredential) throws {
+        try keychain.save(replacement, for: baseURL)
+        credential = replacement
     }
 
     private func handlerSnapshot() -> [@Sendable (GatewayEvent) -> Void] {
@@ -939,6 +1009,8 @@ public actor GatewayClient {
     }
 
     public func disconnect() async {
+        adoptedEventAuthorityEpoch = nil
+        eventAuthorityEpoch &+= 1
         await transport?.close()
         transport = nil
         eventsTask?.cancel()

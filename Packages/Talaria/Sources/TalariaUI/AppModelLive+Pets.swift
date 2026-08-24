@@ -402,15 +402,28 @@ extension AppModel {
         runtime.attachedGatewayID = gatewayID
         // One AsyncStream so MainActor delivery preserves wire order: a draft
         // must never land before the token-only event that keys it.
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: GatewayEpochEventDelivery.self)
         runtime.routerTask = Task { @MainActor [weak self] in
-            for await event in stream {
-                self?.routePetEvent(event, sourceGatewayID: gatewayID)
+            for await delivery in stream {
+                guard PetRuntime.shared.attachedClient === client,
+                      PetRuntime.shared.attachedGatewayID == gatewayID,
+                      await client.isCurrentReadyTransport(
+                        epoch: delivery.transportEpoch) else { continue }
+                self?.routePetEvent(delivery.event, sourceGatewayID: gatewayID)
             }
         }
-        Task {
-            let id = await client.addEventHandler { continuation.yield($0) }
-            await MainActor.run { PetRuntime.shared.handlerID = id }
+        Task { @MainActor in
+            let id = await client.addEpochEventHandler { event, transportEpoch in
+                continuation.yield(GatewayEpochEventDelivery(
+                    event: event, transportEpoch: transportEpoch))
+            }
+            guard PetRuntime.shared.attachedClient === client,
+                  PetRuntime.shared.attachedGatewayID == gatewayID else {
+                await client.removeEventHandler(id)
+                return
+            }
+            PetRuntime.shared.handlerID = id
         }
     }
 

@@ -137,8 +137,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
         supervisor.postBootRecovery = PostBootReconnectRecovery(
             gatewayID: fixture.gateway.id, baseURL: fixture.baseURL, elapsed: 100)
         var continuation: CheckedContinuation<Void, Never>?
-        supervisor.dial = { _ in
+        supervisor.dial = { client in
             await withCheckedContinuation { continuation = $0 }
+            await client.setForegroundReadinessForTesting(true)
         }
 
         fixture.model.reconnectNow()
@@ -370,7 +371,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
         let fixture = try fixture()
         defer { cleanup(fixture) }
         let originalGeneration = LiveRuntime.shared.generation
-        ConnectionSupervisor.shared.dial = { _ in }
+        ConnectionSupervisor.shared.dial = { client in
+            await client.setForegroundReadinessForTesting(true)
+        }
 
         let outcome = await fixture.model.attemptReconnectOutcome()
 
@@ -396,6 +399,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         ConnectionSupervisor.shared.dial = { client in
             await client.replaceCredentialForTesting(refreshed)
             fixture.registry.setCredentialForTesting(refreshed, for: fixture.gateway)
+            await client.setForegroundReadinessForTesting(true)
         }
 
         let outcome = await fixture.model.attemptReconnectOutcome()
@@ -478,7 +482,10 @@ final class SupervisedReconnectParityTests: XCTestCase {
         ) {
             try await fixture.model.connectGateway(
                 baseURL: targetCURL, credential: credential,
-                connectionOperation: { client in winningClient = client },
+                connectionOperation: { client in
+                    winningClient = client
+                    await client.setForegroundReadinessForTesting(true)
+                },
                 adoptionOperations: operations)
         }
         switchContinuation?.resume()

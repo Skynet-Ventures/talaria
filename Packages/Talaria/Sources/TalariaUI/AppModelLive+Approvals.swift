@@ -215,14 +215,22 @@ extension AppModel {
         // Same funnel AppModelLive uses for its main pump: events leave the
         // client actor through one AsyncStream so MainActor delivery preserves
         // wire order — an `.expire` must never land before its `.request`.
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: GatewayEpochEventDelivery.self)
         bridges.pump = Task { @MainActor [weak self] in
-            for await event in stream {
-                self?.handleBridgeEvent(event, sourceGatewayID: gatewayID)
+            for await delivery in stream {
+                guard bridges.attachedClient === client,
+                      bridges.attachedGatewayID == gatewayID,
+                      await client.isCurrentReadyTransport(
+                        epoch: delivery.transportEpoch) else { continue }
+                self?.handleBridgeEvent(delivery.event, sourceGatewayID: gatewayID)
             }
         }
         Task { @MainActor in
-            let handlerID = await client.addEventHandler { continuation.yield($0) }
+            let handlerID = await client.addEpochEventHandler { event, transportEpoch in
+                continuation.yield(GatewayEpochEventDelivery(
+                    event: event, transportEpoch: transportEpoch))
+            }
             if bridges.attachedClient === client, bridges.attachedGatewayID == gatewayID {
                 bridges.handlerID = handlerID
             } else {

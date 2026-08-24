@@ -674,6 +674,11 @@ extension AppModel {
         let adoptedGeneration = runtime.generation
         OperatorSettingsRuntime.shared.completeReconnectAttempt()
         runtime.resetSessionState()
+        guard await authority.client.publishCurrentTransportForEvents() else {
+            isOffline = true
+            ConnectionRegistry.shared.noteState(.offline, forURL: authority.baseURL)
+            return false
+        }
         // Pending approvals replay through session.resume below; keeping the
         // old cards would let the user answer request ids that no longer exist.
         approvals.removeAll { GatewayBotRoute(qualifiedID: $0.botID) == nil }

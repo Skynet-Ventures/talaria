@@ -934,17 +934,24 @@ extension AppModel {
 
         // Same funnel AppModelLive uses: events fan out on the client's actor,
         // one AsyncStream hands them to MainActor in wire order.
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: GatewayEpochEventDelivery.self)
         state.routerPump = Task { @MainActor [weak self] in
-            for await event in stream {
-                await self?.handleMCPSetupWireEvent(event, sourceGatewayID: gatewayID,
+            for await delivery in stream {
+                guard state.routerOwner == owner,
+                      state.routerGatewayID == gatewayID,
+                      state.routerClient === client,
+                      await client.isCurrentReadyTransport(
+                        epoch: delivery.transportEpoch) else { continue }
+                await self?.handleMCPSetupWireEvent(delivery.event, sourceGatewayID: gatewayID,
                                                     sourceClient: client)
             }
         }
         Task { @MainActor in
-            let handlerID = await client.addEventHandler { event in
+            let handlerID = await client.addEpochEventHandler { event, transportEpoch in
                 guard event.type.hasPrefix("mcp.setup.") else { return }
-                continuation.yield(event)
+                continuation.yield(GatewayEpochEventDelivery(
+                    event: event, transportEpoch: transportEpoch))
             }
             guard state.routerOwner == owner, state.routerGatewayID == gatewayID,
                   state.routerClient.map(ObjectIdentifier.init) == owner else {

@@ -1,7 +1,14 @@
 import Foundation
 import TalariaKit
 
-private struct PrimaryGatewayEventDelivery: Sendable {
+/// An event tagged with the exact GatewayClient transport that received it.
+///
+/// The UI has several focused event pumps in addition to the primary one. A
+/// GatewayClient survives a reconnect, so an object-identity check alone
+/// cannot distinguish an event buffered by the retired socket from a new
+/// transport's event. Every consumer must validate `transportEpoch` at its
+/// MainActor boundary before it mutates UI state.
+struct GatewayEpochEventDelivery: Sendable {
     let event: GatewayEvent
     let transportEpoch: UInt64
 }
@@ -410,9 +417,9 @@ extension AppModel {
         // one AsyncStream so MainActor delivery preserves wire order (deltas
         // arrive in ~30 fps bursts and must append in order).
         let (stream, continuation) = AsyncStream.makeStream(
-            of: PrimaryGatewayEventDelivery.self)
+            of: GatewayEpochEventDelivery.self)
         _ = await client.addEpochEventHandler { event, transportEpoch in
-            continuation.yield(PrimaryGatewayEventDelivery(
+            continuation.yield(GatewayEpochEventDelivery(
                 event: event, transportEpoch: transportEpoch))
         }
         guard isCurrentConnectionAttempt(authority), !Task.isCancelled else {
@@ -426,8 +433,10 @@ extension AppModel {
                 // The client actor survives reconnect, so identity alone is
                 // insufficient: reject a buffered event from an old transport
                 // or one whose replacement dial has already failed.
+                guard self.client === client else { continue }
                 let transportIsCurrentAndReady = await client.isCurrentReadyTransport(
                     epoch: delivery.transportEpoch)
+                guard transportIsCurrentAndReady else { continue }
                 self.noteCurrentPrimaryInboundActivity(
                     from: client,
                     transportIsCurrentAndReady: transportIsCurrentAndReady)
@@ -550,6 +559,13 @@ extension AppModel {
 
         // Source, credential and pooled-client authority are all installed now.
         // Signal before profiles.list or any other ancillary refresh can fail.
+        guard await client.publishCurrentTransportForEvents() else {
+            _ = await registry.clientPool.disconnectIfCurrent(
+                poolSnapshot, for: savedGateway.id)
+            throw GatewayError(
+                code: -3,
+                message: "connected gateway transport was not ready for adoption")
+        }
         retryExactStoredSessionNavigation()
         registry.noteState(.connected, forURL: baseURL)
 
