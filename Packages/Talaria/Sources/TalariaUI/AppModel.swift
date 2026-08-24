@@ -17,12 +17,24 @@ public enum AppMode: Sendable, Equatable {
 @MainActor
 @Observable
 public final class ChatState {
+    /// Ephemeral identity for this exact in-memory chat. It is intentionally
+    /// not persisted or sent over the wire; response alternatives are scoped
+    /// to this object rather than a reused profile id.
+    public let chatIdentity: UUID
     public var messages: [ChatMessage]
     public var isTyping: Bool = false
     /// Runtime session id (live mode).
-    public var sessionID: String?
+    public var sessionID: String? {
+        didSet {
+            if oldValue != sessionID { clearAssistantResponseAlternatives() }
+        }
+    }
     /// Durable session key for resume-after-reconnect.
-    public var storedSessionID: String?
+    public var storedSessionID: String? {
+        didSet {
+            if oldValue != storedSessionID { clearAssistantResponseAlternatives() }
+        }
+    }
     public var usage: Usage?
     public var yolo: Bool = false
     /// Session reasoning effort ("" = gateway default).
@@ -39,8 +51,46 @@ public final class ChatState {
     /// Live context-window breakdown (session.context_breakdown).
     public var contextSegments: [ContextSegment] = []
 
-    public init(messages: [ChatMessage] = []) {
+    /// Current-ChatState only. This shelf never participates in Codable
+    /// transcript storage or session-tree/branch persistence.
+    public var assistantResponseAlternatives = AssistantResponseAlternatives()
+    public var assistantResponseBinding: AssistantResponseAlternativesBinding?
+
+    public init(messages: [ChatMessage] = [], chatIdentity: UUID = UUID()) {
+        self.chatIdentity = chatIdentity
         self.messages = messages
+    }
+
+    public func clearAssistantResponseAlternatives() {
+        assistantResponseAlternatives = AssistantResponseAlternatives()
+        assistantResponseBinding = nil
+        ChatRuntime.shared.clearAssistantResponseAlternativeStages(
+            chatID: ObjectIdentifier(self))
+    }
+
+    public var isShowingArchivedResponseAlternative: Bool {
+        assistantResponseAlternatives.isShowingArchived
+    }
+
+    public func displayedMessages() -> [ChatMessage] {
+        AssistantResponseAlternativesPolicy.displayedMessages(
+            current: messages, state: assistantResponseAlternatives,
+            binding: assistantResponseBinding)
+    }
+
+    public func selectPreviousAssistantResponse() {
+        assistantResponseAlternatives = AssistantResponseAlternativesPolicy.previous(
+            in: assistantResponseAlternatives)
+    }
+
+    public func selectNextAssistantResponse() {
+        assistantResponseAlternatives = AssistantResponseAlternativesPolicy.next(
+            in: assistantResponseAlternatives)
+    }
+
+    public func resetAssistantResponseSelection() {
+        assistantResponseAlternatives = AssistantResponseAlternativesPolicy.resetSelection(
+            in: assistantResponseAlternatives)
     }
 }
 
@@ -664,6 +714,7 @@ public final class AppModel {
     public func send(text: String, to botID: String) -> Bool {
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         let chat = chat(for: botID)
+        chat.resetAssistantResponseSelection()
         if isOffline && GatewayBotRoute(qualifiedID: botID) == nil {
             // Normal Send keeps the existing optimistic recovery semantics.
             // Only the explicit Queue affordance is bubble-free; an ordinary

@@ -137,6 +137,17 @@ public struct ChatView: View {
     private var botColor: Color { theme.color(for: bot.hue) }
     private var chat: ChatState? { model.chats[botID] }
     private var messages: [ChatMessage] { chat?.messages ?? [] }
+    /// The canonical transcript remains the source for runtime actions. This
+    /// projection is presentation/find-only and may substitute one selected
+    /// local response snapshot in place.
+    private var transcriptMessages: [ChatMessage] { chat?.displayedMessages() ?? [] }
+    private var responseAlternativeSelectionKey: String {
+        guard let chat else { return "none" }
+        let group = chat.assistantResponseAlternatives.selectedGroupID?.uuidString ?? "none"
+        let index = chat.assistantResponseAlternatives.selectedAlternativeIndex
+            .map(String.init) ?? "newest"
+        return "\(group)|\(index)|\(chat.isShowingArchivedResponseAlternative)"
+    }
     private var pendingSlashPrefill: SlashPrefillBinding? {
         guard let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID) else { return nil }
         return CommandsRuntime.shared.slashPrefills[route]
@@ -183,6 +194,7 @@ public struct ChatView: View {
 
     private func generatedImageSource(for message: ChatMessage)
         -> GeneratedImagePresentationSource? {
+        guard !isArchivedMessage(message) else { return nil }
         guard let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID),
               let chat, let stored = chat.storedSessionID, !stored.isEmpty else { return nil }
         return GeneratedImagePresentationSource(
@@ -196,6 +208,11 @@ public struct ChatView: View {
         visibleText: String,
         reference: AssistantMediaProjection.Reference
     ) -> AssistantMediaPresentationSource? {
+        guard !(chat?.isShowingArchivedResponseAlternative == true
+                && chat?.assistantResponseAlternatives.isShowingArchived == true
+                && AssistantResponseAlternativesPolicy.isArchived(
+                    message, in: chat?.assistantResponseAlternatives
+                        ?? AssistantResponseAlternatives())) else { return nil }
         guard let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID),
               let chat, let stored = chat.storedSessionID, !stored.isEmpty else { return nil }
         return AssistantMediaPresentationSource(
@@ -255,6 +272,13 @@ public struct ChatView: View {
         .onChange(of: messages) { transcriptFindMessageGeneration &+= 1 }
         .onChange(of: botID) { closeTranscriptFind() }
         .onChange(of: transcriptFindSource) { closeTranscriptFind() }
+        .onChange(of: responseAlternativeSelectionKey) {
+            transcriptFindMessageGeneration &+= 1
+            transcriptFindIndex = TranscriptFindIndex()
+            transcriptFindIndexMessageGeneration = -1
+            transcriptFindResult = TranscriptFindResult()
+            transcriptFindResultMessageGeneration = -1
+        }
         .onChange(of: transcriptFindAccessibilityStatus) { announceTranscriptFindStatus() }
         .onChange(of: transcriptFindOwnsScroll) {
             guard transcriptFindOwnsScroll else { return }
@@ -274,7 +298,7 @@ public struct ChatView: View {
             } catch { return }
             let generation = transcriptFindMessageGeneration
             let source = transcriptFindSource
-            let snapshot = messages
+            let snapshot = transcriptMessages
             let worker = Task.detached(priority: .utility) {
                 try TranscriptFindPolicy.makeIndex(messages: snapshot)
             }
@@ -659,11 +683,11 @@ public struct ChatView: View {
     }
 
     private var transcriptFindIndexKey: String {
-        "\(transcriptFindPresented)|\(transcriptFindSource)|\(transcriptFindMessageGeneration)"
+        "\(transcriptFindPresented)|\(transcriptFindSource)|\(responseAlternativeSelectionKey)|\(transcriptFindMessageGeneration)"
     }
 
     private var transcriptFindSearchKey: String {
-        "\(transcriptFindPresented)|\(transcriptFindQuery)|\(transcriptFindIndexRevision)|\(transcriptFindIndexMessageGeneration)|\(transcriptFindSource)"
+        "\(transcriptFindPresented)|\(transcriptFindQuery)|\(transcriptFindIndexRevision)|\(transcriptFindIndexMessageGeneration)|\(transcriptFindSource)|\(responseAlternativeSelectionKey)"
     }
 
     private var transcriptFindQueryBinding: Binding<String> {
@@ -705,7 +729,7 @@ public struct ChatView: View {
 
     private var activeTranscriptFindMessageID: UUID? {
         guard let selection = activeTranscriptFindSelection else { return nil }
-        return messages.first(where: selection.address.identifies)?.id
+        return transcriptMessages.first(where: selection.address.identifies)?.id
     }
 
     private var activeTranscriptFindKey: String {
@@ -929,7 +953,8 @@ public struct ChatView: View {
     }
 
     @ViewBuilder private var transcriptRows: some View {
-        ForEach(messages) { message in
+        assistantResponseControls
+        ForEach(transcriptMessages) { message in
             messageRow(message)
                 .id(message.id.uuidString)
         }
@@ -948,6 +973,54 @@ public struct ChatView: View {
                         value: frame.minY)
                 }
             )
+    }
+
+    @ViewBuilder private var assistantResponseControls: some View {
+        if let chat,
+           let position = AssistantResponseAlternativesPolicy.responsePosition(
+               in: chat.assistantResponseAlternatives) {
+            let previousDisabled = position.current <= 1
+            let nextDisabled = position.current >= position.total
+            HStack(spacing: 4) {
+                Button { chat.selectPreviousAssistantResponse() } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(minWidth: TranscriptFindPolicy.minimumInteractiveDimension,
+                               minHeight: TranscriptFindPolicy.minimumInteractiveDimension)
+                }
+                .buttonStyle(.plain)
+                .disabled(previousDisabled)
+                .accessibilityLabel(Text("Previous response"))
+                Text("Response \(position.current) of \(position.total)")
+                    .font(theme.id == .control ? theme.mono(10, weight: .semibold)
+                          : theme.body(12, weight: .semibold))
+                    .foregroundStyle(theme.sub)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel(Text("Response \(position.current) of \(position.total)"))
+                Button { chat.selectNextAssistantResponse() } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(minWidth: TranscriptFindPolicy.minimumInteractiveDimension,
+                               minHeight: TranscriptFindPolicy.minimumInteractiveDimension)
+                }
+                .buttonStyle(.plain)
+                .disabled(nextDisabled)
+                .accessibilityLabel(Text("Next response"))
+            }
+            .foregroundStyle(theme.accent)
+            .padding(.horizontal, 4)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .opacity(chat.isShowingArchivedResponseAlternative ? 0.94 : 1)
+            .animation(TalariaMotionTokens.opacityAnimation(.fast,
+                                                              reducedMotion: reducedMotion),
+                       value: chat.isShowingArchivedResponseAlternative)
+            if chat.isShowingArchivedResponseAlternative {
+                Text("Local snapshot · current model context remains newest")
+                    .font(theme.id == .control ? theme.mono(9) : theme.body(11))
+                    .foregroundStyle(theme.faint)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .accessibilityLabel(Text(
+                        "Local snapshot. Current model context remains newest."))
+            }
+        }
     }
 
     private func refreshFollowingLatest() {
@@ -1004,6 +1077,12 @@ public struct ChatView: View {
         return selection
     }
 
+    private func isArchivedMessage(_ message: ChatMessage) -> Bool {
+        guard let chat else { return false }
+        return AssistantResponseAlternativesPolicy.isArchived(
+            message, in: chat.assistantResponseAlternatives)
+    }
+
     // MARK: System rows
 
     private func systemRow(_ message: ChatMessage) -> some View {
@@ -1056,7 +1135,8 @@ public struct ChatView: View {
     // MARK: Bot rows
 
     private func botRow(_ message: ChatMessage) -> some View {
-        HStack(spacing: 0) {
+        let archived = isArchivedMessage(message)
+        return HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 if theme.id == .ink {
                     Text(verbatim: "\(TalariaVoice.plainUpper(for: bot)) · \(message.time ?? "now")")
@@ -1092,30 +1172,39 @@ public struct ChatView: View {
                 if !visibleToolCalls.isEmpty {
                     ToolCallList(calls: visibleToolCalls, theme: theme, copy: copy,
                                  accent: botColor,
-                                 generatedImageSource: generatedImageSource(for: message))
+                                 generatedImageSource: archived ? nil
+                                     : generatedImageSource(for: message))
                         .padding(.top, mediaProjection.runs.isEmpty ? 0 : 7)
                         .padding(.leading, theme.id == .ink ? 12 : 0)
                 }
                 if let card = message.card {
-                    cardView(card)
-                        .padding(.top, 8)
-                        .padding(.leading, theme.id == .ink ? 14 : 0)
+                    if archived {
+                        Text("Archived response card")
+                            .font(theme.body(11))
+                            .foregroundStyle(theme.faint)
+                            .padding(.top, 8)
+                            .padding(.leading, theme.id == .ink ? 14 : 0)
+                    } else {
+                        cardView(card)
+                            .padding(.top, 8)
+                            .padding(.leading, theme.id == .ink ? 14 : 0)
+                    }
                 }
                 if let failure = message.failure {
                     FailedTurnCard(
                         failure: failure,
                         theme: theme,
-                        canRetry: model.canRetryFailedTurn(message, in: botID),
-                        canDismiss: model.canDismissFailedTurn(message, in: botID),
-                        retry: { model.retryFailedTurn(message, in: botID) },
-                        dismiss: { model.dismissFailedTurn(message, in: botID) },
+                        canRetry: !archived && model.canRetryFailedTurn(message, in: botID),
+                        canDismiss: !archived && model.canDismissFailedTurn(message, in: botID),
+                        retry: { if !archived { model.retryFailedTurn(message, in: botID) } },
+                        dismiss: { if !archived { model.dismissFailedTurn(message, in: botID) } },
                         openSettings: { model.requestSettings() },
                         sendDiagnostics: diagnosticsAction(for: message)
                     )
                     .padding(.top, 8)
                     .padding(.leading, theme.id == .ink ? 12 : 0)
                 }
-                if let emoji = model.reaction(for: message) {
+                if !archived, let emoji = model.reaction(for: message) {
                     reactionBadge(emoji)
                         .padding(.top, 4)
                         .padding(.leading, theme.id == .ink ? 12 : 10)
@@ -1175,6 +1264,7 @@ public struct ChatView: View {
     }
 
     private func diagnosticsAction(for message: ChatMessage) -> (() -> Void)? {
+        guard !isArchivedMessage(message) else { return nil }
         guard model.canPreparePrivateDiagnosticsShare(for: message, in: botID) else {
             return nil
         }
@@ -1230,7 +1320,9 @@ public struct ChatView: View {
         } label: {
             Label(copy.copyMessage(theme.id), systemImage: "doc.on.doc")
         }
-        if message.author == .user, model.canActOnTranscript(message, in: botID) {
+        let archived = isArchivedMessage(message)
+            || chat?.isShowingArchivedResponseAlternative == true
+        if !archived, message.author == .user, model.canActOnTranscript(message, in: botID) {
             Button {
                 editingMessage = message
                 draft = message.text
@@ -1247,7 +1339,7 @@ public struct ChatView: View {
         // Failed turns own a classifier-gated plain Retry on their card.
         // Never leak the ordinary destructive Regenerate action around that
         // verdict through the long-press menu.
-        if message.author == .bot,
+        if !archived, message.author == .bot,
            FailedTurnCardPolicy.allowsOrdinaryAssistantActions(for: message.failure),
            model.canActOnTranscript(message, in: botID) {
             Button {
@@ -1256,7 +1348,7 @@ public struct ChatView: View {
                 Label(copy.regenerateMessage(theme.id), systemImage: "arrow.clockwise")
             }
         }
-        if message.author == .bot,
+        if !archived, message.author == .bot,
            FailedTurnCardPolicy.allowsOrdinaryAssistantActions(for: message.failure),
            model.canBranchFromMessage(message, in: botID) {
             Button {
@@ -1265,7 +1357,7 @@ public struct ChatView: View {
                 Label("Branch from here", systemImage: "arrow.triangle.branch")
             }
         }
-        if model.canReact(to: message, in: botID) {
+        if !archived, model.canReact(to: message, in: botID) {
             Menu {
                 ForEach(Self.reactionEmojis, id: \.self) { emoji in
                     Button(emoji) { model.react(to: message, in: botID, emoji: emoji) }
