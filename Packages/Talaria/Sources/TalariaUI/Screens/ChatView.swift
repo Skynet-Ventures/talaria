@@ -181,6 +181,14 @@ public struct ChatView: View {
         model.mode == .demo ? (DemoData.quickReplies[botID] ?? []) : []
     }
 
+    private var generatedImageSource: GeneratedImagePresentationSource? {
+        guard let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID),
+              let chat, let stored = chat.storedSessionID, !stored.isEmpty else { return nil }
+        return GeneratedImagePresentationSource(
+            model: model, botID: botID, route: route,
+            storedSessionID: stored, liveSessionID: chat.sessionID ?? "")
+    }
+
     public var body: some View {
         dialogContent
     }
@@ -1041,20 +1049,24 @@ public struct ChatView: View {
                         .foregroundStyle(theme.ink.opacity(0.45))
                         .padding(.bottom, 4)
                 }
+                let visibleText = GeneratedImageEchoPolicy.suppress(
+                    in: message.text, calls: message.toolCalls)
                 if let reasoning = message.reasoning, !reasoning.isEmpty,
                    transcriptPolicy.showsReasoning(isLive: message.isStreaming) {
                     ThoughtBlock(reasoning: reasoning, theme: theme,
-                                 isLive: message.isStreaming && message.text.isEmpty)
-                        .padding(.bottom, message.text.isEmpty ? 0 : 5)
+                                 isLive: message.isStreaming && visibleText.isEmpty)
+                        .padding(.bottom, visibleText.isEmpty ? 0 : 5)
                 }
-                if !message.text.isEmpty {
-                    botBubble(message.text, findHighlight: findHighlight(for: message))
+                if !visibleText.isEmpty {
+                    botBubble(visibleText, findHighlight: findHighlight(for: message))
                         .contextMenu { messageMenu(message) }
                 }
                 let visibleToolCalls = transcriptPolicy.visibleToolCalls(message.toolCalls)
                 if !visibleToolCalls.isEmpty {
-                    ToolCallList(calls: visibleToolCalls, theme: theme, copy: copy, accent: botColor)
-                        .padding(.top, message.text.isEmpty ? 0 : 7)
+                    ToolCallList(calls: visibleToolCalls, theme: theme, copy: copy,
+                                 accent: botColor,
+                                 generatedImageSource: generatedImageSource)
+                        .padding(.top, visibleText.isEmpty ? 0 : 7)
                         .padding(.leading, theme.id == .ink ? 12 : 0)
                 }
                 if let card = message.card {

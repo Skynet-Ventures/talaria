@@ -1,0 +1,216 @@
+import XCTest
+@testable import TalariaKit
+
+private final class GeneratedMediaRedirectProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    private static var observed: [URLRequest] = []
+    static func reset() { lock.lock(); observed = []; lock.unlock() }
+    static func requests() -> [URLRequest] {
+        lock.lock(); defer { lock.unlock() }; return observed
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.lock(); Self.observed.append(request); Self.lock.unlock()
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 302, httpVersion: "HTTP/1.1",
+            headerFields: ["Location": "https://evil.example/steal"])!
+        client?.urlProtocol(self, wasRedirectedTo: URLRequest(
+            url: URL(string: "https://evil.example/steal")!), redirectResponse: response)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+final class GeneratedMediaTests: XCTestCase {
+    func testExactNameObjectAndJSONStringAdmission() throws {
+        let arguments = ToolPayloadCodec.arguments(from: ["aspect_ratio": "portrait"])
+        let direct = try XCTUnwrap(ToolGeneratedImageCodec.admit(
+            toolName: "image_generate", arguments: arguments,
+            result: ["success": true, "host_image": "/tmp/host.png",
+                     "image": "https://example.com/provider.png",
+                     "agent_visible_image": "/sandbox/image.png"]))
+        XCTAssertEqual(direct.source, "/tmp/host.png")
+        XCTAssertEqual(direct.sourceKind, .gatewayPath)
+        XCTAssertEqual(direct.aspect, .portrait)
+        XCTAssertEqual(direct.echoSources,
+                       ["/tmp/host.png", "https://example.com/provider.png",
+                        "/sandbox/image.png"])
+
+        let encoded: JSONValue = .string(
+            #"{"success":true,"image":"https://example.com/image.webp"}"#)
+        XCTAssertEqual(ToolGeneratedImageCodec.admit(
+            toolName: "image_generate", arguments: nil, result: encoded)?.source,
+            "https://example.com/image.webp")
+        for wrong in ["Image_Generate", "IMAGE_GENERATE", "image.generate", "generate_image"] {
+            XCTAssertNil(ToolGeneratedImageCodec.admit(
+                toolName: wrong, arguments: nil, result: encoded), wrong)
+        }
+    }
+
+    func testSuccessFalseMissingAndAgentVisibleOnlyStayGeneric() {
+        XCTAssertNil(ToolGeneratedImageCodec.candidate(
+            arguments: nil, result: ["success": false, "image": "/tmp/x.png"]))
+        XCTAssertNil(ToolGeneratedImageCodec.candidate(
+            arguments: nil, result: ["success": true, "error": "denied"]))
+        XCTAssertNil(ToolGeneratedImageCodec.candidate(
+            arguments: nil,
+            result: ["success": true, "agent_visible_image": "/sandbox/x.png"]))
+        XCTAssertNil(ToolGeneratedImageCodec.candidate(
+            arguments: nil, result: ["image": "/tmp/missing-success.png"]))
+    }
+
+    func testSourceAdmissionRejectsControlsBidiRelativePrivateAndCredentials() {
+        for source in ["relative.png", "/tmp/no-extension", "/tmp/x.svg",
+                       "/tmp/x%2epng", "/tmp/x\u{0}.png", "/tmp/x\u{202E}.png",
+                       "javascript:https://example.com/x.png",
+                       "https://localhost/x.png", "https://127.0.0.1/x.png",
+                       "https://10.2.3.4/x.png", "https://user@example.com/x.png"] {
+            XCTAssertNil(ToolGeneratedImageCodec.admittedSource(source), source)
+        }
+        XCTAssertEqual(ToolGeneratedImageCodec.admittedSource("~/images/x.png")?.kind,
+                       .gatewayPath)
+        XCTAssertEqual(ToolGeneratedImageCodec.admittedSource("C:\\images\\x.jpg")?.kind,
+                       .gatewayPath)
+        XCTAssertEqual(ToolGeneratedImageCodec.admittedSource(
+            "https://cdn.example/x.png")?.kind, .remoteURL)
+        XCTAssertNil(ToolGeneratedImageCodec.admittedSource(
+            "https://cdn.example/%0Aspoof.png"))
+        XCTAssertNil(ToolGeneratedImageCodec.admittedSource(
+            "https://cdn.example\\@evil.example/x.png"))
+    }
+
+    func testToolResultInlineDataIsRejectedButGatewayEnvelopeDecodeIsBounded() {
+        let tiny = "data:image/png;base64,iVBORw0KGgo="
+        XCTAssertNil(ToolGeneratedImageCodec.admittedSource(tiny))
+        XCTAssertNotNil(ToolGeneratedImageCodec.inlineDataDecodedUpperBound(tiny),
+                        "authenticated /api/media still returns a bounded data URL envelope")
+        for invalid in ["data:image/svg+xml;base64,PHN2Zz4=",
+                        "data:image/png,abc", "data:image/png;base64,abc!",
+                        "data:text/plain;base64,eA=="] {
+            XCTAssertNil(ToolGeneratedImageCodec.admittedSource(invalid), invalid)
+        }
+        let oversized = "data:image/png;base64,"
+            + String(repeating: "A", count: ((ToolGeneratedImageCodec.maximumInlineDecodedBytes + 2) / 3) * 4 + 4)
+        XCTAssertNil(ToolGeneratedImageCodec.admittedSource(oversized))
+    }
+
+    func testCodableReadmissionKeepsDeferredCandidateInert() throws {
+        let candidate = try XCTUnwrap(ToolGeneratedImageCodec.candidate(
+            arguments: nil, result: ["success": true, "image": "/tmp/x.png"]))
+        var call = ToolCall(id: "x", name: "Tool", context: "", state: .done,
+                            gatewayToolID: "x", deferredGeneratedImage: candidate)
+        call = try JSONDecoder().decode(ToolCall.self, from: JSONEncoder().encode(call))
+        XCTAssertNil(call.generatedImage)
+        XCTAssertEqual(call.deferredGeneratedImage, candidate)
+
+        let hostile = #"{"source":"relative.png","sourceKind":"gatewayPath","aspect":"square","echoSources":[]}"#
+        XCTAssertThrowsError(try JSONDecoder().decode(
+            ToolGeneratedImage.self, from: Data(hostile.utf8)))
+    }
+
+    func testToolCompletePayloadUsesDeferredOnlyForNamelessCompletion() {
+        let result: JSONValue = ["success": true, "image": "/tmp/x.png"]
+        let nameless = ToolCompletePayload(["tool_id": "X", "result": result])
+        XCTAssertNil(nameless.generatedImage)
+        XCTAssertNotNil(nameless.deferredGeneratedImage)
+
+        let exact = ToolCompletePayload([
+            "tool_id": "X", "name": "image_generate", "result": result,
+        ])
+        XCTAssertNotNil(exact.generatedImage)
+        XCTAssertNil(exact.deferredGeneratedImage)
+
+        let other = ToolCompletePayload([
+            "tool_id": "X", "name": "terminal", "result": result,
+        ])
+        XCTAssertNil(other.generatedImage)
+        XCTAssertNil(other.deferredGeneratedImage)
+    }
+
+    func testEchoSuppressionRequiresExactSuccessfulAuthority() throws {
+        let output = try XCTUnwrap(ToolGeneratedImageCodec.candidate(
+            arguments: nil,
+            result: ["success": true, "host_image": "/host/cat.png",
+                     "agent_visible_image": "/sandbox/cat.png"]))
+        let base = ToolCall(id: "x", name: "image_generate", context: "", state: .done,
+                            gatewayToolID: "wire", generatedImage: output, provenance: .stored)
+        let text = "Here. ![other](/unrelated/provider.png) "
+            + "![cat](/host/cat.png) [media](#media:%2Fsandbox%2Fcat.png) "
+            + "/sandbox/cat.png Done."
+        XCTAssertEqual(GeneratedImageEchoPolicy.suppress(in: text, calls: [base]),
+                       "Here. ![other](/unrelated/provider.png) Done.")
+        var failed = base; failed.state = .failed
+        XCTAssertEqual(GeneratedImageEchoPolicy.suppress(in: text, calls: [failed]), text)
+        var orphan = base; orphan.provenance = .unmatchedResult
+        XCTAssertEqual(GeneratedImageEchoPolicy.suppress(in: text, calls: [orphan]), text)
+    }
+
+    func testRemoteHostPolicyRejectsPrivateRanges() {
+        for host in ["localhost", "x.local", "0.1.2.3", "127.0.0.1",
+                     "169.254.1.2", "172.16.0.1", "192.168.1.1", "::1",
+                     "fe80::1", "fd00::1", "::ffff:127.0.0.1", "2130706433"] {
+            XCTAssertFalse(RemoteGeneratedImagePolicy.hostIsPublic(host), host)
+        }
+        XCTAssertTrue(RemoteGeneratedImagePolicy.hostIsPublic("cdn.example.com"))
+        XCTAssertTrue(RemoteGeneratedImagePolicy.hostIsPublic("fcdn.example.com"))
+        XCTAssertTrue(RemoteGeneratedImagePolicy.hostIsPublic("127.0.0.1.example.com"))
+        XCTAssertTrue(RemoteGeneratedImagePolicy.hostIsPublic("8.8.8.8"))
+    }
+
+    func testGatewayMediaUsesExactBoundedNoRedirectExecutor() async throws {
+        actor Calls {
+            var ordinary = 0
+            var protected = 0
+            var request: URLRequest?
+            func markOrdinary() { ordinary += 1 }
+            func markProtected(_ value: URLRequest) { protected += 1; request = value }
+            func snapshot() -> (Int, Int, URLRequest?) { (ordinary, protected, request) }
+        }
+        let calls = Calls()
+        let responseBody = Data(#"{"data_url":"data:image/png;base64,iVBORw0KGgo="}"#.utf8)
+        let response: @Sendable (URLRequest, Int?) async throws -> (Data, URLResponse) = {
+            request, _ in
+            await calls.markProtected(request)
+            return (responseBody, HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"])!)
+        }
+        let client = GatewayClient(
+            baseURL: URL(string: "https://gateway.example/base")!,
+            credential: .sessionToken("secret"),
+            restExecutor: { request, _ in
+                await calls.markOrdinary()
+                return (Data(), HTTPURLResponse(
+                    url: request.url!, statusCode: 500, httpVersion: nil,
+                    headerFields: nil)!)
+            },
+            noRedirectRESTExecutor: response)
+        let loaded = try await client.generatedMediaDataURL(path: "/tmp/cat.png")
+        XCTAssertEqual(loaded, "data:image/png;base64,iVBORw0KGgo=")
+        let snapshot = await calls.snapshot()
+        XCTAssertEqual(snapshot.0, 0)
+        XCTAssertEqual(snapshot.1, 1)
+        XCTAssertTrue(snapshot.2?.url?.absoluteString.contains("/base/api/media") == true)
+        XCTAssertEqual(snapshot.2?.url.flatMap {
+            URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "path" })?.value
+        }, "/tmp/cat.png")
+        XCTAssertEqual(snapshot.2?.value(forHTTPHeaderField: "X-Hermes-Session-Token"),
+                       "secret")
+    }
+
+    func testNoRedirectTransportDoesNotReplaySensitiveRequest() async {
+        GeneratedMediaRedirectProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GeneratedMediaRedirectProtocol.self]
+        var request = URLRequest(url: URL(string: "https://gateway.example/api/media")!)
+        request.setValue("secret", forHTTPHeaderField: "X-Hermes-Session-Token")
+        _ = try? await GatewayBoundedRESTLoader.load(
+            request, limit: 4_096, configuration: configuration, rejectsRedirects: true)
+        let requests = GeneratedMediaRedirectProtocol.requests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.url?.host, "gateway.example")
+        XCTAssertFalse(requests.contains { $0.url?.host == "evil.example" })
+    }
+}

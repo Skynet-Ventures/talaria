@@ -261,8 +261,11 @@ partial until the unchecked certification gates are recorded.
       and gateway-exposed reasoning summaries are opt-in advanced views.
       Multiline full-width capped composition, edit/rewind/regenerate, and
       message-level child creation are implemented; remaining work includes the
-      N/M alternative-branch picker and lineage presentation, persistent rich
-      media, grouped tool runs, advanced renderers, and per-message TTS/timing.
+      N/M alternative-branch picker and lineage presentation, persistent
+      multimodal parts, grouped generic tool runs, math/diagram renderers, and
+      per-message TTS/timing. Exact generated-image transcript cards are now
+      implemented with source/lifecycle fencing and focused coverage, but their
+      real gateway/device load and share matrix remains open.
       The separate source-qualified, text-only durable composer queue is
       implemented and focused-test covered; its gateway/device certification is
       still open.

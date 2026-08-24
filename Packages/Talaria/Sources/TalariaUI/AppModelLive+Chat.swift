@@ -1223,6 +1223,8 @@ extension AppModel {
                     || calls[existing].webSearchOutput != nil
                     || calls[existing].deferredWebSearchOutput != nil
                     || calls[existing].deferredWebSearchHasExplicitError
+                    || calls[existing].generatedImage != nil
+                    || calls[existing].deferredGeneratedImage != nil
                     || calls[existing].result != nil)
             if completionBeforeStart {
                 admitsStartMetadata = true
@@ -1321,6 +1323,17 @@ extension AppModel {
                 calls[exact].deferredWebSearchOutput = nil
                 calls[exact].deferredWebSearchHasExplicitError = false
             }
+            if ToolGeneratedImageCodec.isGeneratedImageTool(establishedName) {
+                calls[exact].generatedImage = ToolGeneratedImage.merging(
+                    newer: calls[exact].deferredGeneratedImage,
+                    preserving: calls[exact].generatedImage)
+                calls[exact].generatedImage = ToolGeneratedImageCodec.applyingAspectHint(
+                    calls[exact].generatedImage, arguments: calls[exact].arguments)
+                calls[exact].deferredGeneratedImage = nil
+            } else if !establishedName.isEmpty, establishedName != "Tool" {
+                calls[exact].generatedImage = nil
+                calls[exact].deferredGeneratedImage = nil
+            }
         }
         chat.messages[index].toolCalls = calls
     }
@@ -1350,6 +1363,10 @@ extension AppModel {
             let searchAdmission = ToolWebSearchCodec.admit(
                 toolName: establishedName,
                 arguments: payload?["args"] ?? payload?["arguments"] ?? payload?["input"],
+                result: rawResult)
+            let generatedAdmission = ToolGeneratedImageCodec.admit(
+                toolName: establishedName,
+                arguments: tool.arguments ?? calls[hit].arguments,
                 result: rawResult)
             let completionOutput = outputAdmission.output ?? tool.structuredOutput
             let completionResult = completionOutput == nil
@@ -1424,6 +1441,23 @@ extension AppModel {
             } else {
                 calls[hit].deferredStructuredOutput = nil
             }
+            let completionGenerated = generatedAdmission ?? tool.generatedImage
+            if ToolGeneratedImageCodec.isGeneratedImageTool(establishedName) {
+                let evidence = completionGenerated ?? tool.deferredGeneratedImage
+                calls[hit].generatedImage = preservesFailedEvidence
+                    ? ToolGeneratedImage.merging(
+                        newer: calls[hit].generatedImage, preserving: evidence)
+                    : ToolGeneratedImage.merging(
+                        newer: evidence, preserving: calls[hit].generatedImage)
+                calls[hit].deferredGeneratedImage = nil
+            } else if establishedName.isEmpty || establishedName == "Tool" {
+                calls[hit].deferredGeneratedImage = ToolGeneratedImage.merging(
+                    newer: tool.deferredGeneratedImage,
+                    preserving: calls[hit].deferredGeneratedImage)
+            } else {
+                calls[hit].generatedImage = nil
+                calls[hit].deferredGeneratedImage = nil
+            }
             if !preservesFailedEvidence {
                 let establishedName = ToolDiffCodec.isFileEditTool(calls[hit].name)
                     ? calls[hit].name : tool.name
@@ -1469,6 +1503,9 @@ extension AppModel {
             deferredWebSearchHasExplicitError: tool.webSearchOutput == nil
                 && tool.deferredWebSearchHasExplicitError,
             webSearchQuery: tool.webSearchOutput?.query,
+            generatedImage: tool.generatedImage,
+            deferredGeneratedImage: tool.generatedImage == nil
+                ? tool.deferredGeneratedImage : nil,
             provenance: .unmatchedResult,
             diagnostic: "No exact live tool-call id matched this completion; Talaria did not pair it by name."))
     }

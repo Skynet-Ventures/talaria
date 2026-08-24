@@ -185,20 +185,24 @@ public enum TranscriptFindPolicy {
         for (offset, message) in window.enumerated() {
             if offset.isMultiple(of: 16) { try Task.checkCancellation() }
             guard message.author == .user || message.author == .bot else { continue }
-            guard !message.text.isEmpty else { continue }
+            let visibleText = message.author == .bot
+                ? GeneratedImageEchoPolicy.suppress(
+                    in: message.text, calls: message.toolCalls)
+                : message.text
+            guard !visibleText.isEmpty else { continue }
             guard indexedMessages < maximumIndexedMessages,
                   remainingCharacters > 0, remainingSegments > 0 else {
                 truncated = true
                 break
             }
             indexedMessages += 1
-            guard sourceIsAdmissible(message.text) else {
+            guard sourceIsAdmissible(visibleText) else {
                 truncated = true
                 continue
             }
 
             let projected = MarkdownParser.searchSegments(
-                message.text, isCancelled: { Task.isCancelled })
+                visibleText, isCancelled: { Task.isCancelled })
             try Task.checkCancellation()
             let allowance = min(maximumSegmentsPerMessage, remainingSegments)
             let admittedSegments = projected.prefix(allowance)

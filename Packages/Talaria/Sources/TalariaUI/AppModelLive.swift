@@ -1470,6 +1470,8 @@ extension AppModel {
             ? searchCandidateAdmission.output : nil
         let deferredOutput = (name.isEmpty || name == "Tool")
             ? ToolOutputCodec.candidate(result: raw) : nil
+        let generatedCandidate = ToolGeneratedImageCodec.candidate(
+            arguments: arguments, result: raw)
         let result = outputAdmission.output != nil
             ? outputAdmission.genericResult
             : outputAdmission.genericResult ?? ToolPayloadCodec.unavailable(hasRaw
@@ -1499,6 +1501,10 @@ extension AppModel {
                 && searchCandidateAdmission.hasExplicitError,
             webSearchQuery: ToolWebSearchCodec.isWebSearchTool(name)
                 ? ToolWebSearchCodec.query(from: arguments) : nil,
+            generatedImage: ToolGeneratedImageCodec.isGeneratedImageTool(name)
+                ? generatedCandidate : nil,
+            deferredGeneratedImage: (name.isEmpty || name == "Tool")
+                ? generatedCandidate : nil,
             provenance: hasRaw
                 ? (wireID == nil ? .unmatchedResult : (ambiguousIdentity ? .malformed : .stored))
                 : .projection,
@@ -1572,6 +1578,22 @@ extension AppModel {
         } else {
             call.deferredWebSearchOutput = nil
             call.deferredWebSearchHasExplicitError = false
+        }
+        if ToolGeneratedImageCodec.isGeneratedImageTool(call.name) {
+            let evidence = result.generatedImage ?? result.deferredGeneratedImage
+            call.generatedImage = preservesFailedEvidence
+                ? ToolGeneratedImage.merging(newer: call.generatedImage, preserving: evidence)
+                : ToolGeneratedImage.merging(newer: evidence, preserving: call.generatedImage)
+            call.generatedImage = ToolGeneratedImageCodec.applyingAspectHint(
+                call.generatedImage, arguments: call.arguments)
+            call.deferredGeneratedImage = nil
+        } else if call.name.isEmpty || call.name == "Tool" {
+            call.deferredGeneratedImage = ToolGeneratedImage.merging(
+                newer: result.deferredGeneratedImage,
+                preserving: call.deferredGeneratedImage)
+        } else {
+            call.generatedImage = nil
+            call.deferredGeneratedImage = nil
         }
         call.summary = preservesFailedEvidence
             ? (call.summary ?? result.summary) : (result.summary ?? call.summary)

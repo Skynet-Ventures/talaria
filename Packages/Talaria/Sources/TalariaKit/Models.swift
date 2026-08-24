@@ -478,6 +478,10 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
     public var deferredWebSearchOutput: ToolWebSearchOutput?
     public var deferredWebSearchHasExplicitError: Bool
     public var webSearchQuery: String?
+    /// Exact successful `image_generate` evidence and its inert nameless
+    /// completion candidate. Only the former is presentation authority.
+    public var generatedImage: ToolGeneratedImage?
+    public var deferredGeneratedImage: ToolGeneratedImage?
     public var provenance: Provenance
     public var diagnostic: String?
 
@@ -493,6 +497,8 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
                 deferredWebSearchOutput: ToolWebSearchOutput? = nil,
                 deferredWebSearchHasExplicitError: Bool = false,
                 webSearchQuery: String? = nil,
+                generatedImage: ToolGeneratedImage? = nil,
+                deferredGeneratedImage: ToolGeneratedImage? = nil,
                 provenance: Provenance = .live, diagnostic: String? = nil) {
         self.id = id; self.name = name; self.context = context; self.state = state
         self.summary = summary; self.resultText = resultText
@@ -508,6 +514,8 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         self.deferredWebSearchHasExplicitError = deferredWebSearchHasExplicitError
         self.webSearchQuery = ToolWebSearchCodec.safeText(
             webSearchQuery, maximum: ToolWebSearchCodec.maximumQueryScalars).text
+        self.generatedImage = generatedImage
+        self.deferredGeneratedImage = deferredGeneratedImage
         self.provenance = provenance; self.diagnostic = diagnostic
     }
 
@@ -517,6 +525,7 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         case deferredStructuredOutput, deferredFileDiff
         case webSearchOutput, deferredWebSearchOutput
         case deferredWebSearchHasExplicitError, webSearchQuery
+        case generatedImage, deferredGeneratedImage
         case provenance, diagnostic
     }
 
@@ -549,6 +558,10 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         webSearchQuery = ToolWebSearchCodec.safeText(
             try values.decodeIfPresent(String.self, forKey: .webSearchQuery),
             maximum: ToolWebSearchCodec.maximumQueryScalars).text
+        generatedImage = try values.decodeIfPresent(
+            ToolGeneratedImage.self, forKey: .generatedImage)
+        deferredGeneratedImage = try values.decodeIfPresent(
+            ToolGeneratedImage.self, forKey: .deferredGeneratedImage)
         provenance = try values.decodeIfPresent(Provenance.self, forKey: .provenance) ?? .live
         diagnostic = try values.decodeIfPresent(String.self, forKey: .diagnostic)
     }

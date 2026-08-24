@@ -450,12 +450,15 @@ private final class GatewayBoundedRESTRequest: NSObject, URLSessionDataDelegate,
     private var completed = false
     private let configuration: URLSessionConfiguration
     private let lifetimeObserver: GatewayBoundedRESTLifetimeObserver?
+    private let rejectsRedirects: Bool
 
     init(limit: Int, configuration: URLSessionConfiguration,
-         lifetimeObserver: GatewayBoundedRESTLifetimeObserver?) {
+         lifetimeObserver: GatewayBoundedRESTLifetimeObserver?,
+         rejectsRedirects: Bool = false) {
         accumulator = GatewayBoundedResponseAccumulator(limit: limit)
         self.configuration = configuration
         self.lifetimeObserver = lifetimeObserver
+        self.rejectsRedirects = rejectsRedirects
         lifetimeObserver?.didCreate()
     }
 
@@ -539,6 +542,13 @@ private final class GatewayBoundedRESTRequest: NSObject, URLSessionDataDelegate,
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(rejectsRedirects ? nil : request)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
                     didCompleteWithError error: Error?) {
         lock.lock()
         let result: Result<(Data, URLResponse), Error>
@@ -564,11 +574,13 @@ private final class GatewayBoundedRESTRequest: NSObject, URLSessionDataDelegate,
 enum GatewayBoundedRESTLoader {
     static func load(_ request: URLRequest, limit: Int,
                      configuration: URLSessionConfiguration = .ephemeral,
-                     lifetimeObserver: GatewayBoundedRESTLifetimeObserver? = nil) async throws
+                     lifetimeObserver: GatewayBoundedRESTLifetimeObserver? = nil,
+                     rejectsRedirects: Bool = false) async throws
         -> (Data, URLResponse) {
         try await GatewayBoundedRESTRequest(
             limit: limit, configuration: configuration,
-            lifetimeObserver: lifetimeObserver).load(request)
+            lifetimeObserver: lifetimeObserver,
+            rejectsRedirects: rejectsRedirects).load(request)
     }
 }
 
@@ -611,6 +623,7 @@ public actor GatewayClient {
     private var rpcExecutorForTesting: RPCExecutor?
     typealias RESTExecutor = @Sendable (URLRequest, Int?) async throws -> (Data, URLResponse)
     private let restExecutor: RESTExecutor
+    private let noRedirectRESTExecutor: RESTExecutor
 
     /// Re-published stream of all events from the current transport.
     public private(set) var eventsTask: Task<Void, Never>?
@@ -628,6 +641,14 @@ public actor GatewayClient {
             }
             return try await URLSession.shared.data(for: request)
         }
+        self.noRedirectRESTExecutor = { request, limit in
+            guard let limit else {
+                throw GatewayError(code: -11,
+                                   message: "No-redirect REST requires a response limit.")
+            }
+            return try await GatewayBoundedRESTLoader.load(
+                request, limit: limit, rejectsRedirects: true)
+        }
     }
 
     /// Package-test initializer for production-path REST authority tests. The
@@ -635,12 +656,14 @@ public actor GatewayClient {
     /// lifecycle traffic lease; only the byte source is deterministic.
     init(baseURL: URL, credential: GatewayCredential,
          keychain: KeychainStore = KeychainStore(),
-         restExecutor: @escaping RESTExecutor) {
+         restExecutor: @escaping RESTExecutor,
+         noRedirectRESTExecutor: RESTExecutor? = nil) {
         self.baseURL = baseURL
         self.auth = GatewayAuthClient(baseURL: baseURL)
         self.credential = credential
         self.keychain = keychain
         self.restExecutor = restExecutor
+        self.noRedirectRESTExecutor = noRedirectRESTExecutor ?? restExecutor
     }
 
     // MARK: - Event fan-out
@@ -1203,7 +1226,8 @@ public actor GatewayClient {
 
     private func authenticatedRESTData(
         path: String, method: String, query: [URLQueryItem], body: Data?,
-        contentType: String, timeout: TimeInterval, responseLimit: Int?
+        contentType: String, timeout: TimeInterval, responseLimit: Int?,
+        rejectsRedirects: Bool = false
     ) async throws -> Data {
         let lease = try await acquireTrafficLease()
         do {
@@ -1220,7 +1244,8 @@ public actor GatewayClient {
                 req.setValue(contentType, forHTTPHeaderField: "Content-Type")
             }
             auth.apply(credential: credential, to: &req)
-            let (data, response) = try await restExecutor(req, responseLimit)
+            let executor = rejectsRedirects ? noRedirectRESTExecutor : restExecutor
+            let (data, response) = try await executor(req, responseLimit)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             guard (200..<300).contains(code) else {
                 let detail = (try? JSONDecoder().decode(JSONValue.self, from: data))?["detail"]?.stringValue
@@ -1256,6 +1281,23 @@ public actor GatewayClient {
         let data = try await restDataBounded(
             path: path, method: method, query: query, body: payload,
             timeout: timeout, maximumResponseBytes: maximumResponseBytes)
+        guard !data.isEmpty else { return .null }
+        return try JSONDecoder().decode(JSONValue.self, from: data)
+    }
+
+    /// Bounded authenticated JSON for sensitive same-origin endpoints. Every
+    /// redirect is rejected before URLSession can replay gateway credentials.
+    public func restJSONBoundedNoRedirect(path: String, method: String = "GET",
+                                          query: [URLQueryItem] = [],
+                                          timeout: TimeInterval = 30,
+                                          maximumResponseBytes: Int) async throws -> JSONValue {
+        guard maximumResponseBytes >= 0 else {
+            throw GatewayError(code: -11, message: "Invalid REST response limit.")
+        }
+        let data = try await authenticatedRESTData(
+            path: path, method: method, query: query, body: nil,
+            contentType: "application/json", timeout: timeout,
+            responseLimit: maximumResponseBytes, rejectsRedirects: true)
         guard !data.isEmpty else { return .null }
         return try JSONDecoder().decode(JSONValue.self, from: data)
     }
