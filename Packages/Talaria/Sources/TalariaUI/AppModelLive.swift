@@ -190,6 +190,16 @@ final class LiveRuntime {
     var reconnectTask: Task<Void, Never>?
 
     func resetSessionState() {
+        // Live delegation evidence belongs to the exact primary runtime sid.
+        // Do not migrate it through reconnect: Hermes has no authoritative
+        // subagent snapshot/list contract to prove that a replacement sid
+        // represents the same in-flight branch.
+        if let gatewayID {
+            for sessionID in sessionToBot.keys {
+                SubagentLiveRuntime.shared.tearDown(
+                    gatewayID: gatewayID, parentRuntimeSessionID: sessionID)
+            }
+        }
         sessionToBot.removeAll()
         for task in ChatRuntime.shared.reconciliationTasks.values { task.cancel() }
         ChatRuntime.shared.reconciliationTasks.removeAll()
@@ -213,6 +223,10 @@ final class LiveRuntime {
     }
 
     func resetRoutedState(gatewayID: String) {
+        for route in routedSessionToBot.keys where route.gatewayID == gatewayID {
+            SubagentLiveRuntime.shared.tearDown(
+                gatewayID: route.gatewayID, parentRuntimeSessionID: route.sessionID)
+        }
         routedSessionToBot = routedSessionToBot.filter { $0.key.gatewayID != gatewayID }
         approvalTargets = approvalTargets.filter { $0.value.bot.gatewayID != gatewayID }
         ChatRuntime.shared.clearPendingStops(forGatewayID: gatewayID)
@@ -1098,6 +1112,16 @@ extension AppModel {
             }
         }
 
+        // A live delegation tree is scoped to the exact parent runtime
+        // session, not its durable conversation key. A replacement/rebound
+        // sid therefore starts clean instead of inventing reconnect recovery.
+        if let oldSessionID,
+           (oldSessionID != live.sessionID || routeChanged),
+           let oldGatewayID = oldRoute?.gatewayID ?? gatewayID {
+            SubagentLiveRuntime.shared.tearDown(
+                gatewayID: oldGatewayID, parentRuntimeSessionID: oldSessionID)
+        }
+
         chat.sessionID = live.sessionID
         if let newStoredID { chat.storedSessionID = newStoredID }
         if gatewayID == runtime.gatewayID {
@@ -1106,6 +1130,8 @@ extension AppModel {
             runtime.routedSessionToBot[GatewaySessionRoute(gatewayID: gatewayID,
                                                            sessionID: live.sessionID)] = botID
         }
+        SubagentLiveRuntime.shared.activate(
+            gatewayID: gatewayID, parentRuntimeSessionID: live.sessionID)
         runtime.reconnectParkedSessionIDs[botID] = nil
         if live.running {
             setWorking(botID, true)
@@ -1921,7 +1947,9 @@ extension AppModel {
 
     func handle(event: GatewayEvent, sourceGatewayID: String?) {
         let botID = botID(forSession: event.sessionID, sourceGatewayID: sourceGatewayID)
-        switch TypedGatewayEvent(event) {
+        let typed = TypedGatewayEvent(event)
+        routeSubagentEvent(event, typed: typed, sourceGatewayID: sourceGatewayID)
+        switch typed {
         case .messageStart(let parts):
             if let botID, currentChatOwnsMessageEvent(
                 botID: botID, sessionID: event.sessionID,
@@ -2309,6 +2337,8 @@ extension AppModel {
             let sid = raw.payload?["session_id"]?.stringValue ?? ""
             guard !sid.isEmpty else { return }
             if let owner = self.botID(forSession: sid, sourceGatewayID: sourceGatewayID) {
+                SubagentLiveRuntime.shared.tearDown(
+                    gatewayID: sourceGatewayID, parentRuntimeSessionID: sid)
                 let chat = chat(for: owner)
                 if chat.sessionID == sid || chat.storedSessionID == sid {
                     if chat.sessionID == sid {

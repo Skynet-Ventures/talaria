@@ -48,6 +48,9 @@ public enum TypedGatewayEvent: Sendable {
     case voiceTranscript(text: String?, stopPhrase: Bool)
     case voiceStatus(state: String)
     case errorEvent(message: String)
+    /// Parent-session delegation progress. The source gateway fence is added
+    /// by TalariaUI before this advisory event can affect live state.
+    case subagent(SubagentGatewayEvent)
     /// Global broadcasts: sessions.changed, cron.changed, platforms.changed…
     case changed(what: String)
     case other(GatewayEvent)
@@ -116,6 +119,15 @@ public enum TypedGatewayEvent: Sendable {
             self = .voiceStatus(state: p?["state"]?.stringValue ?? "")
         case "error":
             self = .errorEvent(message: p?["message"]?.stringValue ?? "")
+        case let type where type.hasPrefix("subagent."):
+            // The bounded decoder requires a real subagent id and parent
+            // runtime sid. Unknown suffixes and malformed payloads remain raw
+            // events so they cannot manufacture a live-tree identity.
+            if let subagent = SubagentEventCodec.decode(event) {
+                self = .subagent(subagent)
+            } else {
+                self = .other(event)
+            }
         case "sessions.changed", "cron.changed", "pet.changed", "platforms.changed",
              "pairing.changed", "skin.changed":
             self = .changed(what: event.type)
