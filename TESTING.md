@@ -44,17 +44,19 @@ xcodebuild -project Talaria.xcodeproj -scheme Talaria \
   -allowProvisioningUpdates build \
   CODE_SIGN_STYLE=Automatic \
   DEVELOPMENT_TEAM=YOURTEAMID \
-  TALARIA_BUNDLE_ID=com.yourname.talaria \
-  CODE_SIGN_ENTITLEMENTS=Talaria/Support/Talaria-dev.entitlements
+  TALARIA_BUNDLE_ID=com.yourname.talaria
 ```
 
 Your team id is in [developer.apple.com/account](https://developer.apple.com/account)
 under Membership.
 
-**Why `Talaria-dev.entitlements`:** the full entitlements file declares an App
-Group, which CLI automatic signing cannot provision. The dev variant drops it
-and keeps push. The only casualty is a theme lookup the widget makes through
-the shared container, which falls back gracefully.
+The generated project already maps the Debug app target to
+`Talaria-dev.entitlements` while leaving the Debug widget and notification
+extensions on their own entitlement settings. Do not pass
+`CODE_SIGN_ENTITLEMENTS` on the command line: an `xcodebuild` override applies
+to every target and makes the extensions inherit app-only notification
+entitlements, which provisioning rejects. The dev app entitlement keeps push
+but drops the Release app group; the widget theme lookup falls back gracefully.
 
 For a custom bundle id, the APNs topic must be exact: set
 `TALARIA_APNS_TOPIC` in the gateway relay environment to the signed app's
