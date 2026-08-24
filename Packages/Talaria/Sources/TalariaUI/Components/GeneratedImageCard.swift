@@ -86,6 +86,12 @@ struct GeneratedImageCard: View {
         if remoteApprovalRequired && !remoteWasApproved { return .permission }
         return .failure
     }
+    private var accessibilityStatus: String {
+        GeneratedImagePresentationPolicy.accessibilityValue(
+            call: call, loaded: data != nil, loading: loading,
+            remoteApprovalRequired: remoteApprovalRequired && !remoteWasApproved,
+            failed: status != nil && (!remoteApprovalRequired || remoteWasApproved))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -135,7 +141,6 @@ struct GeneratedImageCard: View {
                     .foregroundStyle(theme.sub)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityLabel("Generated image status. \(status)")
-                    .generatedImagePoliteLiveRegion()
             }
         }
         .padding(10)
@@ -144,14 +149,14 @@ struct GeneratedImageCard: View {
         .overlay(RoundedRectangle(cornerRadius: theme.cardRadius, style: .continuous)
             .strokeBorder(accent.opacity(0.32), lineWidth: 1))
         .accessibilityElement(children: .contain)
-        .accessibilityValue(GeneratedImagePresentationPolicy.accessibilityValue(
-            call: call, loaded: data != nil, loading: loading,
-            remoteApprovalRequired: remoteApprovalRequired && !remoteWasApproved,
-            failed: status != nil && (!remoteApprovalRequired || remoteWasApproved)))
+        .accessibilityValue(accessibilityStatus)
         .transaction { transaction in
             if reducedMotion { transaction.animation = nil }
         }
         .onChange(of: taskIdentity) { _, _ in reset() }
+        .onChange(of: accessibilityStatus) { _, value in
+            announceAccessibilityStatus(value)
+        }
         .task(id: taskIdentity) {
             guard call.state == .done, output != nil else { return }
             await load(allowRemote: false)
@@ -207,7 +212,6 @@ struct GeneratedImageCard: View {
                 .font(.system(GeneratedImagePresentationPolicy.statusTextStyle))
                 .foregroundStyle(theme.sub)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .generatedImagePoliteLiveRegion()
             Spacer(minLength: 0)
             if remoteApprovalRequired && !remoteWasApproved {
                 unloadedAction(GeneratedImagePresentationPolicy.loadRemoteLabel,
@@ -317,18 +321,16 @@ struct GeneratedImageCard: View {
         exported?.removeOwnedShareCopy()
         exported = nil
     }
+
+    private func announceAccessibilityStatus(_ value: String) {
+        #if canImport(UIKit)
+        guard UIAccessibility.isVoiceOverRunning else { return }
+        UIAccessibility.post(notification: .announcement, argument: value)
+        #endif
+    }
 }
 
 private extension View {
-    @ViewBuilder
-    func generatedImagePoliteLiveRegion() -> some View {
-        #if os(iOS)
-        accessibilityLiveRegion(.polite)
-        #else
-        self
-        #endif
-    }
-
     @ViewBuilder
     func generatedImageInspection<Content: View>(
         isPresented: Binding<Bool>,
