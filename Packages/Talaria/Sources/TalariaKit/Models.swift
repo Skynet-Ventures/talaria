@@ -461,6 +461,11 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
     public var durationSeconds: Double?
     public var arguments: ToolPayload?
     public var result: ToolPayload?
+    /// Bounded specialist evidence for edit_file/patch/write_file only.
+    public var fileDiff: ToolFileDiff?
+    /// Bounded explicit diff material awaiting an exact file-edit tool name.
+    /// Never rendered or treated as a specialist until promoted by exact ID.
+    public var deferredFileDiff: ToolFileDiff?
     public var provenance: Provenance
     public var diagnostic: String?
 
@@ -468,18 +473,23 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
                 summary: String? = nil, resultText: String? = nil,
                 durationSeconds: Double? = nil, gatewayToolID: String? = nil,
                 arguments: ToolPayload? = nil, result: ToolPayload? = nil,
+                fileDiff: ToolFileDiff? = nil,
+                deferredFileDiff: ToolFileDiff? = nil,
                 provenance: Provenance = .live, diagnostic: String? = nil) {
         self.id = id; self.name = name; self.context = context; self.state = state
         self.summary = summary; self.resultText = resultText
         self.durationSeconds = durationSeconds
         self.gatewayToolID = gatewayToolID
         self.arguments = arguments; self.result = result
+        self.fileDiff = fileDiff
+        self.deferredFileDiff = deferredFileDiff
         self.provenance = provenance; self.diagnostic = diagnostic
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, gatewayToolID, name, context, state, summary, resultText
-        case durationSeconds, arguments, result, provenance, diagnostic
+        case durationSeconds, arguments, result, fileDiff, deferredFileDiff
+        case provenance, diagnostic
     }
 
     public init(from decoder: Decoder) throws {
@@ -495,6 +505,9 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         durationSeconds = try values.decodeIfPresent(Double.self, forKey: .durationSeconds)
         arguments = try values.decodeIfPresent(ToolPayload.self, forKey: .arguments)
         result = try values.decodeIfPresent(ToolPayload.self, forKey: .result)
+        fileDiff = try values.decodeIfPresent(ToolFileDiff.self, forKey: .fileDiff)
+        deferredFileDiff = try values.decodeIfPresent(
+            ToolFileDiff.self, forKey: .deferredFileDiff)
         provenance = try values.decodeIfPresent(Provenance.self, forKey: .provenance) ?? .live
         diagnostic = try values.decodeIfPresent(String.self, forKey: .diagnostic)
     }

@@ -1209,26 +1209,81 @@ extension AppModel {
         let index = toolAnchor(in: chat, botID: botID)
         let id = tool.toolID.isEmpty ? UUID().uuidString : tool.toolID
         var calls = chat.messages[index].toolCalls
+        var admitsStartMetadata = false
 
-        if let pending = calls.firstIndex(where: {
+        if let existing = calls.firstIndex(where: {
+            $0.id == id || (!tool.toolID.isEmpty && $0.gatewayToolID == tool.toolID)
+        }) {
+            let completionBeforeStart = calls[existing].provenance == .unmatchedResult
+                && calls[existing].state != .running
+                && (calls[existing].deferredFileDiff != nil
+                    || calls[existing].fileDiff != nil || calls[existing].result != nil)
+            if completionBeforeStart {
+                admitsStartMetadata = true
+                // Exact completion-before-start ownership beats its one
+                // presentation placeholder. A settled ordinary A must never
+                // consume a same-name generating placeholder belonging to B.
+                if let pending = calls.firstIndex(where: {
+                    $0.id.hasPrefix(ChatRuntime.generatingPrefix)
+                        && $0.name == tool.name && $0.state == .running
+                }), pending != existing {
+                    if calls[existing].context.isEmpty {
+                        calls[existing].context = calls[pending].context
+                    }
+                    calls[existing].arguments = calls[existing].arguments
+                        ?? calls[pending].arguments
+                    calls.remove(at: pending)
+                }
+            } else if calls[existing].state == .running {
+                admitsStartMetadata = true
+            }
+            // Reacquire after possible placeholder removal; indices may shift.
+            if admitsStartMetadata, let exact = calls.firstIndex(where: {
+                $0.id == id || (!tool.toolID.isEmpty && $0.gatewayToolID == tool.toolID)
+            }) {
+                if !tool.name.isEmpty { calls[exact].name = tool.name }
+                if !tool.context.isEmpty || calls[exact].context.isEmpty {
+                    calls[exact].context = tool.context
+                }
+                calls[exact].gatewayToolID = tool.toolID.isEmpty ? nil : tool.toolID
+                calls[exact].arguments = tool.arguments ?? calls[exact].arguments
+            }
+        } else if let pending = calls.firstIndex(where: {
             $0.id.hasPrefix(ChatRuntime.generatingPrefix) && $0.name == tool.name && $0.state == .running
         }) {
+            admitsStartMetadata = true
             // Promote the tool.generating placeholder rather than add a twin.
             calls[pending].id = id
             calls[pending].gatewayToolID = tool.toolID.isEmpty ? nil : tool.toolID
+            if !tool.name.isEmpty { calls[pending].name = tool.name }
             calls[pending].context = tool.context
             calls[pending].arguments = tool.arguments
-        } else if let existing = calls.firstIndex(where: {
-            $0.id == id || (!tool.toolID.isEmpty && $0.gatewayToolID == tool.toolID)
-        }) {
-            calls[existing].context = tool.context
-            calls[existing].gatewayToolID = tool.toolID.isEmpty ? nil : tool.toolID
-            calls[existing].arguments = tool.arguments ?? calls[existing].arguments
         } else {
+            admitsStartMetadata = true
             calls.append(ToolCall(
                 id: id, name: tool.name, context: tool.context,
                 gatewayToolID: tool.toolID.isEmpty ? nil : tool.toolID,
                 arguments: tool.arguments))
+        }
+        // A completion can arrive before its start frame. Enrich only the
+        // exact invocation's missing path; never replace its retained diff.
+        if admitsStartMetadata, let exact = calls.firstIndex(where: {
+            $0.id == id || (!tool.toolID.isEmpty && $0.gatewayToolID == tool.toolID)
+        }) {
+            let establishedName = tool.name.isEmpty ? calls[exact].name : tool.name
+            if ToolDiffCodec.isFileEditTool(establishedName) {
+                if calls[exact].fileDiff == nil {
+                    calls[exact].fileDiff = calls[exact].deferredFileDiff
+                }
+                calls[exact].deferredFileDiff = nil
+                if calls[exact].fileDiff?.path == nil,
+                   let path = ToolDiffCodec.path(
+                    from: tool.arguments ?? calls[exact].arguments) {
+                    calls[exact].fileDiff?.path = path
+                }
+            } else if !establishedName.isEmpty, establishedName != "Tool" {
+                calls[exact].deferredFileDiff = nil
+            }
         }
         chat.messages[index].toolCalls = calls
     }
@@ -1246,15 +1301,43 @@ extension AppModel {
             }
             guard let hit else { continue }
 
-            calls[hit].state = Self.toolFailed(payload: payload, summary: tool.summary,
-                                               resultText: tool.resultText) ? .failed : .done
-            calls[hit].summary = tool.summary
+            if (calls[hit].name.isEmpty || calls[hit].name == "Tool"),
+               !tool.name.isEmpty {
+                calls[hit].name = tool.name
+            }
+            let completionFailed = Self.toolFailed(
+                payload: payload, summary: tool.summary, resultText: tool.resultText)
+            let preservesFailedEvidence = calls[hit].state == .failed && !completionFailed
+            calls[hit].state = completionFailed ? .failed
+                : (preservesFailedEvidence ? .failed : .done)
+            if !preservesFailedEvidence, let summary = tool.summary {
+                calls[hit].summary = summary
+            }
             // result_text only rides along in verbose mode; `result` is always
             // there, so fall back to a readable rendering of it.
-            calls[hit].result = tool.result
-            calls[hit].resultText = tool.resultText ?? Self.describeResult(payload?["result"])
-            calls[hit].durationSeconds = tool.durationSeconds
-            if calls[hit].context.isEmpty, let summary = tool.summary {
+            if !preservesFailedEvidence, let result = tool.result {
+                calls[hit].result = result
+                calls[hit].resultText = tool.resultText
+                    ?? Self.describeResult(payload?["result"])
+            }
+            calls[hit].durationSeconds = tool.durationSeconds ?? calls[hit].durationSeconds
+            calls[hit].arguments = calls[hit].arguments ?? tool.arguments
+            if !preservesFailedEvidence {
+                let establishedName = ToolDiffCodec.isFileEditTool(calls[hit].name)
+                    ? calls[hit].name : tool.name
+                if ToolDiffCodec.isFileEditTool(establishedName),
+                   var diff = tool.fileDiff ?? tool.deferredFileDiff {
+                    if diff.path == nil {
+                        diff.path = ToolDiffCodec.path(from: calls[hit].arguments)
+                    }
+                    calls[hit].fileDiff = diff
+                    calls[hit].deferredFileDiff = nil
+                } else if let candidate = tool.fileDiff ?? tool.deferredFileDiff {
+                    calls[hit].deferredFileDiff = candidate
+                }
+            }
+            if !preservesFailedEvidence, calls[hit].context.isEmpty,
+               let summary = tool.summary {
                 calls[hit].context = summary
             }
             chat.messages[index].toolCalls = calls
@@ -1273,6 +1356,8 @@ extension AppModel {
             durationSeconds: tool.durationSeconds,
             gatewayToolID: tool.toolID.isEmpty ? nil : tool.toolID,
             arguments: tool.arguments, result: result,
+            fileDiff: tool.fileDiff,
+            deferredFileDiff: tool.fileDiff == nil ? tool.deferredFileDiff : nil,
             provenance: .unmatchedResult,
             diagnostic: "No exact live tool-call id matched this completion; Talaria did not pair it by name."))
     }

@@ -373,6 +373,9 @@ enum TranscriptHydrationMerge {
             }) else { continue }
             consumed.insert(liveIndex)
             let overlay = live[liveIndex]
+            if merged[index].name == "Tool", !overlay.name.isEmpty {
+                merged[index].name = overlay.name
+            }
             merged[index].state = overlay.state
             if !overlay.context.isEmpty { merged[index].context = overlay.context }
             merged[index].summary = overlay.summary ?? merged[index].summary
@@ -381,6 +384,25 @@ enum TranscriptHydrationMerge {
             merged[index].arguments = merged[index].arguments ?? overlay.arguments
             merged[index].result = merged[index].result ?? overlay.result
             merged[index].resultText = merged[index].resultText ?? overlay.resultText
+            if var liveDiff = overlay.fileDiff ?? overlay.deferredFileDiff,
+               ToolDiffCodec.isFileEditTool(merged[index].name) {
+                // The live event owns the current body. Raw storage may enrich
+                // only its absent path, by this already-proven exact ID.
+                if liveDiff.path == nil {
+                    liveDiff.path = merged[index].fileDiff?.path
+                        ?? ToolDiffCodec.path(from: merged[index].arguments)
+                }
+                merged[index].fileDiff = liveDiff
+                merged[index].deferredFileDiff = nil
+            } else if let deferred = overlay.deferredFileDiff {
+                merged[index].deferredFileDiff = deferred
+            }
+            if merged[index].fileDiff != nil,
+               stored[index].state == .failed, overlay.state != .failed {
+                // Stored failure comes only from PR57's meaningful protocol
+                // error decoder. A stale running/success overlay cannot erase it.
+                merged[index].state = .failed
+            }
             if merged[index].diagnostic == nil { merged[index].diagnostic = overlay.diagnostic }
         }
         merged.append(contentsOf: live.indices.filter { !consumed.contains($0) }.map { live[$0] })

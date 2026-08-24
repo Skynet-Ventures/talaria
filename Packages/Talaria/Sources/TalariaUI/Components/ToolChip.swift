@@ -28,6 +28,28 @@ enum ToolRunPresentationPolicy {
 
     static func shouldGroup(_ calls: [ToolCall]) -> Bool { calls.count > 1 }
 
+    /// File diffs are review deliverables, not collapsible activity. Preserve
+    /// order while grouping only the ordinary calls around them.
+    static func presentationRuns(_ calls: [ToolCall]) -> [[ToolCall]] {
+        var runs: [[ToolCall]] = []
+        var generic: [ToolCall] = []
+        func flush() {
+            guard !generic.isEmpty else { return }
+            runs.append(generic)
+            generic.removeAll(keepingCapacity: true)
+        }
+        for call in calls {
+            if call.fileDiff != nil, ToolDiffCodec.isFileEditTool(call.name) {
+                flush()
+                runs.append([call])
+            } else {
+                generic.append(call)
+            }
+        }
+        flush()
+        return runs
+    }
+
     static func summary(_ calls: [ToolCall]) -> String {
         let running = calls.filter { $0.state == .running }.count
         let failed = calls.filter { $0.state == .failed }.count
@@ -45,8 +67,6 @@ public struct ToolCallList: View {
     private let theme: ThemePack
     private let copy: CopyPack
     private let accent: Color
-    @State private var expanded = false
-    @Environment(\.talariaReducedMotion) private var reducedMotion
 
     public init(calls: [ToolCall], theme: ThemePack, copy: CopyPack, accent: Color) {
         self.calls = calls
@@ -57,44 +77,289 @@ public struct ToolCallList: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: theme.id == .ink ? 2 : 5) {
-            if ToolRunPresentationPolicy.shouldGroup(calls) {
-                Button {
-                    withAnimation(reducedMotion ? nil : .easeOut(duration: 0.18)) {
-                        expanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "wrench.and.screwdriver")
-                        Text(toolSummary).font(
-                            .system(ToolRunPresentationPolicy.summaryTextStyle)
-                                .weight(.semibold))
-                        Spacer(minLength: 4)
-                        Image(systemName: "chevron.right")
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                    }
-                    .foregroundStyle(theme.sub)
-                    .padding(.horizontal, 10)
-                    .frame(minHeight: ToolRunPresentationPolicy.minimumInteractiveDimension)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Tool activity, \(toolSummary)")
-                .accessibilityHint(expanded ? "Collapses tool details" : "Shows each tool call")
-                if expanded {
-                    ForEach(calls) { call in
-                        ToolChip(call: call, theme: theme, copy: copy, accent: accent)
-                    }
-                }
-            } else {
-                ForEach(calls) { call in
-                    ToolChip(call: call, theme: theme, copy: copy, accent: accent)
+            ForEach(Array(ToolRunPresentationPolicy.presentationRuns(calls).enumerated()),
+                    id: \.offset) { _, run in
+                if run.count == 1, let call = run.first,
+                   call.fileDiff != nil, ToolDiffCodec.isFileEditTool(call.name) {
+                    FileDiffCard(call: call, theme: theme, accent: accent)
+                } else {
+                    GenericToolRun(calls: run, theme: theme, copy: copy, accent: accent)
                 }
             }
         }
     }
+}
 
-    private var toolSummary: String {
-        ToolRunPresentationPolicy.summary(calls)
+private struct GenericToolRun: View {
+    let calls: [ToolCall]
+    let theme: ThemePack
+    let copy: CopyPack
+    let accent: Color
+    @State private var expanded = false
+    @Environment(\.talariaReducedMotion) private var reducedMotion
+
+    var body: some View {
+        if ToolRunPresentationPolicy.shouldGroup(calls) {
+            Button {
+                withAnimation(reducedMotion ? nil : .easeOut(duration: 0.18)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "wrench.and.screwdriver")
+                    Text(ToolRunPresentationPolicy.summary(calls))
+                        .font(.system(ToolRunPresentationPolicy.summaryTextStyle).weight(.semibold))
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right")
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                }
+                .foregroundStyle(theme.sub)
+                .padding(.horizontal, 10)
+                .frame(minHeight: ToolRunPresentationPolicy.minimumInteractiveDimension)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Tool activity, \(ToolRunPresentationPolicy.summary(calls))")
+            .accessibilityHint(expanded ? "Collapses tool details" : "Shows each tool call")
+            if expanded {
+                ForEach(calls) { call in
+                    ToolChip(call: call, theme: theme, copy: copy, accent: accent)
+                }
+            }
+        } else if let call = calls.first {
+            ToolChip(call: call, theme: theme, copy: copy, accent: accent)
+        }
+    }
+}
+
+struct FileDiffLine: Sendable, Equatable, Identifiable {
+    enum Kind: Sendable, Equatable { case addition, removal, context, header }
+    var id: Int
+    var kind: Kind
+    var text: String
+}
+
+enum FileDiffPresentationPolicy {
+    static let minimumInteractiveDimension: CGFloat = 44
+    static let titleTextStyle: Font.TextStyle = .subheadline
+    static let metadataTextStyle: Font.TextStyle = .caption
+    static let bodyTextStyle: Font.TextStyle = .caption
+    static let diffTextIsSelectable = true
+    static let disclosureUsesReducedMotionEnvironment = true
+
+    static func lines(_ diff: ToolFileDiff) -> [FileDiffLine] {
+        guard diff.state == .available, let unified = diff.unifiedDiff else { return [] }
+        return unified.split(separator: "\n", omittingEmptySubsequences: false)
+            .prefix(ToolDiffCodec.maximumLines).enumerated().map { offset, slice in
+                let text = String(slice)
+                let kind: FileDiffLine.Kind
+                if text.hasPrefix("+") && !text.hasPrefix("+++") {
+                    kind = .addition
+                } else if text.hasPrefix("-") && !text.hasPrefix("---") {
+                    kind = .removal
+                } else if text.hasPrefix("@@") || text.hasPrefix("diff --git")
+                            || text.hasPrefix("index ") || text.hasPrefix("---")
+                            || text.hasPrefix("+++") {
+                    kind = .header
+                } else {
+                    kind = .context
+                }
+                return FileDiffLine(id: offset, kind: kind, text: text)
+            }
+    }
+
+    static func basename(_ path: String?) -> String {
+        guard let path, !path.isEmpty else { return "Changed file" }
+        let normalized = path.replacingOccurrences(of: "\\", with: "/")
+        return normalized.split(separator: "/").last.map(String.init) ?? normalized
+    }
+
+    static func accessibilityValue(_ diff: ToolFileDiff, failed: Bool) -> String {
+        var parts = [failed ? "File edit failed" : "File edit completed",
+                     "\(diff.addedLines) additions", "\(diff.removedLines) removals"]
+        if diff.state == .malformed { parts.append("diff malformed") }
+        if diff.isTruncated { parts.append("preview truncated") }
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// Mobile specialist disclosure for one bounded, literal file-edit diff.
+private struct FileDiffCard: View {
+    let call: ToolCall
+    let theme: ThemePack
+    let accent: Color
+
+    @State private var expanded = true
+    @State private var copied = false
+    @Environment(\.talariaReducedMotion) private var reducedMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var diff: ToolFileDiff { call.fileDiff! }
+    private var rows: [FileDiffLine] { FileDiffPresentationPolicy.lines(diff) }
+    private var failed: Bool { call.state == .failed }
+    private var title: String { FileDiffPresentationPolicy.basename(diff.path) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(reducedMotion ? nil : .easeOut(duration: 0.18)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(alignment: dynamicTypeSize.isAccessibilitySize ? .top : .center,
+                       spacing: 7) {
+                    Text(verbatim: failed ? "✕" : (theme.id == .ink ? "·" : "✓"))
+                        .font(.system(.caption, design: .monospaced).weight(.bold))
+                        .foregroundStyle(failed ? theme.danger : theme.ok)
+                        .frame(width: 10)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: title)
+                            .font(.system(FileDiffPresentationPolicy.titleTextStyle).weight(.semibold))
+                            .foregroundStyle(failed ? theme.danger : theme.ink.opacity(0.88))
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+                            .truncationMode(.middle)
+                        if dynamicTypeSize.isAccessibilitySize,
+                           let path = diff.path, path != title {
+                            Text(verbatim: path)
+                                .font(.system(FileDiffPresentationPolicy.metadataTextStyle,
+                                              design: .monospaced))
+                                .foregroundStyle(theme.faint)
+                                .lineLimit(3).truncationMode(.middle)
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    if diff.addedLines > 0 {
+                        Text(verbatim: "+\(diff.addedLines)").foregroundStyle(theme.ok)
+                    }
+                    if diff.removedLines > 0 {
+                        Text(verbatim: "−\(diff.removedLines)").foregroundStyle(theme.danger)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(.caption2).weight(.bold)).foregroundStyle(theme.faint)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                }
+                .font(.system(FileDiffPresentationPolicy.metadataTextStyle,
+                              design: .monospaced).weight(.semibold))
+                .padding(.vertical, theme.id == .ink ? 5 : 7)
+                .padding(.horizontal, theme.id == .ink ? 8 : 10)
+                .frame(minHeight: FileDiffPresentationPolicy.minimumInteractiveDimension)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("File diff, \(title)")
+            .accessibilityValue(FileDiffPresentationPolicy.accessibilityValue(diff, failed: failed))
+            .accessibilityHint(expanded ? "Double-tap to hide the diff." : "Double-tap to show the diff.")
+
+            if expanded { diffBody }
+        }
+        .background(chrome)
+    }
+
+    private var diffBody: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if failed {
+                Text(call.summary?.isEmpty == false
+                     ? call.summary! : "The file-edit tool reported a failure.")
+                    .font(.system(FileDiffPresentationPolicy.titleTextStyle))
+                    .foregroundStyle(theme.danger)
+                    .textSelection(.enabled)
+            }
+            if let diagnostic = diff.diagnostic {
+                Label(diagnostic, systemImage: diff.state == .malformed
+                      ? "exclamationmark.triangle" : "scissors")
+                    .font(.system(FileDiffPresentationPolicy.titleTextStyle))
+                    .foregroundStyle(diff.state == .malformed ? theme.danger : theme.faint)
+                    .textSelection(.enabled)
+            }
+            if !rows.isEmpty {
+                HStack(spacing: 6) {
+                    Text(verbatim: diff.path ?? diff.sourceField.rawValue)
+                        .font(.system(FileDiffPresentationPolicy.metadataTextStyle,
+                                      design: .monospaced).weight(.semibold))
+                        .foregroundStyle(theme.faint).lineLimit(2).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Button {
+                        guard let unified = diff.unifiedDiff else { return }
+                        copyToPasteboard(unified)
+                        copied = true
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.caption).foregroundStyle(copied ? theme.ok : theme.faint)
+                            .frame(minWidth: FileDiffPresentationPolicy.minimumInteractiveDimension,
+                                   minHeight: FileDiffPresentationPolicy.minimumInteractiveDimension)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(copied ? "Diff copied" : "Copy diff")
+                    .accessibilityHint("Copies the bounded diff preview to the clipboard.")
+                }
+                ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(rows) { row in
+                            Text(verbatim: row.text.isEmpty ? " " : row.text)
+                                .font(.system(FileDiffPresentationPolicy.bodyTextStyle,
+                                              design: .monospaced))
+                                .foregroundStyle(foreground(for: row.kind))
+                                .padding(.horizontal, 7).padding(.vertical, 1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(background(for: row.kind))
+                                .fixedSize(horizontal: true, vertical: false)
+                                .textSelection(.enabled)
+                                .accessibilityLabel(accessibilityLabel(for: row))
+                        }
+                    }
+                }
+                .frame(maxHeight: 240)
+                .accessibilityLabel("Selectable unified diff preview")
+            }
+        }
+        .padding(.horizontal, theme.id == .ink ? 8 : 10)
+        .padding(.bottom, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func foreground(for kind: FileDiffLine.Kind) -> Color {
+        switch kind {
+        case .addition: theme.ok
+        case .removal: theme.danger
+        case .header: theme.faint
+        case .context: theme.sub
+        }
+    }
+
+    private func background(for kind: FileDiffLine.Kind) -> Color {
+        switch kind {
+        case .addition: theme.ok.opacity(0.1)
+        case .removal: theme.danger.opacity(0.1)
+        case .context, .header: .clear
+        }
+    }
+
+    private func accessibilityLabel(for row: FileDiffLine) -> String {
+        switch row.kind {
+        case .addition: "Added: \(String(row.text.dropFirst()))"
+        case .removal: "Removed: \(String(row.text.dropFirst()))"
+        case .context: "Context: \(row.text)"
+        case .header: "Diff header: \(row.text)"
+        }
+    }
+
+    @ViewBuilder private var chrome: some View {
+        switch theme.id {
+        case .soft:
+            RoundedRectangle(cornerRadius: 12).fill(theme.inset)
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(failed ? theme.danger.opacity(0.5) : accent.opacity(0.25),
+                                  lineWidth: 1))
+        case .control:
+            RoundedRectangle(cornerRadius: 6).fill(theme.panel)
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(failed ? theme.danger.opacity(0.6)
+                                  : theme.lineStrong.opacity(0.7), lineWidth: 1))
+        case .ink:
+            Rectangle().fill(Color.clear)
+                .overlay(alignment: .bottom) { Rectangle().fill(theme.line).frame(height: 1) }
+        }
     }
 }
 
