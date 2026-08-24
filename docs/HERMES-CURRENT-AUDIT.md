@@ -22,6 +22,61 @@ change or a material portable-contract delta creates a parity blocker;
 metadata, test-only, or non-portable drift can be recorded without chasing the
 moving head.
 
+## Targeted MCP per-server log audit at `e400e008`
+
+The MCP management follow-up was audited directly against exact Hermes source
+`e400e0088767a596ee21985d661a924cb087775a`, with Talaria based on the exact
+MCP live-reload dependency head
+`9851fca979f40b08df283855de290de4e3f04568`. It is **blocked upstream**; no
+phone log reader should be built from the current contract.
+
+Hermes exposes only `GET /api/logs` in `hermes_cli/web_server.py`. Its request
+has `file`, `lines`, `level`, `component`, and `search`, but no profile or MCP
+server identity. Its response is only `{ file, lines }`: it does not echo a
+resolved profile, canonical server id, source, generation/revision, cursor, or
+truncation fact. The handler reads the active process's `get_hermes_home()` and
+therefore cannot prove that a remote request resolved the profile Talaria
+selected. Adding an unrecognized `profile` query would not create that proof.
+
+Desktop does not consume an authoritative per-server endpoint. In
+`apps/desktop/src/app/skills/mcp-tab.tsx`, it polls the shared
+`mcp-stderr.log` tail every two seconds and attributes sections client-side by
+matching `starting MCP server '<name>'` markers. A bounded tail can begin in
+the middle of a section. The alternate agent-log view uses a case-insensitive
+substring search for the selected server name. Both paths can omit or
+misattribute rows when names collide or the relevant marker fell outside the
+tail; neither establishes canonical server identity. Desktop's Electron
+process routing can launch/retain a profile-specific backend for an unscoped
+dashboard route, but that host-local mechanism is not a portable remote
+gateway contract Talaria can reproduce.
+
+The current reader caps returned row count at 500 (and scans at most 2,000
+rows for search), but it supplies no response-wide byte cap, per-row text cap,
+structured safe fields, or server-side redaction guarantee. Raw MCP stderr and
+agent logs may contain credentials, tool input/output, headers, paths, or
+other operator-only data. Client-side clipping or pattern redaction cannot
+turn that raw stream into an authoritative safe contract.
+
+This row can resume only after Hermes provides a server-validated endpoint
+that:
+
+- accepts a profile and exact snapshot-declared MCP server id, then echoes the
+  canonical resolved profile, server id, and source;
+- rejects unknown/ambiguous ids rather than interpolating or substring
+  matching them;
+- returns server-attributed, server-redacted rows under explicit wire, row,
+  and per-row text bounds, with honest truncation and a cursor or revision;
+- defines lifecycle semantics that let Talaria revalidate the captured
+  gateway, profile, client, generation, server id, and cursor after every
+  await; and
+- supports manual refresh, or an exact-source change event if freshness
+  requires push. The Desktop polling loop is not authority to add phone
+  polling.
+
+Until then, the honest mobile state is unsupported. Shipping a shared-log
+viewer labelled as one server would weaken profile isolation and could expose
+secrets, so no UI, transport, cache, or polling task is added.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit
@@ -192,7 +247,7 @@ therefore never inferred as removal.
 | Unknown explicit Project profile | Hermes currently falls back to the launch profile. Talaria revalidates the selected route immediately before writes and fails closed, but Hermes should reject an explicit unknown profile. |
 | Cron per-job reasoning effort | Implemented as an explicitly authorized mobile REST mutation. Talaria decodes and displays the raw field, preserves unknown values on unrelated edits, and sends only canonical/clear values through the exact REST PUT normalizer, which delegates to Hermes' canonical `cron.jobs.update_job` validation. The model tool remains read-only and cannot set this job-owned field. Live certification remains open. |
 | Rich transcript parity | Partial: markdown, tables, code, working avatar, transcript actions, jump-to-bottom, exact-source message-level child creation, and bounded typed tool-history hydration now exist. The mobile generic fallback groups larger runs and discloses status, arguments, result, provenance, and diagnostics without name/prose pairing. Explicit file-edit diffs now hydrate and overlay only by exact tool id, then render as bounded, sanitized, selectable mobile disclosures with +/- counts; live gateway/device proof remains open. Persistent multimodal parts, generated images/lightbox, specialist ANSI/search/math/diagram renderers, per-message TTS, whole-turn timing, the N/M alternative-branch picker, lineage presentation, and tour/activity remain. |
-| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator surfaces exist. Messaging platform/webhook/relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, profile import/export, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. |
+| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator surfaces exist. Messaging platform/webhook/relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, profile import/export, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. MCP per-server logs are explicitly blocked: exact Hermes `e400e008` exposes only an unscoped shared raw-log tail and Desktop applies heuristic client-side attribution; the targeted audit above defines the safe upstream contract required before mobile work resumes. |
 | Git/System depth | Partial: core review and guarded mutations exist. Base/commit/ship context, dirty-worktree recovery, worktree-session integration, usage periods/daily/model/skill detail, and multi-gateway backend update orchestration remain. |
 | Artifact completeness | Exact retained-source discovery is implemented with atomic no-dial snapshots, sequential reads, compacted rows, collision isolation, and explicit bounded/stale/failure state. Retained bodies use the exact captured client only after `/api/files` proves one canonical locked root; root and body responses are wire-bounded, authority is rechecked after awaits, and sign-out purges source-owned bytes. Hermes `session.list` still has no global continuation, transcript offsets remain informational under Talaria's 150-item cap, and gateways returning `locked_root: nil` remain fail-closed. Live certification remains open. |
 
