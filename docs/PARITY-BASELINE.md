@@ -14,6 +14,9 @@ are not current until they are regenerated against this baseline.
   [`parity/hermes-upstream.json`](../parity/hermes-upstream.json)
 - Audited contract delta and remaining certification:
   [`docs/HERMES-CURRENT-AUDIT.md`](HERMES-CURRENT-AUDIT.md)
+- Later authority-file-only delta through `057dcdf23` (63 exact commits; does
+  not move this canonical pin):
+  [`docs/HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md`](HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md)
 
 The earlier `b5455fdd..c1e25cad` drift was material: it changed all five
 authority files and added canonical-chat adoption, renamed-friendly mentions,
