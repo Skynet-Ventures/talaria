@@ -51,6 +51,11 @@ final class RoomRuntime {
     /// boundary lets adversarial policy tests avoid inventing a gateway.
     @ObservationIgnored var sessionReadOperation:
         (@MainActor (RoomAttempt) async throws -> RoomMemberSessionSnapshot)?
+    /// Test seam at the exact interrupt boundary. Production captures a pool
+    /// generation and holds both the pool and profile-traffic leases while it
+    /// re-resolves and interrupts the stored/runtime session pair.
+    @ObservationIgnored var memberHoldInterruptOperation:
+        (@MainActor (RoomMemberHold) async -> RoomMemberHoldInterruptState)?
     /// Test seam for prompt answers. The value is the fully source-qualified
     /// wire shape, so tests can prove an answer cannot borrow a foreground or
     /// same-named member's client.
@@ -1212,6 +1217,7 @@ public extension AppModel {
                         current.activity.removeAll()
                     }
                     let departed = current.members.filter { !currentRoutes.contains($0.route) }
+                    current.memberHolds.removeAll { !currentRoutes.contains($0.member) }
                     for member in departed where !current.formerMembers.contains(where: { $0.route == member.route }) {
                         current.formerMembers.append(member)
                     }
@@ -1814,6 +1820,33 @@ extension AppModel {
         let routeGeneration = runtime.profileRouteGeneration(member.route)
         guard runtime.acceptsProfileRoute(member.route, generation: routeGeneration) else { return }
 
+        // A hold is durable arbitration authority, not a presentation flag.
+        // Consume this member's current delta once so resuming never replays
+        // text that peers already handled, then let the serialized driver move
+        // on to the next exact source-qualified member.
+        if let hold = room.memberHolds.first(where: { $0.member == member.route }) {
+            let entryCount = room.entries.count
+            guard let held = try? await runtime.store.mutate(roomID: roomID, { current in
+                guard current.epoch == epoch,
+                      let index = current.memberHolds.firstIndex(where: {
+                          $0.id == hold.id && $0.member == member.route
+                      }) else { throw CancellationError() }
+                current.watermarks[RoomEngine.watermarkKey(
+                    threadID: threadID, member: member.route)] = entryCount
+                if current.memberHolds[index].lastNotedEpoch != epoch {
+                    current.memberHolds[index].lastNotedEpoch = epoch
+                    current.memberHolds[index].updatedAt = Date()
+                    RoomEngine.recordActivity(RoomActivity(
+                        epoch: epoch, kind: .held, member: member.route,
+                        threadID: threadID), in: &current)
+                }
+            }) else { return }
+            guard runtime.acceptsProfileRoute(member.route,
+                                              generation: routeGeneration) else { return }
+            runtime.replace(held)
+            return
+        }
+
         // An accepted/uncertain/timed-out attempt is stranded work. Harvest it
         // at boundaries; never submit a replacement into that session.
         if room.attempts.contains(where: {
@@ -1875,7 +1908,9 @@ extension AppModel {
             // submission; a later round can consider fresh deltas normally.
             guard runtime.acceptsProfileRoute(member.route, generation: routeGeneration) else { return }
             if let waiting = try? await runtime.store.mutate(roomID: roomID, { current in
-                guard current.epoch == epoch else { throw CancellationError() }
+                guard current.epoch == epoch,
+                      !current.memberHolds.contains(where: { $0.member == member.route })
+                else { throw CancellationError() }
                 current.memberSessions[member.route.qualifiedID] = session.storedID
                 current.attempts.append(attempt)
                 RoomEngine.recordActivity(RoomActivity(epoch: epoch, kind: .queued,
@@ -1890,7 +1925,9 @@ extension AppModel {
 
         guard runtime.acceptsProfileRoute(member.route, generation: routeGeneration) else { return }
         guard let persisted = try? await runtime.store.mutate(roomID: roomID, { current in
-            guard current.epoch == epoch else { throw CancellationError() }
+            guard current.epoch == epoch,
+                  !current.memberHolds.contains(where: { $0.member == member.route })
+            else { throw CancellationError() }
             current.memberSessions[member.route.qualifiedID] = session.storedID
             current.attempts.append(attempt)
             RoomEngine.recordActivity(RoomActivity(epoch: epoch, kind: .working,
@@ -1902,21 +1939,66 @@ extension AppModel {
 
         let outbound = await roomOutboundAttachments(roomID: roomID,
                                                      descriptors: attempt.outboundAttachments)
-        let submitted: RoomPromptSubmission
-        if let operation = runtime.submitOperation {
-            submitted = await operation(attempt, session, outbound)
-        } else {
-            submitted = await client.submitRoomPrompt(
-                attempt: attempt, session: session,
-                profile: member.route.profile, attachments: outbound)
-        }
-
-        guard runtime.acceptsProfileRoute(member.route, generation: routeGeneration) else { return }
-        let saved = await persistRoomSubmission(roomID: roomID, attemptID: attempt.id,
-                                                member: member.route, epoch: epoch,
-                                                threadID: threadID, submitted: submitted,
-                                                routeGeneration: routeGeneration)
-        if saved, case .accepted = submitted.acceptance {
+        // Serialize the final pre-dispatch check through the same room gate as
+        // Hold. If Hold wins, this persisted-but-unsent attempt is cancelled
+        // locally. If submit wins, Hold observes the exact attempt only after
+        // its acceptance outcome is durable and can safely stop/reconcile it.
+        let accepted = (try? await RoomMutationGate.shared.withLock(roomID.description) {
+            guard runtime.acceptsProfileRoute(
+                member.route, generation: routeGeneration),
+                  let current = try await runtime.store.room(id: roomID),
+                  current.epoch == epoch,
+                  let currentAttempt = current.attempts.first(where: {
+                    $0.id == attempt.id && $0.member == member.route
+                        && $0.finishedAt == nil
+                  }) else { throw CancellationError() }
+            if let hold = current.memberHolds.first(where: {
+                $0.member == member.route
+            }) {
+                let entryCount = current.entries.count
+                let cancelled = try await runtime.store.mutate(roomID: roomID) { value in
+                    guard value.epoch == epoch,
+                          let attemptIndex = value.attempts.firstIndex(where: {
+                            $0.id == currentAttempt.id && $0.finishedAt == nil
+                          }), let holdIndex = value.memberHolds.firstIndex(where: {
+                            $0.id == hold.id && $0.member == member.route
+                          }) else { throw CancellationError() }
+                    value.attempts[attemptIndex].state = .cancelled
+                    value.attempts[attemptIndex].finishedAt = Date()
+                    value.attempts[attemptIndex].outboundAttachments = []
+                    value.watermarks[RoomEngine.watermarkKey(
+                        threadID: threadID, member: member.route)] = entryCount
+                    if value.memberHolds[holdIndex].lastNotedEpoch != epoch {
+                        value.memberHolds[holdIndex].lastNotedEpoch = epoch
+                        value.memberHolds[holdIndex].updatedAt = Date()
+                        RoomEngine.recordActivity(RoomActivity(
+                            epoch: epoch, kind: .held, member: member.route,
+                            threadID: threadID), in: &value)
+                    }
+                }
+                runtime.replace(cancelled)
+                return false
+            }
+            let submitted: RoomPromptSubmission
+            if let operation = runtime.submitOperation {
+                submitted = await operation(attempt, session, outbound)
+            } else {
+                submitted = await client.submitRoomPrompt(
+                    attempt: attempt, session: session,
+                    profile: member.route.profile, attachments: outbound)
+            }
+            guard runtime.acceptsProfileRoute(
+                member.route, generation: routeGeneration) else {
+                throw CancellationError()
+            }
+            let saved = await persistRoomSubmission(
+                roomID: roomID, attemptID: attempt.id, member: member.route,
+                epoch: epoch, threadID: threadID, submitted: submitted,
+                routeGeneration: routeGeneration)
+            if saved, case .accepted = submitted.acceptance { return true }
+            return false
+        }) ?? false
+        if accepted {
             await waitForRoomReply(roomID: roomID, attemptID: attempt.id)
         }
     }

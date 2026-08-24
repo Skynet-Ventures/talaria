@@ -190,8 +190,12 @@ public actor RoomStore {
 
         var rooms: [RoomID: RoomRecord] = [:]
         var migrated = false
+        let recoveryTime = Date()
         for original in envelope.rooms {
             var room = original
+            if recoverInterruptedMemberHolds(in: &room, at: recoveryTime) {
+                migrated = true
+            }
             migrated = RoomEngine.migrateLegacyThreads(in: &room) || migrated
             do { try RoomEngine.validate(room) }
             catch { throw RoomStoreError.invalidRoom(room.id) }
@@ -223,6 +227,23 @@ public actor RoomStore {
         }
         cachedRooms = rooms
         return sorted(rooms.values)
+    }
+
+    /// No interrupt task survives process death. A durable pending row is
+    /// therefore recovery evidence of an unknown result, never permission to
+    /// retry or to release the scheduling hold.
+    private func recoverInterruptedMemberHolds(
+        in room: inout RoomRecord, at recoveryTime: Date
+    ) -> Bool {
+        var changed = false
+        for index in room.memberHolds.indices
+        where room.memberHolds[index].interruptState == .pending {
+            room.memberHolds[index].interruptState = .ambiguous
+            room.memberHolds[index].updatedAt = recoveryTime
+            changed = true
+        }
+        if changed { room.updatedAt = recoveryTime }
+        return changed
     }
 
     public func room(id: RoomID) throws -> RoomRecord? {
@@ -1028,6 +1049,8 @@ public actor RoomStore {
                          from source: GatewayBotRoute,
                          to destination: GatewayBotRoute) {
         var changed = false
+        let hadLiveSeatCollision = room.members.contains(where: { $0.route == source })
+            && room.members.contains(where: { $0.route == destination })
         if room.members.contains(where: { $0.route == source }),
            room.formerMembers.contains(where: { $0.route == destination }) {
             room.formerMembers.removeAll { $0.route == destination }
@@ -1075,6 +1098,20 @@ public actor RoomStore {
             let before = room.formerMembers.count
             room.formerMembers.removeAll { $0.route == source }
             changed = changed || before != room.formerMembers.count
+        }
+        if hadLiveSeatCollision {
+            // Two live seats collapsing onto one route cannot prove which
+            // membership a sticky hold belongs to. Retire both rather than
+            // transferring stop authority across a collision.
+            let before = room.memberHolds.count
+            room.memberHolds.removeAll { $0.member == source || $0.member == destination }
+            changed = changed || before != room.memberHolds.count
+        } else {
+            for index in room.memberHolds.indices where room.memberHolds[index].member == source {
+                room.memberHolds[index].member = destination
+                room.memberHolds[index].updatedAt = Date()
+                changed = true
+            }
         }
         for index in room.entries.indices where room.entries[index].memberRoute == source {
             room.entries[index].memberRoute = destination
@@ -1153,6 +1190,9 @@ public actor RoomStore {
             }
             changed = true
         }
+        let holdCount = room.memberHolds.count
+        room.memberHolds.removeAll { $0.member == route }
+        changed = changed || room.memberHolds.count != holdCount
         for index in room.attempts.indices where room.attempts[index].member == route
             && room.attempts[index].finishedAt == nil {
             room.attempts[index].state = .cancelled

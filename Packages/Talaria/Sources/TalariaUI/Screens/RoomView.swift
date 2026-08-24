@@ -25,6 +25,8 @@ public struct RoomView: View {
     @State private var abandonAttemptID: RoomAttemptID?
     @State private var showSettings = false
     @State private var disbanding = false
+    @State private var holdCandidate: GatewayBotRoute?
+    @State private var holdBusy = Set<GatewayBotRoute>()
     @State private var error: String?
 
     public init(model: AppModel, roomID: RoomID) {
@@ -61,6 +63,7 @@ public struct RoomView: View {
                 }
                 pendingPromptPanel(room)
                 unresolvedPanel(room)
+                memberHoldPanel(room)
                 activityPanel(room)
                 timeline(room)
                 let liveMembers = room.members.filter { !$0.isFrozenProjection }
@@ -107,6 +110,19 @@ public struct RoomView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("The local room log and attachments are removed. Member sessions stay in Hermes.")
+        }
+        .confirmationDialog("Hold this member?", isPresented: Binding(
+            get: { holdCandidate != nil },
+            set: { if !$0 { holdCandidate = nil } }
+        ), titleVisibility: .visible) {
+            Button("Stop Current Turn & Hold", role: .destructive) {
+                guard let route = holdCandidate else { return }
+                holdCandidate = nil
+                hold(route)
+            }
+            Button("Cancel", role: .cancel) { holdCandidate = nil }
+        } message: {
+            Text("Talaria will stop this member's exact current room turn when it can prove the session, then skip future room turns until you resume. Other members keep going.")
         }
         .alert("Mark this turn as not sent?", isPresented: Binding(
             get: { abandonAttemptID != nil },
@@ -211,6 +227,103 @@ public struct RoomView: View {
             .padding(.horizontal, 14).padding(.vertical, 9)
             .background(theme.warn.opacity(0.08))
             .overlay(alignment: .bottom) { Rectangle().fill(theme.warn.opacity(0.3)).frame(height: 1) }
+        }
+    }
+
+    @ViewBuilder private func memberHoldPanel(_ room: RoomRecord) -> some View {
+        let live = room.members.filter { !$0.isFrozenProjection }
+        if !live.isEmpty {
+            DisclosureGroup {
+                VStack(spacing: 0) {
+                    ForEach(live) { member in
+                        let hold = room.memberHolds.first { $0.member == member.route }
+                        HStack(alignment: .center, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("@\(member.handle)")
+                                    .font(theme.body(11, weight: .semibold))
+                                    .foregroundStyle(theme.ink)
+                                if let hold {
+                                    Text(holdStatusText(hold))
+                                        .font(theme.body(9)).foregroundStyle(
+                                            hold.interruptState == .ambiguous
+                                                ? theme.warn : theme.faint)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Text("Active in room rounds")
+                                        .font(theme.body(9)).foregroundStyle(theme.faint)
+                                }
+                            }
+                            Spacer(minLength: 8)
+                            if let hold {
+                                Button("Resume") { resume(hold) }
+                                    .buttonStyle(.plain)
+                                    .font(theme.body(10, weight: .semibold))
+                                    .foregroundStyle(theme.accent)
+                                    .frame(minWidth: 70, minHeight: 44)
+                                    .accessibilityLabel("Resume \(member.title ?? member.handle) in this room")
+                                    .accessibilityHint("Allows this exact member to receive future room turns")
+                                    .disabled(holdBusy.contains(member.route))
+                            } else {
+                                Button("Hold") { holdCandidate = member.route }
+                                    .buttonStyle(.plain)
+                                    .font(theme.body(10, weight: .semibold))
+                                    .foregroundStyle(theme.danger)
+                                    .frame(minWidth: 70, minHeight: 44)
+                                    .accessibilityLabel("Stop and hold \(member.title ?? member.handle)")
+                                    .accessibilityHint("Confirms before stopping the exact current turn and skipping future room turns")
+                                    .disabled(holdBusy.contains(member.route))
+                            }
+                        }
+                        .padding(.vertical, 2)
+                        if member.id != live.last?.id {
+                            Rectangle().fill(theme.line).frame(height: 1)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                Label(room.memberHolds.isEmpty ? "Member controls" : "\(room.memberHolds.count) held",
+                      systemImage: room.memberHolds.isEmpty ? "pause.circle" : "pause.circle.fill")
+                    .font(theme.body(11, weight: .semibold))
+                    .foregroundStyle(room.memberHolds.isEmpty ? theme.faint : theme.warn)
+                    .frame(minHeight: 44)
+            }
+            .padding(.horizontal, 14)
+            .background(theme.ink.opacity(0.025))
+        }
+    }
+
+    private func holdStatusText(_ hold: RoomMemberHold) -> String {
+        switch hold.interruptState {
+        case .notNeeded: "Held · no active room turn"
+        case .pending: "Held · stopping the exact current turn"
+        case .confirmed: "Held · current room turn stopped"
+        case .alreadyIdle: "Held · current room turn was already idle"
+        case .staleAuthority: "Held · session changed, so nothing was stopped"
+        case .failed: "Held · current turn could not be stopped"
+        case .ambiguous: "Held · stop result is uncertain; current work may continue"
+        }
+    }
+
+    private func hold(_ route: GatewayBotRoute) {
+        guard holdBusy.insert(route).inserted else { return }
+        error = nil
+        Task { @MainActor in
+            do { try await model.holdRoomMember(roomID: roomID, member: route) }
+            catch { self.error = error.localizedDescription }
+            holdBusy.remove(route)
+        }
+    }
+
+    private func resume(_ hold: RoomMemberHold) {
+        guard holdBusy.insert(hold.member).inserted else { return }
+        error = nil
+        Task { @MainActor in
+            do {
+                try await model.resumeRoomMember(
+                    roomID: roomID, holdID: hold.id, member: hold.member)
+            } catch { self.error = error.localizedDescription }
+            holdBusy.remove(hold.member)
         }
     }
 

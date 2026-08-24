@@ -369,6 +369,7 @@ public struct RoomAttempt: Codable, Hashable, Sendable, Identifiable {
 
 public enum RoomActivityKind: String, Codable, Sendable {
     case queued, working, replied, passed, uncertain, timedOut, failed, cancelled, settled, delivered
+    case held
 }
 
 public enum RoomDriveStatus: String, Codable, Sendable {
@@ -469,6 +470,8 @@ public struct RoomRecord: Codable, Hashable, Sendable, Identifiable {
     public var memberSessions: [String: String]
     /// Entry watermarks keyed by `<thread UUID>::<qualified member route>`.
     public var watermarks: [String: Int]
+    /// Local-only sticky member holds. Never projected into shared ui_meta.
+    public var memberHolds: [RoomMemberHold]
     public var epoch: UInt64
     public var needsUser: Bool
     public var createdAt: Date
@@ -485,6 +488,7 @@ public struct RoomRecord: Codable, Hashable, Sendable, Identifiable {
                 attempts: [RoomAttempt] = [], drives: [RoomDriveState] = [],
                 activity: [RoomActivity] = [],
                 memberSessions: [String: String] = [:], watermarks: [String: Int] = [:],
+                memberHolds: [RoomMemberHold] = [],
                 epoch: UInt64 = 0, needsUser: Bool = false,
                 createdAt: Date = Date(), updatedAt: Date? = nil) {
         self.id = id; self.rawProjectionRoomKey = rawProjectionRoomKey
@@ -497,7 +501,8 @@ public struct RoomRecord: Codable, Hashable, Sendable, Identifiable {
         self.threads = threads; self.entries = entries; self.attempts = attempts
         self.drives = drives
         self.activity = activity; self.memberSessions = memberSessions
-        self.watermarks = watermarks; self.epoch = epoch; self.needsUser = needsUser
+        self.watermarks = watermarks; self.memberHolds = memberHolds
+        self.epoch = epoch; self.needsUser = needsUser
         self.createdAt = createdAt; self.updatedAt = updatedAt ?? createdAt
     }
 
@@ -505,7 +510,7 @@ public struct RoomRecord: Codable, Hashable, Sendable, Identifiable {
         case id, rawProjectionRoomKey, rawProjectionRevision, name
         case sessionTitleIdentityVersion, legacySessionTitleName
         case members, formerMembers, avatar, threads, entries, attempts, drives
-        case activity, memberSessions, watermarks, epoch, needsUser, createdAt, updatedAt
+        case activity, memberSessions, watermarks, memberHolds, epoch, needsUser, createdAt, updatedAt
     }
 
     /// Additive room-state fields decode to their original empty meanings.
@@ -543,6 +548,8 @@ public struct RoomRecord: Codable, Hashable, Sendable, Identifiable {
         memberSessions = try values.decodeIfPresent([String: String].self,
                                                     forKey: .memberSessions) ?? [:]
         watermarks = try values.decodeIfPresent([String: Int].self, forKey: .watermarks) ?? [:]
+        memberHolds = try values.decodeIfPresent([RoomMemberHold].self,
+                                                 forKey: .memberHolds) ?? []
         epoch = try values.decodeIfPresent(UInt64.self, forKey: .epoch) ?? 0
         needsUser = try values.decodeIfPresent(Bool.self, forKey: .needsUser) ?? false
         createdAt = try values.decode(Date.self, forKey: .createdAt)

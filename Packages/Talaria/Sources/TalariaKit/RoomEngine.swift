@@ -128,6 +128,13 @@ public enum RoomEngine {
         }) {
             throw RoomValidationError.invalidWatermark
         }
+        let activeRoutes = Set(room.members.map(\.route))
+        guard room.memberHolds.count <= maximumMembers,
+              Set(room.memberHolds.map(\.id)).count == room.memberHolds.count,
+              Set(room.memberHolds.map(\.member)).count == room.memberHolds.count,
+              room.memberHolds.allSatisfy({
+                  $0.isStructurallyValid(activeMembers: activeRoutes, threadIDs: threadIDs)
+              }) else { throw RoomValidationError.invalidRoute }
         guard room.entries.count <= retainedEntries,
               room.activity.count <= activityLimit,
               room.activity.allSatisfy({ $0.epoch == room.epoch })
