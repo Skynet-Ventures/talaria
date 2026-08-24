@@ -5,7 +5,7 @@ import XCTest
 @testable import TalariaUI
 
 private actor DurableQueueRPCProbe {
-    enum SubmitResult: Sendable { case accepted, ambiguous }
+    enum SubmitResult: Sendable { case accepted, refused, ambiguous }
     enum ResumeState: Sendable, Equatable {
         case idle
         case running
@@ -16,6 +16,7 @@ private actor DurableQueueRPCProbe {
 
     private var running = false
     private var resumeStates: [String: ResumeState] = [:]
+    private var resumedStoredIDOverrides: [String: String] = [:]
     private var submitResult: SubmitResult = .accepted
     private var submittedTexts: [String] = []
     private var rpcMethods: [String] = []
@@ -24,6 +25,9 @@ private actor DurableQueueRPCProbe {
     func setRunning(_ value: Bool) { running = value }
     func setResumeState(_ state: ResumeState, for storedID: String) {
         resumeStates[storedID] = state
+    }
+    func setResumedStoredID(_ storedID: String, for requestedID: String) {
+        resumedStoredIDOverrides[requestedID] = storedID
     }
     func setSubmitResult(_ value: SubmitResult) { submitResult = value }
     func setBeforeSubmit(_ value: (@Sendable () async -> Void)?) {
@@ -36,8 +40,9 @@ private actor DurableQueueRPCProbe {
         rpcMethods.append(method)
         switch method {
         case "session.resume":
-            let storedID = params?["session_id"]?.stringValue ?? ""
-            let state = resumeStates[storedID] ?? (running ? .running : .idle)
+            let requestedStoredID = params?["session_id"]?.stringValue ?? ""
+            let storedID = resumedStoredIDOverrides[requestedStoredID] ?? requestedStoredID
+            let state = resumeStates[requestedStoredID] ?? (running ? .running : .idle)
             var payload: [String: JSONValue] = [
                 "session_id": .string("runtime-\(storedID)"),
                 "stored_session_id": .string(storedID),
@@ -64,6 +69,9 @@ private actor DurableQueueRPCProbe {
             await beforeSubmit?()
             let text = params?["text"]?.stringValue ?? ""
             submittedTexts.append(text)
+            if submitResult == .refused {
+                throw GatewayError(code: 409, message: "busy")
+            }
             if submitResult == .ambiguous {
                 throw URLError(.networkConnectionLost)
             }
@@ -99,6 +107,188 @@ final class DurableComposerQueueTests: XCTestCase {
         return await predicate()
     }
 
+    func testStoreRefusesAttachmentsAndEnforcesEntryCap() throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertThrowsError(try store.enqueue(
+            key: key(), text: "with attachment", attachments: 1)) { error in
+            XCTAssertEqual(error as? DurableComposerQueueStoreError, .attachmentRefused)
+        }
+        XCTAssertTrue(store.allEntries().isEmpty)
+
+        for index in 0..<DurableComposerQueuePolicy.maxEntries {
+            _ = try store.enqueue(key: key("entry-" + String(index)), text: "bounded")
+        }
+        XCTAssertThrowsError(try store.enqueue(key: key("overflow"), text: "bounded")) { error in
+            XCTAssertEqual(error as? DurableComposerQueueStoreError,
+                           .entryLimitReached(maximum: DurableComposerQueuePolicy.maxEntries))
+        }
+        XCTAssertEqual(store.allEntries().count, DurableComposerQueuePolicy.maxEntries)
+    }
+
+    func testPersistedByteCapRollsBackWithoutChangingThePreviousEnvelope() throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let entry = try store.enqueue(key: key(), text: "stable")
+        let originalData = try Data(contentsOf: url)
+
+        XCTAssertThrowsError(try store.recordAutomaticFailure(
+            id: entry.id,
+            error: String(repeating: "e", count: DurableComposerQueuePolicy.maxPersistedBytes))) { error in
+            XCTAssertEqual(error as? DurableComposerQueueStoreError,
+                           .persistedBytesLimitReached(
+                               maximum: DurableComposerQueuePolicy.maxPersistedBytes))
+        }
+        XCTAssertEqual(store.entry(id: entry.id), entry)
+        XCTAssertEqual(try Data(contentsOf: url), originalData)
+        XCTAssertEqual(DurableComposerQueueStore(fileURL: url).entry(id: entry.id), entry)
+    }
+
+    func testProtectionAssertionFailureLeavesPreviousEnvelopeRecoverable() throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let entry = try store.enqueue(key: key(), text: "before")
+        let originalData = try Data(contentsOf: url)
+        store.protectionAssertionForTesting = { throw TestFailure.persistence }
+
+        XCTAssertThrowsError(try store.replaceLocalText(id: entry.id, text: "after"))
+        XCTAssertEqual(store.entry(id: entry.id), entry)
+        XCTAssertEqual(try Data(contentsOf: url), originalData)
+        XCTAssertEqual(DurableComposerQueueStore(fileURL: url).entry(id: entry.id), entry)
+    }
+
+    func testCorruptOversizedAndReadFailureStatesFailClosed() throws {
+        let corruptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("talaria-corrupt-" + UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: corruptURL) }
+        try Data("not-json".utf8).write(to: corruptURL)
+        let corrupt = DurableComposerQueueStore(fileURL: corruptURL)
+        XCTAssertTrue(corrupt.loadedCorruptData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: corruptURL.path))
+        // A corrupt envelope is cleared and may be replaced explicitly; this
+        // assertion documents that the constructor did not manufacture any
+        // replayable row from malformed bytes.
+        XCTAssertTrue(corrupt.allEntries().isEmpty)
+        _ = try corrupt.enqueue(key: key(), text: "recovered")
+
+        let oversizedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("talaria-oversized-" + UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: oversizedURL) }
+        try Data(repeating: 0, count: DurableComposerQueuePolicy.maxPersistedBytes + 1)
+            .write(to: oversizedURL)
+        let oversized = DurableComposerQueueStore(fileURL: oversizedURL)
+        XCTAssertTrue(oversized.loadedCorruptData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oversizedURL.path))
+
+        let unreadableURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("talaria-read-failure-" + UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: unreadableURL) }
+        try FileManager.default.createDirectory(at: unreadableURL,
+                                                withIntermediateDirectories: false)
+        let unreadable = DurableComposerQueueStore(fileURL: unreadableURL)
+        XCTAssertTrue(unreadable.loadedReadFailure)
+        XCTAssertThrowsError(try unreadable.enqueue(key: key(), text: "must stay parked")) { error in
+            XCTAssertEqual(error as? DurableComposerQueueStoreError,
+                           .unavailableAfterReadFailure)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unreadableURL.path))
+    }
+
+    func testOnDiskSubmittingNormalizesToUncertainBeforeAnyReplay() throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let entry = try store.enqueue(key: key(), text: "in flight")
+        try store.markSubmitting(id: entry.id)
+
+        let reopened = DurableComposerQueueStore(fileURL: url)
+        let normalized = try XCTUnwrap(reopened.entry(id: entry.id))
+        XCTAssertEqual(normalized.state, .uncertain)
+        XCTAssertFalse(normalized.state.isAutomaticallyReplayable)
+        XCTAssertNil(DurableComposerQueuePolicy.nextFIFOEntry(
+            reopened.entries(for: normalized.key)))
+        XCTAssertEqual(DurableComposerQueueStore(fileURL: url).entry(id: entry.id)?.state,
+                       .uncertain)
+    }
+
+    func testRetryExhaustedIsRetainedAcrossReconnectUntilExplicitAction() throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let entry = try store.enqueue(key: key(), text: "retry later")
+        for _ in 0..<DurableComposerQueuePolicy.maxAutomaticFailures {
+            _ = try store.recordAutomaticFailure(id: entry.id, error: "busy")
+        }
+        XCTAssertEqual(store.entry(id: entry.id)?.state, .retryExhausted)
+        XCTAssertFalse(DurableComposerQueueState.retryExhausted.isLocalReplayable)
+        XCTAssertFalse(DurableComposerQueueState.retryExhausted.isAutomaticallyReplayable)
+        XCTAssertNil(DurableComposerQueuePolicy.nextFIFOEntry(store.entries(for: entry.key)))
+
+        for forbidden in [DurableComposerQueueState.submitting,
+                          .acceptedGatewayOwned, .uncertain] {
+            XCTAssertThrowsError(try store.setState(id: entry.id, state: forbidden)) { error in
+                XCTAssertEqual(error as? DurableComposerQueueStoreError,
+                               .invalidTransition(from: .retryExhausted, to: forbidden))
+            }
+        }
+
+        let model = AppModel(queueStore: store)
+        XCTAssertFalse(model.claimDurableComposerEntry(id: entry.id))
+        try store.resume(key: entry.key)
+        XCTAssertTrue(model.claimDurableComposerEntry(id: entry.id))
+        model.releaseDurableComposerEntryClaim(entry.id)
+    }
+
+    func testProfileRenamePreflightParksRowsOrRefusesBeforeRemoteMutation() throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = AppModel(queueStore: store)
+        let route = GatewayBotRoute(gatewayID: "rename-gateway", profile: "worker")
+        let ready = try store.enqueue(
+            key: DurableComposerQueueKey(route: route, storedSessionID: "stored"),
+            text: "park before PATCH")
+        let exhausted = try store.enqueue(
+            key: DurableComposerQueueKey(route: route, storedSessionID: "stored-2"),
+            text: "park exhausted", state: .retryExhausted)
+
+        XCTAssertTrue(model.parkDurableComposerQueueForLifecycle(route: route))
+        XCTAssertEqual(store.entry(id: ready.id)?.state, .parked)
+        XCTAssertEqual(store.entry(id: exhausted.id)?.state, .parked)
+
+        let refusedStore = makeStore()
+        defer { try? FileManager.default.removeItem(at: refusedStore.1) }
+        let refusedModel = AppModel(queueStore: refusedStore.0)
+        let refused = try refusedStore.0.enqueue(
+            key: DurableComposerQueueKey(route: route, storedSessionID: "stored"),
+            text: "must stay ready")
+        refusedStore.0.persistOverrideForTesting = { throw TestFailure.persistence }
+        XCTAssertFalse(refusedModel.parkDurableComposerQueueForLifecycle(route: route))
+        XCTAssertEqual(refusedStore.0.entry(id: refused.id)?.state, .localReady)
+    }
+
+    func testGatewayTeardownRetainsSourceWhenQueueCleanupCannotPersist() async throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = ConnectionRegistry.shared
+        let baseURL = try XCTUnwrap(URL(
+            string: "https://queue-teardown-\(UUID().uuidString).example"))
+        let saved = try XCTUnwrap(registry.upsert(
+            urlString: baseURL.absoluteString, name: "Queue teardown test",
+            credential: .sessionToken("queue-test-token")))
+        defer { registry.remove(id: saved.id) }
+
+        let model = AppModel(queueStore: store)
+        let route = GatewayBotRoute(gatewayID: saved.id, profile: "worker")
+        let entry = try store.enqueue(
+            key: DurableComposerQueueKey(route: route, storedSessionID: "stored"),
+            text: "must not be orphaned")
+        store.persistOverrideForTesting = { throw TestFailure.persistence }
+
+        await model.removeGateway(saved)
+
+        XCTAssertEqual(store.entry(id: entry.id), entry)
+        XCTAssertNotNil(registry.saved.first(where: { $0.id == saved.id }))
+    }
+
     func testReplaceLocalTextPreservesIdentityAndStateRules() throws {
         let (store, url) = makeStore()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -120,6 +310,17 @@ final class DurableComposerQueueTests: XCTestCase {
                                        state: .parked)
         XCTAssertEqual(try store.replaceLocalText(id: parked.id, text: "still wait").state,
                        .parked)
+
+        let parkedAfterFailure = try store.enqueue(
+            key: key("parked-after-failure"), text: "old parked")
+        let failed = try store.recordAutomaticFailure(
+            id: parkedAfterFailure.id, error: "temporary refusal")
+        try store.park(key: parkedAfterFailure.key)
+        let revisedParked = try store.replaceLocalText(
+            id: parkedAfterFailure.id, text: "new parked")
+        XCTAssertEqual(revisedParked.state, .parked)
+        XCTAssertEqual(revisedParked.automaticFailures, failed.automaticFailures)
+        XCTAssertEqual(revisedParked.lastError, failed.lastError)
 
         let exhausted = try store.enqueue(
             key: key("retry"), text: "old", state: .retryExhausted)
@@ -392,6 +593,58 @@ final class DurableComposerQueueTests: XCTestCase {
                        ["wait until idle", "never replay this receipt"])
     }
 
+    func testDurableDrainFailsClosedForEmptyOrMismatchedResumedStoredID() async throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = ConnectionRegistry.shared
+        let baseURL = try XCTUnwrap(URL(
+            string: "https://queue-session-identity-\(UUID().uuidString).example"))
+        let saved = try XCTUnwrap(registry.upsert(
+            urlString: baseURL.absoluteString, name: "Queue session identity",
+            credential: .sessionToken("queue-test-token")))
+        defer { registry.remove(id: saved.id) }
+
+        let oldGatewayID = LiveRuntime.shared.gatewayID
+        let oldBaseURL = LiveRuntime.shared.baseURL
+        let oldGeneration = LiveRuntime.shared.generation
+        defer {
+            LiveRuntime.shared.gatewayID = oldGatewayID
+            LiveRuntime.shared.baseURL = oldBaseURL
+            LiveRuntime.shared.generation = oldGeneration
+        }
+
+        let probe = DurableQueueRPCProbe()
+        await probe.setResumedStoredID("", for: "empty")
+        await probe.setResumedStoredID("someone-else", for: "mismatch")
+        let client = GatewayClient(baseURL: baseURL,
+                                   credential: .sessionToken("queue-test-token"))
+        await client.setRPCExecutorForTesting { method, params, _ in
+            try await probe.execute(method, params: params)
+        }
+        let model = AppModel(queueStore: store)
+        model.mode = .live
+        model.isOffline = false
+        model.client = client
+        LiveRuntime.shared.gatewayID = saved.id
+        LiveRuntime.shared.baseURL = baseURL
+        LiveRuntime.shared.generation = oldGeneration + 1
+        let route = GatewayBotRoute(gatewayID: saved.id, profile: "worker")
+        let empty = try store.enqueue(
+            key: DurableComposerQueueKey(route: route, storedSessionID: "empty"),
+            text: "must not use fallback")
+        let mismatch = try store.enqueue(
+            key: DurableComposerQueueKey(route: route, storedSessionID: "mismatch"),
+            text: "must not use another session")
+        model.reloadDurableComposerQueueProjection()
+
+        await model.flushComposeQueue()
+
+        XCTAssertEqual(store.entry(id: empty.id)?.state, .uncertain)
+        XCTAssertEqual(store.entry(id: mismatch.id)?.state, .uncertain)
+        let submitted = await probe.submitted()
+        XCTAssertTrue(submitted.isEmpty)
+    }
+
     func testDurableDrainKeepsRunningInflightApprovalAndClarifyHeadsLocal() async throws {
         let (store, url) = makeStore()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -568,6 +821,57 @@ final class DurableComposerQueueTests: XCTestCase {
         let methods = await probe.methods()
         XCTAssertEqual(methods, ["session.steer"])
         XCTAssertFalse(methods.contains("prompt.submit"))
+    }
+
+    func test409WithoutMessageStartKeepsRowLocalAndConsumesOneRetry() async throws {
+        let (store, url) = makeStore()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let registry = ConnectionRegistry.shared
+        let baseURL = try XCTUnwrap(URL(
+            string: "https://queue-409-\(UUID().uuidString).example"))
+        let saved = try XCTUnwrap(registry.upsert(
+            urlString: baseURL.absoluteString, name: "Queue 409 test",
+            credential: .sessionToken("queue-test-token")))
+        defer { registry.remove(id: saved.id) }
+
+        let oldGatewayID = LiveRuntime.shared.gatewayID
+        let oldBaseURL = LiveRuntime.shared.baseURL
+        let oldGeneration = LiveRuntime.shared.generation
+        defer {
+            LiveRuntime.shared.gatewayID = oldGatewayID
+            LiveRuntime.shared.baseURL = oldBaseURL
+            LiveRuntime.shared.generation = oldGeneration
+        }
+
+        let probe = DurableQueueRPCProbe()
+        await probe.setSubmitResult(.refused)
+        let client = GatewayClient(baseURL: baseURL,
+                                   credential: .sessionToken("queue-test-token"))
+        await client.setRPCExecutorForTesting { method, params, _ in
+            try await probe.execute(method, params: params)
+        }
+        let model = AppModel(queueStore: store)
+        model.mode = .live
+        model.isOffline = false
+        model.client = client
+        LiveRuntime.shared.gatewayID = saved.id
+        LiveRuntime.shared.baseURL = baseURL
+        LiveRuntime.shared.generation = oldGeneration + 1
+        let route = GatewayBotRoute(gatewayID: saved.id, profile: "worker")
+        let entry = try store.enqueue(
+            key: DurableComposerQueueKey(route: route, storedSessionID: "stored"),
+            text: "busy prompt")
+        model.reloadDurableComposerQueueProjection()
+
+        await model.flushComposeQueue()
+
+        let retained = try XCTUnwrap(store.entry(id: entry.id))
+        XCTAssertEqual(retained.state, .localReady)
+        XCTAssertEqual(retained.automaticFailures, 1)
+        XCTAssertEqual(retained.lastError, "Automatic queue delivery failed.")
+        XCTAssertTrue(model.durableComposerQueueStartsBeforeReceipt.isEmpty)
+        let submitted = await probe.submitted()
+        XCTAssertEqual(submitted, ["busy prompt"])
     }
 
     func testMessageStartBeforeReceiptRetiresExactSubmittingRow() async throws {

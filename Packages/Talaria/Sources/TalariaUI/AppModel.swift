@@ -446,7 +446,7 @@ public final class AppModel {
     @discardableResult
     func claimDurableComposerEntry(id: UUID) -> Bool {
         guard let entry = durableComposerQueueStore.entry(id: id),
-              entry.state == .localReady || entry.state == .retryExhausted,
+              entry.state.isAutomaticallyReplayable,
               durableComposerQueueEditReservations[id] == nil,
               durableComposerQueueClaims.insert(id).inserted else { return false }
         return true

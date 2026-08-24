@@ -2319,13 +2319,19 @@ extension AppModel {
                 return
             case .failed:
                 do {
-                    let failed = try durableComposerQueueStore.recordAutomaticFailure(
+                    _ = try durableComposerQueueStore.recordAutomaticFailure(
                         id: entry.id, error: "Automatic queue delivery failed.")
                     reloadDurableComposerQueueProjection()
-                    if failed.state == .retryExhausted { return }
                 } catch {
-                    return
+                    // A failure to persist the retry accounting is itself a
+                    // retained result. Never loop and submit again against a
+                    // store whose outcome is unknown.
                 }
+                // One definitive pre-wire refusal spends one automatic
+                // attempt and yields the lane. Retrying four times in one
+                // flush would turn a temporary 409 into immediate
+                // retry-exhaustion and defeat reconnect/foreground pacing.
+                return
             }
         }
     }
@@ -2434,8 +2440,13 @@ extension AppModel {
             routedGeneration: routedGeneration, pooledSnapshot: pooledSnapshot) else {
             return .retained
         }
-        guard live.storedSessionID.isEmpty
-                || live.storedSessionID == entry.key.storedSessionID,
+        // A Queue row is keyed by the stored session, not by the runtime id
+        // returned by resume. An omitted stored id is not proof that the
+        // gateway resumed the requested session; accepting it would allow a
+        // fallback/default session to receive this prompt. Require a
+        // non-empty exact match before any prompt-submit wire boundary.
+        guard !live.storedSessionID.isEmpty,
+              live.storedSessionID == entry.key.storedSessionID,
               !live.sessionID.isEmpty else {
             markDurableQueueEntryUncertain(entry.id,
                 "The gateway returned a different durable session; this prompt will not replay automatically.")

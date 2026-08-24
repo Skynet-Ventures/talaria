@@ -48,10 +48,19 @@ public enum DurableComposerQueueState: String, Codable, Sendable, Equatable,
     public var id: String { rawValue }
 
     public var isLocalReplayable: Bool {
-        switch self {
-        case .localReady, .retryExhausted: true
-        case .parked, .submitting, .acceptedGatewayOwned, .uncertain: false
-        }
+        // The name is retained for source compatibility with the first queue
+        // cut, but this is specifically *automatic* replayability. A
+        // retry-exhausted row is still locally editable and explicitly
+        // resumable; it must never be claimed by reconnect/flush work until
+        // that explicit action moves it back to localReady.
+        self == .localReady
+    }
+
+    /// Automatic reconnect/foreground draining may claim only this state.
+    /// Keeping the narrower name at call sites prevents retry-exhausted from
+    /// being mistaken for a transient delivery failure.
+    public var isAutomaticallyReplayable: Bool {
+        self == .localReady
     }
 
     /// A queue editor may only alter text still owned by this device.
@@ -114,6 +123,7 @@ public enum DurableComposerQueueStoreError: Error, Sendable, Equatable,
     case attachmentRefused
     case unavailableAfterReadFailure
     case identityCollision
+    case persistedBytesLimitReached(maximum: Int)
 
     public var description: String {
         switch self {
@@ -139,6 +149,8 @@ public enum DurableComposerQueueStoreError: Error, Sendable, Equatable,
             "The saved prompt queue is temporarily unavailable and was left unchanged."
         case .identityCollision:
             "That queued prompt identity already belongs to different work."
+        case .persistedBytesLimitReached(let maximum):
+            "The saved prompt queue exceeds its \(maximum)-byte storage limit."
         }
     }
 
@@ -730,12 +742,26 @@ public final class DurableComposerQueueStore {
         guard !loadedReadFailure else {
             throw DurableComposerQueueStoreError.unavailableAfterReadFailure
         }
+        let oldEntries = entries
+        let oldNextOrder = nextOrder
+        let oldCorrupt = loadedCorruptData
+        let oldReadFailure = loadedReadFailure
+        let oldDescription = loadFailureDescription
         entries = []
         nextOrder = 0
         loadedCorruptData = false
         loadedReadFailure = false
         loadFailureDescription = nil
-        try persist()
+        do {
+            try persist()
+        } catch {
+            entries = oldEntries
+            nextOrder = oldNextOrder
+            loadedCorruptData = oldCorrupt
+            loadedReadFailure = oldReadFailure
+            loadFailureDescription = oldDescription
+            throw error
+        }
     }
 
     private static func isAllowedTransition(from: DurableComposerQueueState,
@@ -747,9 +773,8 @@ public final class DurableComposerQueueStore {
              (.localReady, .acceptedGatewayOwned), (.submitting, .acceptedGatewayOwned),
              (.submitting, .localReady), (.submitting, .uncertain),
              (.parked, .localReady), (.parked, .uncertain),
-             (.retryExhausted, .localReady), (.retryExhausted, .submitting),
-             (.retryExhausted, .uncertain), (.retryExhausted, .parked),
-             (.retryExhausted, .acceptedGatewayOwned), (.acceptedGatewayOwned, .uncertain):
+             (.retryExhausted, .localReady), (.retryExhausted, .parked),
+             (.acceptedGatewayOwned, .uncertain):
             true
         case (.uncertain, _), (.acceptedGatewayOwned, _),
              (.parked, .submitting), (.parked, .acceptedGatewayOwned):
@@ -770,6 +795,10 @@ public final class DurableComposerQueueStore {
                                 nextOrder: nextOrder,
                                 entries: entries.sorted { $0.order < $1.order })
         let data = try JSONEncoder().encode(snapshot)
+        guard data.count <= DurableComposerQueuePolicy.maxPersistedBytes else {
+            throw DurableComposerQueueStoreError.persistedBytesLimitReached(
+                maximum: DurableComposerQueuePolicy.maxPersistedBytes)
+        }
         let temporaryURL = directory.appendingPathComponent(
             ".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp")
         defer { try? fileManager.removeItem(at: temporaryURL) }
@@ -792,14 +821,13 @@ public final class DurableComposerQueueStore {
         } else {
             try fileManager.moveItem(at: temporaryURL, to: fileURL)
         }
-        #if os(iOS)
-        do {
-            try fileManager.setAttributes(protection, ofItemAtPath: fileURL.path)
-        } catch {
-            try? fileManager.removeItem(at: fileURL)
-            throw error
-        }
-        #endif
+        // The temporary file receives its protection class before the atomic
+        // replacement. Do not try to clean up the destination after that
+        // replacement: if a platform reports a protection-attribute failure,
+        // deleting the destination would destroy both the previous snapshot
+        // and the newly committed one. A failed pre-replacement protection
+        // assertion leaves the old file untouched and mutateAndPersist rolls
+        // the in-memory projection back, so the next launch can recover.
     }
 
     @discardableResult
