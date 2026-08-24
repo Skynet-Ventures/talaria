@@ -376,9 +376,11 @@ create/edit/clone/run certification cases.
 
 Message edit, rewind/restore, regenerate, and message-level child creation are
 implemented. Remaining depth includes the N/M alternative-branch picker and
-lineage presentation, persistent multimodal parts and generated-media lightboxes,
-grouped tool runs, diff/ANSI/search/math/diagram presentation, per-message TTS
-and timing. The explicit durable composer queue is now a separate,
+lineage presentation, persistent multimodal parts, grouped generic tool runs,
+math/diagram presentation, per-message TTS, whole-turn timing, tours, and
+transcript-wide activity. Bounded diff, ANSI terminal, web-search, generated-
+image lightbox/share, and explicit assistant image/audio/video/file cards are
+implemented on the open transcript stack. The explicit durable composer queue is now a separate,
 source-qualified, text-only phone interaction; it still needs retained live
 gateway/device certification, not a broader queue CRUD surface. The remaining
 work should be split into independently reviewed slices after the certification
