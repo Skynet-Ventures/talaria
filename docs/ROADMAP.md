@@ -378,8 +378,10 @@ Message edit, rewind/restore, regenerate, and message-level child creation are
 implemented. Desktop's N/M regenerate alternatives are client-local response
 siblings; selecting one does not switch Hermes' durable context and a normal
 resume cannot reconstruct them. The separate `session.branch` durable child
-contract is already implemented. Remaining depth includes a bounded current-
-chat N/M response picker. Separate durable session-tree presentation is blocked
+contract is already implemented. Talaria now retains bounded current-ChatState
+alternatives only after an accepted receipt or exact effect proof, renders the
+selected local response inertly, and keeps the newest durable model context.
+Live gateway and physical-device certification remain open. Separate durable session-tree presentation is blocked
 until Hermes `session.list` returns normalized branch-parent lineage: its current
 JSON-RPC rows drop all parent/root fields, and an exact intermediate compression
 tip is not enough to keep the branch attached after that parent compresses again.

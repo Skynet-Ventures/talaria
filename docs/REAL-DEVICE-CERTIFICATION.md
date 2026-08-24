@@ -42,6 +42,7 @@ only as redacted hashes or suffixes.
 | `DEV-THREAD-001` | Long transcript | NOT RUN | TODO | |
 | `DEV-TOOL-001` | Retained/live specialist tool transcripts | NOT RUN | TODO | |
 | `DEV-FIND-001` | Transcript find navigation and mutation | NOT RUN | TODO | |
+| `DEV-ALT-001` | Regenerate response alternatives N/M | NOT RUN | TODO | |
 | `DEV-MEDIA-001` | Generated image transcript cards | NOT RUN | TODO | |
 | `DEV-MEDIA-002` | Assistant MEDIA image/audio/video/file cards | NOT RUN | TODO | |
 | `DEV-LIFE-001` | Background/foreground, idle | NOT RUN | TODO | |
@@ -109,6 +110,27 @@ only as redacted hashes or suffixes.
    oscillation, mutation invalidates stale ranges, manual scrolling retains
    ownership until an explicit find navigation, wrapped navigation is stable,
    and announcements/motion obey the active accessibility settings.
+
+### `DEV-ALT-001` — regenerate response alternatives
+
+1. On one exact Bot Chat turn, regenerate three times and verify one response-
+   local navigator advances through four complete versions. Repeat on an older
+   turn with later conversation content present, then trigger one definite
+   refusal and one controlled lost-receipt/effect-proof recovery.
+2. Exercise multi-row reasoning/tool/failure responses, generated-image and
+   assistant-MEDIA cards, Transcript Find, copy, ordinary Send, chat/source/
+   profile/session replacement, background/foreground, VoiceOver, Dynamic Type,
+   and Reduce Motion.
+3. Pass only if controls render after the associated assistant run, stop at
+   both boundaries, preserve one stable group across repeated regeneration,
+   prune only turns actually removed by older-turn truncation, and never expose
+   a navigable version before accepted/effect-proven mutation. Archived versions
+   must be presentation-only: no retry/reaction/branch/diagnostics/media fetch or
+   other network action. Find must index only the selected visible version,
+   ordinary Send must return to newest, lifecycle replacement must clear the
+   shelf, and relaunch must not reconstruct client-local versions. Retain the
+   exact route/session ids, redacted gateway receipt/effect order, screenshots,
+   VoiceOver announcements, and screen recording.
 
 ### `DEV-MEDIA-001` — exact generated-image transcript cards
 
