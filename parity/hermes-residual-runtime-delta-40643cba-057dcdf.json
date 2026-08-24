@@ -1,0 +1,960 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
+  "targetCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "scopeRules": {
+    "includedRoots": [
+      "acp_adapter/",
+      "agent/",
+      "apps/",
+      "cron/",
+      "plugins/",
+      "providers/",
+      "tools/",
+      "ui-tui/",
+      "web/"
+    ],
+    "includedTopLevelPython": true,
+    "sourceExtensions": [
+      ".py",
+      ".pyi",
+      ".js",
+      ".mjs",
+      ".cjs",
+      ".ts",
+      ".tsx",
+      ".go",
+      ".rs",
+      ".java",
+      ".kt",
+      ".swift"
+    ],
+    "coveredPrefixExclusions": [
+      "apps/desktop/",
+      "gateway/",
+      "hermes_cli/",
+      "tui_gateway/"
+    ],
+    "coveredExactExclusions": [
+      "agent/agent_runtime_helpers.py",
+      "agent/background_review.py",
+      "agent/codex_runtime.py",
+      "agent/context_compressor.py",
+      "agent/conversation_compression.py",
+      "agent/conversation_loop.py",
+      "agent/error_classifier.py",
+      "agent/error_surface.py",
+      "agent/gemini_native_adapter.py",
+      "agent/interrupt_compat.py",
+      "agent/message_sanitization.py",
+      "agent/native_compaction.py",
+      "agent/review_engine.py",
+      "agent/subagent_lifecycle.py",
+      "agent/tool_dispatch_helpers.py",
+      "agent/tool_executor.py",
+      "agent/turn_context.py",
+      "agent/turn_finalizer.py",
+      "cron/jobs.py",
+      "cron/scheduler.py",
+      "cron/scheduler_provider.py",
+      "run_agent.py",
+      "tools/code_execution_tool.py",
+      "tools/cronjob_tools.py",
+      "tools/delegate_tool.py",
+      "tools/interrupt.py",
+      "tools/mcp_tool.py",
+      "tools/process_registry.py",
+      "tools/registry.py",
+      "tools/terminal_tool.py"
+    ],
+    "excludedPathComponents": [
+      "test",
+      "tests",
+      "__tests__",
+      "fixture",
+      "fixtures",
+      "docs",
+      "doc",
+      "website",
+      "locales",
+      "locale",
+      "i18n",
+      "assets",
+      "static",
+      "dist",
+      "build",
+      ".github",
+      ".gitlab",
+      "examples",
+      "example",
+      "evals",
+      "benchmarks",
+      "benchmark",
+      "scripts",
+      "optional-skills",
+      "contributors",
+      "skills"
+    ],
+    "excludedExtensions": [
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".webp",
+      ".ico",
+      ".svg",
+      ".mp3",
+      ".wav",
+      ".ttf",
+      ".otf",
+      ".woff",
+      ".woff2",
+      ".pdf",
+      ".zip",
+      ".tar",
+      ".gz",
+      ".map",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".json",
+      ".yaml",
+      ".yml",
+      ".toml",
+      ".lock",
+      ".md",
+      ".rst",
+      ".txt",
+      ".po",
+      ".pot"
+    ],
+    "excludedNames": [
+      "package.json",
+      "package-lock.json",
+      "pnpm-lock.yaml",
+      "yarn.lock",
+      "Dockerfile",
+      "Makefile"
+    ],
+    "excludedNamePatterns": [
+      "test_*",
+      "*_test.py",
+      "*.test.*",
+      "*.spec.*",
+      "*.config.*",
+      "*.d.ts"
+    ]
+  },
+  "exclusionJustifications": [
+    {
+      "category": "authority",
+      "rule": "PR85 exact authority files (all are Desktop/docs in this range)",
+      "reason": "Already owned by the authority ledger; overlapping Desktop/docs paths are not residual production."
+    },
+    {
+      "category": "client-wire",
+      "rule": "tui_gateway/** and hermes_cli web wire are predecessor client-wire scope",
+      "reason": "PR90 owns authenticated gateway method/endpoint contracts; leaving them here would double count wire authority."
+    },
+    {
+      "category": "core-runtime",
+      "rule": "30 exact PR93 core runtime paths",
+      "reason": "PR93 owns the listed agent/cron/tools runtime paths; only non-overlapping residual runtime files remain."
+    },
+    {
+      "category": "desktop",
+      "rule": "apps/desktop/**",
+      "reason": "Desktop/Electron renderer and host runtime are owned by the current Desktop manifest."
+    },
+    {
+      "category": "cli",
+      "rule": "hermes_cli/**",
+      "reason": "The current CLI manifest owns all Hermes CLI production paths, including non-web code."
+    },
+    {
+      "category": "gateway-platform",
+      "rule": "gateway/**",
+      "reason": "Gateway/platform production code is owned by the current gateway/platform manifest."
+    },
+    {
+      "category": "tests-fixtures",
+      "rule": "test/tests/__tests__/fixture/fixtures components and test filename patterns",
+      "reason": "Tests and fixtures are verification material, not residual production behavior."
+    },
+    {
+      "category": "docs-locales",
+      "rule": "docs/doc/website/locales/locale/i18n components and prose/localization extensions",
+      "reason": "Documentation and translation-only changes do not create runtime/mobile contracts."
+    },
+    {
+      "category": "styles-assets",
+      "rule": "style and binary/static asset extensions plus assets/static/dist components",
+      "reason": "Styling and generated/static media are not executable production runtime sources for this audit."
+    },
+    {
+      "category": "build-config-lock",
+      "rule": "build components, config filename pattern, package/build names, JSON/YAML/TOML/lock extensions",
+      "reason": "Build metadata, configuration, and lockfiles do not independently establish a portable runtime contract."
+    },
+    {
+      "category": "non-runtime",
+      "rule": "outside named roots or non-source extension; top level admits Python only",
+      "reason": "Keeps the residual bounded to executable implementation while still covering named production roots and runtime Python entrypoints."
+    }
+  ],
+  "scopedCommitCount": 201,
+  "scopedMergeCount": 34,
+  "entryCount": 201,
+  "entriesFile": "hermes-residual-runtime-delta-40643cba-057dcdf.tsv",
+  "historyPathCount": 303,
+  "historyPathSha256": "fe0d4ee4fc13e10790cf1e46794b3f4e7d7742245646faf37a3fb1d9fcc78ab9",
+  "finalNetFiles": [
+    {
+      "path": "acp_adapter/permissions.py",
+      "baseSha256": "2ba1cd5a5920523002bb994a770f87334eb3cbd62e3d70bb2f0cb7235f3092fc",
+      "targetSha256": "65689660042dead9414e8279f305be34a2c457bd78d971c8d674b82d3fe06a64"
+    },
+    {
+      "path": "agent/agent_init.py",
+      "baseSha256": "5e43a03475ab683aa128b185fdd8ef7e58d779120897374922c99e9ac3020e5f",
+      "targetSha256": "d8d7b22a040595175db034db8b7e801c2844f1f8397e128d0bb38f87ca095b4a"
+    },
+    {
+      "path": "agent/auxiliary_client.py",
+      "baseSha256": "ecd2bfa8eda3669637e2817691daf72d81b4abcac0f9b9f5a486d7cd6c3aba24",
+      "targetSha256": "dea8b5414cf703c8901c8f5f6e894b4ab39a9ec4d4aa4a033e971eead672e87a"
+    },
+    {
+      "path": "agent/bedrock_adapter.py",
+      "baseSha256": "c5ff80b547f9c9be9b453bbcbec1a5c960326e69e63520df7be7753933534d5b",
+      "targetSha256": "5abad87a4549056788437ac7b8201e9c6d5509590573ec15c94e9cd7c310d832"
+    },
+    {
+      "path": "agent/chat_completion_helpers.py",
+      "baseSha256": "bb3ec83494a9b85ae122aedb5cd7638a2e4b260746c1e012de0215452f567c83",
+      "targetSha256": "c96d0b5231520b3fedc29579f4573e132b1767785ff973b62f0e1e4def59cbca"
+    },
+    {
+      "path": "agent/codex_responses_adapter.py",
+      "baseSha256": "539dabc336212a0b00488d779496dd39d40c0afa4daee266cdb5d3a578f856e9",
+      "targetSha256": "d47aa67bffc2f7175b4f0b75e1e436e24de7ebaeeea1097c7d8fd649cd1559c7"
+    },
+    {
+      "path": "agent/compaction_display.py",
+      "baseSha256": "absent",
+      "targetSha256": "acb1f918e5e030bd43ff980ab10f56898ee29878a34b2319558789b456ac7867"
+    },
+    {
+      "path": "agent/credential_pool.py",
+      "baseSha256": "ba693a2cc77c6e57d2d10b49c170274a318c756f609aa08d8c2f0497f1f52f45",
+      "targetSha256": "0a0c5c9ca3dd1f7e2b84c9ebbd649fbd2d1807f0fa62ccaa45d5dcf43daf98a9"
+    },
+    {
+      "path": "agent/credits_tracker.py",
+      "baseSha256": "25d6443a7abe0308a95773a0b3730ab94c1b92cc4e3c23ff88101c95809fdcad",
+      "targetSha256": "95c1051d1fc9f5e5e398f0949e5f9ed9eac4e8fb8e7ee6666c5e1114fd908d8c"
+    },
+    {
+      "path": "agent/image_routing.py",
+      "baseSha256": "318914ecdde9ca8a024f2916d5c17df1ce5a78f11d044dbde80ce9dfdacabf55",
+      "targetSha256": "47bb61b8df4bbc8a7117a46bf1d16c6ab5d976cfc971e2eafc374892ac88f25b"
+    },
+    {
+      "path": "agent/model_metadata.py",
+      "baseSha256": "a401f027c56a761027041f0480ad6c989513f818c2bda9d29f12b88c1e21237a",
+      "targetSha256": "702ca4f440c06a81f95c40b6e52ecb3f038a85eebdae2fda5c6bbd604d30139a"
+    },
+    {
+      "path": "agent/prompt_caching.py",
+      "baseSha256": "646fe088949a8660f663391c3659cd26556e51860ab882632114359b3db120b4",
+      "targetSha256": "aadb0e15833a4fa14bd627d0798cd12a42c31c15e5da787a3b54e1fed1f9487a"
+    },
+    {
+      "path": "agent/reasoning_effort.py",
+      "baseSha256": "11a37a58a0798fe0a9395efff27340e3f66032e074eacaf92b6423a63c2acc53",
+      "targetSha256": "c9089c010d23fae682c2a71c62239ba2e943dc5aa8deea343ff299c09d2dc722"
+    },
+    {
+      "path": "agent/reasoning_timeouts.py",
+      "baseSha256": "53150b997d669b4a20d193cbb735ea68e9438f3167466ea5efcdd73f0a44f32b",
+      "targetSha256": "d5c52a53268d74f3514c0acf22a4bb694da1c488efde508355571c013116e0fe"
+    },
+    {
+      "path": "agent/transports/codex.py",
+      "baseSha256": "6be831bb2f79457529941db51cfad30152bdefbcc9b1d5c1a3101433f5398207",
+      "targetSha256": "f9c87b38c6a97f57d11e385bb4d2e8ba88bffd3dbc1713b2504715f477f615ee"
+    },
+    {
+      "path": "agent/usage_pricing.py",
+      "baseSha256": "51ec125f03e5a2f686b8f669755712ef8f9956961fc49fdc33a0abc37cbfcd9e",
+      "targetSha256": "c6dae9eec7a77c41b9b82d37ffbc0cf58adda081780689131b71c6c10fd699b0"
+    },
+    {
+      "path": "agent/vertex_adapter.py",
+      "baseSha256": "29a907c91e495c5d05ae24d97e817d460d2d7d5b4432e1308f98aea115db4e9f",
+      "targetSha256": "901add6173517b2d1e36198e7dfd2894b2426b37cffb9f66ec99bee0ef2d6431"
+    },
+    {
+      "path": "apps/shared/src/json-rpc-gateway.ts",
+      "baseSha256": "0ac194938ff9982f524f46b3c837ce21e2603d01cfb1497b001551ecd00f1812",
+      "targetSha256": "89497a45f7fc49eee6e6a956f74fa53b1df0361b0d5a32ee5611a171a37cc83d"
+    },
+    {
+      "path": "batch_runner.py",
+      "baseSha256": "593ff931e3b8e76adb32b6680d2bafee4c6a91536079b686e619ba90f08be3ce",
+      "targetSha256": "8b81c02796eafed67f13af514e74d45203d87103865341d1a24a45b98dbbec38"
+    },
+    {
+      "path": "cli.py",
+      "baseSha256": "7a025b2014380b587a736277c77b6a0e9d3b91edcce8afeb70046616e50aa354",
+      "targetSha256": "3f329c4704a3612512b119a52a37b9895d28844ea7099dd51b84e2048baf5e35"
+    },
+    {
+      "path": "cron/__init__.py",
+      "baseSha256": "8b697250e486871c212e711d8f5582dbd469658dfa63e9dfd9892a4e1227727f",
+      "targetSha256": "94668c45d0e28fc6e0a8e1cf499944f6942a5168815a9d299155b16ca87cf5c1"
+    },
+    {
+      "path": "cron/lifecycle_guard.py",
+      "baseSha256": "d724236e938630bc0289ef2e6551d610b06946e518b215edab51ae52bb8a7670",
+      "targetSha256": "af56cd6430518a0a0e14af73a9753cde17cab349f0618b78da2139ccdeeeaaa6"
+    },
+    {
+      "path": "hermes_constants.py",
+      "baseSha256": "3b10042e0b6127236706b17e8ba3c80f972eb16d95a5442f9ac24d543c8b156f",
+      "targetSha256": "23c21b768e21376cde78f5f0080e91b34a29c947b4896443094727385c3a3b15"
+    },
+    {
+      "path": "hermes_state.py",
+      "baseSha256": "cb91e4d0647fe058a9b63ecdc637a15d897cf9541e41578463ed34f427164787",
+      "targetSha256": "18bd701a0f31eb654ef37d29ce8c6aba37b1f52678364718f84d5472e141913c"
+    },
+    {
+      "path": "hermes_state_common.py",
+      "baseSha256": "52c6e960369099f2497015bd3a8033ba47c5be0edc50b8dae163144acf0c9080",
+      "targetSha256": "beccfafc979a3f28c8d7aaf0cfee2a8b88c8e3c0980e771ed6891e2640e88cb1"
+    },
+    {
+      "path": "hermes_state_portability.py",
+      "baseSha256": "25bf154f4761ec191eaf41a29c52c285fc37d3226b904af0e326c9b632585618",
+      "targetSha256": "f7bfb93d0c3fb16f53d0c148aa9991b755e8debe3fd7e6829b658c731a1f379e"
+    },
+    {
+      "path": "hermes_state_schema.py",
+      "baseSha256": "04a60bc99ca439a4e7c7187857a17dd910ff51c805e00999e3af6a5ec8e25c3e",
+      "targetSha256": "dfa8ee700eb1e9604665b1a717ce6b1c055b9e4e091e22ac8386927d2fd53a5f"
+    },
+    {
+      "path": "hermes_state_search.py",
+      "baseSha256": "649223c9393a463d2edd98c12740cbf9f76226982ca8dcb8747b00a57c83b26b",
+      "targetSha256": "eb24559ca1594a88aade94e613569c84e184e608f8286666a428762b0907b905"
+    },
+    {
+      "path": "plugins/kanban/dashboard/plugin_api.py",
+      "baseSha256": "5756968dd5158e3e0d405f7ae0f4b1d8099125170567c369d7efac9b636306da",
+      "targetSha256": "2f4aa138f8b2bd028588ecc915fc967d3e984ee4bcd928f6ce61fa78f89b6d50"
+    },
+    {
+      "path": "plugins/memory/hindsight/__init__.py",
+      "baseSha256": "8d3c75411d3ae66cf3b91770297adc30c1aff96fbc3a1c0ec14057f185e0bbe5",
+      "targetSha256": "f8150abf2b6bda3822fabf819bc3e42ada4063bb4a3fb3f5690aa1a270ae2b68"
+    },
+    {
+      "path": "plugins/model-providers/opencode-free/__init__.py",
+      "baseSha256": "absent",
+      "targetSha256": "8538991c120acda714d38da711354d1106f0e2c5bc5cbbe084252d10ab2174c6"
+    },
+    {
+      "path": "plugins/model-providers/opencode-zen/__init__.py",
+      "baseSha256": "2899b54ba07d226f62c4c10cc50fa5df1bae995a74a30a4cfb955f898e6a5a06",
+      "targetSha256": "72c34089de033335afb02e3d47d50bb9516053894908b9f6d942f5bf39c9763b"
+    },
+    {
+      "path": "plugins/model-providers/zai/__init__.py",
+      "baseSha256": "a6672c8da8125664f3e943ef33e4925d759d079a3c7da0f932ec272969d2d508",
+      "targetSha256": "792f699b0f5cf09e07a3433779957d9f793bf35b4099eaaa8b0f86f31ccfb212"
+    },
+    {
+      "path": "plugins/platforms/discord/adapter.py",
+      "baseSha256": "85ec5bc08184130db4efeb1b2730c24683d28d65b00832e54aeea972c2d01292",
+      "targetSha256": "6e7eb8e0c3c5640028e8117a406bb7db8de2c5cee0faf019a5371dc5f629fccb"
+    },
+    {
+      "path": "plugins/platforms/telegram/adapter.py",
+      "baseSha256": "a370f7d8c848e88aeb66bd8f12e4143b1f71c0826f1442dc4d0b70e8f8df0fb9",
+      "targetSha256": "b9c00557a9558c45acb8a95885462aeb98543f8e7c0acaa7d9abb6cb1f392cfe"
+    },
+    {
+      "path": "plugins/platforms/wecom/adapter.py",
+      "baseSha256": "fbf3ddd8b9cef6d19a60a7c61d98a28ed5dbca049408b4df3c858ab8e78177d6",
+      "targetSha256": "3740d561db5974cb1e0786874141838388cfab1d7708c4acf35a060c62577152"
+    },
+    {
+      "path": "plugins/teams_pipeline/meetings.py",
+      "baseSha256": "e5ed89255d15e872ef3f1cbfdcf3c25acc5e3ed49a8067791c72643adbda1017",
+      "targetSha256": "95708bae6766342edfbe3e9ec064ddf01f8234c289cf1b41cc5284fcd7c726a5"
+    },
+    {
+      "path": "plugins/teams_pipeline/pipeline.py",
+      "baseSha256": "2dc08cc984e2282454333fda95c33667d0d2128bbdece3f8017e294ebca73f72",
+      "targetSha256": "6494213ab31c23e18a51d094d63f4d5474c5ce0b20108eb65027743d2bd7f7ca"
+    },
+    {
+      "path": "tools/approval.py",
+      "baseSha256": "87aa9f5ee1dc4c0e812aff99de33b0f594907a1cde68c262dd62f5afad14ef5f",
+      "targetSha256": "5808e7719ddfad1debb3e9bb628a64519bada23eb4a8053e33c51bcc627af34a"
+    },
+    {
+      "path": "tools/bot_failure_reasons.py",
+      "baseSha256": "absent",
+      "targetSha256": "ada247cbde319e4cda6bc23da0c704ff844d4fb573eaec0fd63e44ca6354ab0c"
+    },
+    {
+      "path": "tools/bot_mode_dm.py",
+      "baseSha256": "absent",
+      "targetSha256": "d86b62dff417e5c1bf0cba86302bfa78697d50f1867e76621d3c61ecd3bcc5da"
+    },
+    {
+      "path": "tools/bot_mode_probe.py",
+      "baseSha256": "c4bc5eeaedde206af2dea8459a926b367789066fea9651acaccff093351a5131",
+      "targetSha256": "504e5692a2fee8a6e3c9433ebebe767f8275ce939e3b1fa7d2e4520c14c39948"
+    },
+    {
+      "path": "tools/bot_relay.py",
+      "baseSha256": "absent",
+      "targetSha256": "693dcf6525f97f2db5085854d9d7fef196a3bff9a03950c88a23051848fc3794"
+    },
+    {
+      "path": "tools/browser_cdp_tool.py",
+      "baseSha256": "d0f9f15cbddb2c0aef833dcf58edbb16db508e3c053efaee2f0fc38305c89c15",
+      "targetSha256": "c88cce7b6103ad0ddaeb71fe6d855c6fa9ace689788dfd0e1303bc98ab61f132"
+    },
+    {
+      "path": "tools/browser_extension_router.py",
+      "baseSha256": "absent",
+      "targetSha256": "2f2294c31a65684d4e8e07197e7678e5cf7440b52f73ce83ab0030f127748340"
+    },
+    {
+      "path": "tools/browser_tool.py",
+      "baseSha256": "486c2249fb57ec2aa4912202c423fd20c7b16fbbb52df9a01001c000c0266c89",
+      "targetSha256": "5b4ff1064b22ba7d71c7a69a5cd50e7a91f45b6c1aed4c9df126e0b686b6cfd4"
+    },
+    {
+      "path": "tools/browser_use_cli.py",
+      "baseSha256": "2cc0080f4748c3be86b4bd07e0413b7aaeeed5fdb01110bd13a3bd081e6cf4af",
+      "targetSha256": "65b13ee6b2b1df844ab712b30fdbafda7e77058e4fcbea4e31ce585ebcbc8475"
+    },
+    {
+      "path": "tools/environments/base.py",
+      "baseSha256": "0903f43aff1dc26b156ecb31ce787e09166c3c715a49b85579e76042453c690b",
+      "targetSha256": "f8eeb8a303ae427f297d973db244b4108a2fe1a2c2d62a7afaa9f76a07b66a88"
+    },
+    {
+      "path": "tools/environments/docker.py",
+      "baseSha256": "fe5a2e6ee02a6ef3e1e60d12dc26d39e20fcf7cf93f8515080a7c086c970c9cd",
+      "targetSha256": "927e1a0153d8bc4ab82567bf54ad23c5161b9de08c4521bd6fdaad97288d9715"
+    },
+    {
+      "path": "tools/environments/local.py",
+      "baseSha256": "7d680c252bedc88ff7b80d50a5bfbdb9b926823d8bbc521f606e7b58237cbc1e",
+      "targetSha256": "31be7cfb1d34a7a5942bcd39aab77f4d3a4d292092a340fc266719409abc4567"
+    },
+    {
+      "path": "tools/environments/singularity.py",
+      "baseSha256": "072502e193ba53e86757217afe4f6ffcc6171f5a2f44cc03127e47eedc95c906",
+      "targetSha256": "dcc5830cdcd921053be5aff989f5a0e73a6ac96516c1b2224e7b2a1a29bcb777"
+    },
+    {
+      "path": "tools/file_tools.py",
+      "baseSha256": "18b40343d3fd890692762e8a434fa7e2e96b953766108a797b4af2caef01dd19",
+      "targetSha256": "0df2acf5d234b9aea1a1f7666031f5357c9f0233c50066723df7d6b5463ee962"
+    },
+    {
+      "path": "tools/interpreter_shutdown.py",
+      "baseSha256": "absent",
+      "targetSha256": "dc67b732fbeb0bf7a2e8e890ad65ad0ce819abdfaed38872a91af952f61ecce1"
+    },
+    {
+      "path": "tools/skill_usage.py",
+      "baseSha256": "473c4316f23f92709967c59cd0a00c40c4d1d1802e245ae114106262ac29a0f9",
+      "targetSha256": "dd96988aa8a8353f02b6758074c237c1de7534883d31fe3d6ec2a7fdac32d78a"
+    },
+    {
+      "path": "tools/skills_guard.py",
+      "baseSha256": "9534cf7b658ec0cb6c85dc2c35fa08a4b46a3a1284be1bbe3c4af2deeb4df7a0",
+      "targetSha256": "e99c4b7967474ba7a5a29109717b00aa21f1d4535f52fe3df2771aa203156ce6"
+    },
+    {
+      "path": "tools/transcription_tools.py",
+      "baseSha256": "84cca87334ab01b9c99c11c642f4a3cf26c947ead8a2a60efab2c73e80ecaa80",
+      "targetSha256": "72412bb07de673b0da7dd8d432dd1f8516b14f417a5508e28975f6639650b896"
+    },
+    {
+      "path": "tools/vision_tools.py",
+      "baseSha256": "e2892b63cf23498d67cf484a235de2d8a5c01d3ad4eebc806c7452c2f4b580d8",
+      "targetSha256": "2b87eebb59e09f7dc965213bced5f914e904039188f02b34f6ec14aafc1d3a4f"
+    },
+    {
+      "path": "tools/voice_client_config.py",
+      "baseSha256": "absent",
+      "targetSha256": "b3d6f66c53bc8b906e0ad35451fd68581c5e46027f22bc501bcde585c197c322"
+    },
+    {
+      "path": "ui-tui/packages/hermes-ink/src/ink/termio/osc.ts",
+      "baseSha256": "6c7394dcf54655a3ef0c4e72326ac6ce53d9c8797be2a08c1dd7d9e72bace94b",
+      "targetSha256": "42bc42d08dd38aa52c3d02e85cd0dc7ef0ffe177b17413f2da3308870a2c15f8"
+    },
+    {
+      "path": "ui-tui/packages/hermes-ink/src/utils/execFileNoThrow.ts",
+      "baseSha256": "a73273ae45d55869d69902747df91d8d55b059b488e10b519dad994f726db86c",
+      "targetSha256": "f2d703f0f59ffec6c13724d8ff49fe4571177bdefc971eb54fabaa1c6485fa66"
+    },
+    {
+      "path": "ui-tui/src/gatewayClient.ts",
+      "baseSha256": "c9d6afddbf057a857b50adee70a2981099e5287c46225be51781e9c439549638",
+      "targetSha256": "754bbf1d403fb8774d80c06f26053d437cd6c152a99006842cebb634a1fd33f1"
+    },
+    {
+      "path": "ui-tui/src/gatewayTypes.ts",
+      "baseSha256": "5821a9fd58d1640642ca114e5a2837c6314cf180fe9762f6bb60c03b4521b7ad",
+      "targetSha256": "8b9e8ebc825579f5aa3f47e2c2aaa58b9410d29c9b5354d4469afb554288f7ea"
+    },
+    {
+      "path": "ui-tui/src/lib/model-search-text.ts",
+      "baseSha256": "a9b348c8f2837dd62b7720a1b9638aacc21c00d64d9fb9cb5b07fe4f3dda6369",
+      "targetSha256": "e57d8d297a69a8764497a1a22aea13f86e67d1816ba08e2a6a64c07ab8ef1b18"
+    },
+    {
+      "path": "web/src/lib/model-search-text.ts",
+      "baseSha256": "859fb558039fdf3b293375dc7e1695788954b80e7a8968a57d7633b1d79febd7",
+      "targetSha256": "9c3061f0087a94a4606c17eb11eee958e63220281c9fed03830b89c142af25fd"
+    },
+    {
+      "path": "web/src/lib/pty-scroll.ts",
+      "baseSha256": "b16e0de9db6a96f0388cf3c8871197f9edde89ecab7f184d1eee52190098870c",
+      "targetSha256": "64d4c0c4f8891895592f86ec186969d8eaf419446bb38ffca0c1d5fee04ae319"
+    },
+    {
+      "path": "web/src/pages/ChatPage.tsx",
+      "baseSha256": "63888e8893b3226968cac9cc13603b07e2a12fd833a85a13426e6a9085349f05",
+      "targetSha256": "6e7f1863cf5a61ac7b3c59cc9ce0bc3615a9c7e6551eb0487168cb333e42b499"
+    },
+    {
+      "path": "web/src/pages/ModelsPage.tsx",
+      "baseSha256": "ed1f51e2d38b5e4ba4b47867172e657edf1af45862684cb1b03318e401c44ce2",
+      "targetSha256": "72b5bec3eabd19565183fbb16dea15a2167577d30b6e4f712edd0f82c39905b2"
+    }
+  ],
+  "endpointHashes": [
+    {
+      "path": "cron/jobs.py",
+      "purpose": "host one-shot rearm implementation",
+      "baseSha256": "edf2469d61286ba7ec13ffabddfaef2a9b5e7f51b2ac08c3494eb5ea4aa7177b",
+      "targetSha256": "dd5c7c601e23e5058e93d824b17ff426ed2cc5113c20d431ea4937274be59923"
+    },
+    {
+      "path": "tui_gateway/methods_tools.py",
+      "purpose": "authenticated cron action boundary",
+      "baseSha256": "ab56b4a607521f799cd44e7501ca250dd67ed2ee61416625434aa294d5559873",
+      "targetSha256": "b86e8be84a75eaec5b7fd4b29cc1e576810c10190005bbda1688182cb2bff650"
+    },
+    {
+      "path": "apps/shared/src/json-rpc-gateway.ts",
+      "purpose": "shared heartbeat transport",
+      "baseSha256": "0ac194938ff9982f524f46b3c837ce21e2603d01cfb1497b001551ecd00f1812",
+      "targetSha256": "89497a45f7fc49eee6e6a956f74fa53b1df0361b0d5a32ee5611a171a37cc83d"
+    },
+    {
+      "path": "ui-tui/src/gatewayClient.ts",
+      "purpose": "TUI heartbeat/reconnect client",
+      "baseSha256": "c9d6afddbf057a857b50adee70a2981099e5287c46225be51781e9c439549638",
+      "targetSha256": "754bbf1d403fb8774d80c06f26053d437cd6c152a99006842cebb634a1fd33f1"
+    },
+    {
+      "path": "ui-tui/src/lib/model-search-text.ts",
+      "purpose": "TUI model alias presentation",
+      "baseSha256": "a9b348c8f2837dd62b7720a1b9638aacc21c00d64d9fb9cb5b07fe4f3dda6369",
+      "targetSha256": "e57d8d297a69a8764497a1a22aea13f86e67d1816ba08e2a6a64c07ab8ef1b18"
+    },
+    {
+      "path": "web/src/lib/model-search-text.ts",
+      "purpose": "dashboard model alias presentation",
+      "baseSha256": "859fb558039fdf3b293375dc7e1695788954b80e7a8968a57d7633b1d79febd7",
+      "targetSha256": "9c3061f0087a94a4606c17eb11eee958e63220281c9fed03830b89c142af25fd"
+    },
+    {
+      "path": "web/src/pages/ModelsPage.tsx",
+      "purpose": "dashboard review auxiliary slot",
+      "baseSha256": "ed1f51e2d38b5e4ba4b47867172e657edf1af45862684cb1b03318e401c44ce2",
+      "targetSha256": "72b5bec3eabd19565183fbb16dea15a2167577d30b6e4f712edd0f82c39905b2"
+    },
+    {
+      "path": "agent/compaction_display.py",
+      "purpose": "host transcript display projection",
+      "baseSha256": "absent",
+      "targetSha256": "acb1f918e5e030bd43ff980ab10f56898ee29878a34b2319558789b456ac7867"
+    },
+    {
+      "path": "tools/bot_mode_dm.py",
+      "purpose": "host A2A delivery runtime",
+      "baseSha256": "absent",
+      "targetSha256": "d86b62dff417e5c1bf0cba86302bfa78697d50f1867e76621d3c61ecd3bcc5da"
+    }
+  ],
+  "clusterDefinitions": {
+    "R01-transcript-and-canonical-state": {
+      "classification": "portable-already-covered",
+      "disposition": "covered-by-predecessor-ledger",
+      "talariaStatus": "rich-transcript-current",
+      "contract": "Canonical transcript/session projections remain gateway-owned; phone rendering consumes qualified, hydrated history and never reconstructs state or replays a local mutation.",
+      "evidence": "The predecessor wire ledger records the same upstream commits, while Talaria rich-transcript hydration/structured-output heads consume ordered gateway transcript state.",
+      "required": "Refresh/reconcile after source-qualified transcript or session events; do not add a second state-repair or compaction mutation path."
+    },
+    "R02-gateway-heartbeat": {
+      "classification": "portable-already-covered",
+      "disposition": "covered-by-open-talaria-slice",
+      "talariaStatus": "gateway-heartbeat-current",
+      "contract": "Silent socket failure is detected with a bounded gateway.ping heartbeat and socket-generation invalidation; reconnect ownership stays with the client transport.",
+      "evidence": "Talaria codex/gateway-heartbeat@73ab2bc9884f7223964d43c7db68d1260f7356fa adds bounded silent-socket detection, immediate foreground validation, superseded-transport retirement, and exact-current inbound recovery.",
+      "required": "Run transport heartbeat tests plus an authenticated sleep/proxy-idle reconnect proof before certification."
+    },
+    "R03-model-presentation-pr94": {
+      "classification": "portable-already-covered",
+      "disposition": "implemented-unmerged-uncertified",
+      "talariaStatus": "pr94-unmerged-uncertified",
+      "contract": "Model identity, provider routing, availability, and prices remain gateway-owned. Search aliases and bounded discount display are presentation-only.",
+      "evidence": "PR94 codex/model-discount-presentation@ff0ea1a6e91c3af0996f406dac0acf9f607cc166 covers the Ox Alpha aliases and bounded sale hint without a config mutation.",
+      "required": "Merge and run focused model-contract/device/live-gateway proof before calling PR94 certified."
+    },
+    "R04-model-catalog": {
+      "classification": "portable-already-covered",
+      "disposition": "dynamic-catalog-already-consumed",
+      "talariaStatus": "model-options-current",
+      "contract": "Provider/model, effort, capability, and price inventory is gateway-declared through model.options; phone code must not create a static provider map or credential mutation from a catalog change.",
+      "evidence": "Talaria model-contract-copy@27a12f11c3825cc8ada4860b60e298acdcc4fa37 decodes the live model options shape; the range changes host catalog/routing data rather than a new phone wire authority.",
+      "required": "Refresh model.options and retain gateway IDs; any provider credential or config write needs separately bounded authenticated authority."
+    },
+    "R05-a2a-canonical-transcript": {
+      "classification": "portable-already-covered",
+      "disposition": "covered-by-predecessor-ledger",
+      "talariaStatus": "message-agent-current",
+      "contract": "Bot-mode agent-to-agent delivery, retry, and failure classification run in Hermes; Talaria consumes only the canonical bounded transcript/feed projection and never fabricates tool calls.",
+      "evidence": "PR85 authority rows cover the structured A2A commits and codex/current-hermes-message-agent-projection-v2@d6024e26a805c35f9cba91c0c6b1c9e9813f13b4 preserves qualified sender identity.",
+      "required": "Use canonical Bot Chat and prove local/foreign/refused/timeout delivery without exposing credentials or synthesizing A2A mutations."
+    },
+    "R06-one-shot-rearm-blocked": {
+      "classification": "upstream-contract-blocked",
+      "disposition": "upstream-contract-blocked",
+      "talariaStatus": "authority-blocked",
+      "contract": "The new host rearm_oneshot operation has no authenticated mobile wire action: cron.manage admits remove, pause, and resume only, and generic update cannot safely activate a terminal one-shot.",
+      "evidence": "a0ca7c19204e514f9590ce3b812e029b315ab9e9 adds cron.jobs.rearm_oneshot while target tui_gateway/methods_tools.py has no rearm action.",
+      "required": "Hermes must add an authenticated profile-scoped canonical-job rearm action with exactly one server-now or bounded ISO run_at, server-side one-shot/live-claim checks, canonical job/profile postcondition, and revision or mutation receipt. Then base a narrow client slice on codex/current-hermes-cron-push-isolation@28e9f713e4aa46fc78fbaa1ef19abf0892ff3c8e."
+    },
+    "R07-auxiliary-model-administration-blocked": {
+      "classification": "upstream-contract-blocked",
+      "disposition": "upstream-contract-blocked",
+      "talariaStatus": "authority-blocked",
+      "contract": "The dashboard review-slot label does not authorize a phone auxiliary-model editor, credential flow, generic config write, or restart.",
+      "evidence": "codex/auxiliary-model-administration@ebc1c577887c1f98e992a9900cbb43a4f95fe6e9 records that current auxiliary/config routes lack a safe revisioned, secret-safe mobile contract.",
+      "required": "Require a bounded profile-scoped auxiliary snapshot with declared task/field/range/options, write-only credentials plus configured/clear facts, profile/task/expected-revision mutations with 409 and canonical postcondition, finite field bounds, and a change/refresh contract."
+    },
+    "R08-learned-memory-blocked": {
+      "classification": "upstream-contract-blocked",
+      "disposition": "upstream-contract-blocked",
+      "talariaStatus": "authority-blocked",
+      "contract": "Host memory-provider timestamp/runtime changes do not authorize learned-memory graph/detail/edit/delete/import/export on a phone.",
+      "evidence": "The exact authority audit at ebc1c577 documents unbounded graph/detail payloads, no stable row revisions, and no safe import/export or refresh contract at the target endpoint.",
+      "required": "Require bounded profile-scoped snapshots with immutable ids/revisions, bounded secret-safe detail, expected-revision edit/archive/delete with canonical postconditions, bounded prepare/commit import-export, and a source-change/refresh contract."
+    },
+    "R09-other-client-only": {
+      "classification": "other-client-only",
+      "disposition": "other-client-only",
+      "talariaStatus": "none",
+      "contract": "This behavior belongs to the dashboard, terminal TUI, ACP, bootstrap installer, browser controller, voice desktop client, or third-party platform adapter rather than the phone client.",
+      "evidence": "The paths are confined to another client runtime or its host adapter; no new bounded authenticated Talaria endpoint is introduced.",
+      "required": "Keep client-specific behavior in its owning surface and retain its upstream/host verification; do not port controller, shell, or platform credentials to Talaria."
+    },
+    "R10-host-runtime": {
+      "classification": "host-only",
+      "disposition": "host-only",
+      "talariaStatus": "none",
+      "contract": "This is Hermes local runtime, scheduling, storage, plugin, provider, tool, process, or security behavior; it has no newly bounded authenticated mobile contract.",
+      "evidence": "The residual source change executes on the host and either has no gateway endpoint or would require a separate authority audit before client mutation/UI work.",
+      "required": "Verify on the host. Do not infer a mobile request, credential surface, config mutation, restart, or local-host behavior from this implementation detail."
+    },
+    "M01-merge-integration": {
+      "classification": "merge-integration",
+      "disposition": "merge-integration",
+      "talariaStatus": "predecessor-ledger",
+      "contract": "This row records the literal union of every parent diff for a merge; it is not a separate mobile implementation claim.",
+      "evidence": "Every-parent inventory preserves the merge paths and predecessor intersections so integrated work cannot disappear from the audit.",
+      "required": "Use the direct commits and named predecessor rows for behavior-specific proof; retain this row for topology/accounting."
+    }
+  },
+  "clusterCounts": {
+    "R01-transcript-and-canonical-state": 8,
+    "M01-merge-integration": 34,
+    "R04-model-catalog": 26,
+    "R10-host-runtime": 79,
+    "R09-other-client-only": 27,
+    "R03-model-presentation-pr94": 1,
+    "R05-a2a-canonical-transcript": 19,
+    "R07-auxiliary-model-administration-blocked": 1,
+    "R06-one-shot-rearm-blocked": 1,
+    "R08-learned-memory-blocked": 3,
+    "R02-gateway-heartbeat": 2
+  },
+  "classificationCounts": {
+    "portable-already-covered": 56,
+    "merge-integration": 34,
+    "host-only": 79,
+    "other-client-only": 27,
+    "upstream-contract-blocked": 5
+  },
+  "dispositionCounts": {
+    "covered-by-predecessor-ledger": 27,
+    "merge-integration": 34,
+    "dynamic-catalog-already-consumed": 26,
+    "host-only": 79,
+    "other-client-only": 27,
+    "implemented-unmerged-uncertified": 1,
+    "upstream-contract-blocked": 5,
+    "covered-by-open-talaria-slice": 2
+  },
+  "talariaStatusCounts": {
+    "rich-transcript-current": 8,
+    "predecessor-ledger": 34,
+    "model-options-current": 26,
+    "none": 106,
+    "pr94-unmerged-uncertified": 1,
+    "message-agent-current": 19,
+    "authority-blocked": 5,
+    "gateway-heartbeat-current": 2
+  },
+  "predecessorLedgers": {
+    "authority": {
+      "kind": "pinned-git",
+      "head": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "entriesFile": "parity/hermes-authority-delta-40643cba-057dcdf.tsv"
+    },
+    "client-wire": {
+      "kind": "pinned-git",
+      "head": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "entriesFile": "parity/hermes-client-wire-delta-40643cba-057dcdf.tsv"
+    },
+    "core-runtime": {
+      "kind": "pinned-git",
+      "head": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "entriesFile": "parity/hermes-core-runtime-delta-40643cba-057dcdf.tsv"
+    },
+    "desktop-current": {
+      "kind": "working-tree-uncommitted",
+      "entriesFile": "parity/hermes-desktop-delta-40643cba-057dcdf.tsv",
+      "metadataFile": "parity/hermes-desktop-delta-40643cba-057dcdf.json",
+      "entriesSha256": "9dd0832633b57697e43c97ce456a602f4b38f9f6073cf7807aba92654d6c16e4",
+      "metadataSha256": "a55968cc9cf4957f2d71dbdf74a104f6587eaccd5b2dadd138da3fec603a2325"
+    },
+    "cli-current": {
+      "kind": "working-tree-uncommitted",
+      "entriesFile": "parity/hermes-cli-delta-40643cba-057dcdf.tsv",
+      "metadataFile": "parity/hermes-cli-delta-40643cba-057dcdf.json",
+      "entriesSha256": "3c34e6b9daa562b29571fcf63687c4bcb9336edbcb8c0106fc3fa40db3986e85",
+      "metadataSha256": "94bc18bdccc14ce3e2eb3fe99a249a40eae69a7aff97a012f8ca6161ed4917f0"
+    },
+    "gateway-platform-current": {
+      "kind": "working-tree-uncommitted",
+      "entriesFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.tsv",
+      "metadataFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.json",
+      "entriesSha256": "7d82ecd09a4e5e4dc4f281f5daa7446326636908f63d1c40989806c1655d5d5b",
+      "metadataSha256": "051cbbf050c4a870869c143d690f295a7c9b49dddb8a90fa818416b19f4f025f"
+    }
+  },
+  "predecessorCounts": {
+    "client-wire": 31,
+    "desktop-current": 35,
+    "cli-current": 57,
+    "core-runtime": 30,
+    "authority": 9,
+    "gateway-platform-current": 9
+  },
+  "talariaReferences": [
+    {
+      "id": "rich-transcript-hydration",
+      "branch": "codex/rich-transcript-hydration",
+      "commit": "d5bad705f1c19d716eea4abb8de1ba4206659dde",
+      "parent": "99c203cd516491d94d255b46943315a5169f39a1",
+      "state": "open-unmerged",
+      "upstreamCommits": [
+        "3e5e4c5d20006e0f29f5389224ee0265e444dd3f",
+        "a2a23a8f7e30e644702459cfe0c4c74897524cfd"
+      ],
+      "note": "Hydrates qualified canonical transcript state; no local repair or compaction mutation."
+    },
+    {
+      "id": "rich-transcript-structured-output",
+      "branch": "codex/rich-transcript-structured-output",
+      "commit": "fdee839fdc1fda8a4a8233ff5e459795d09752b0",
+      "parent": "79ccf0f5aaaaa8fac2efd742aba1a4a7a720c649",
+      "state": "open-unmerged",
+      "upstreamCommits": [
+        "fb27614addac115d55299bc6538ae112fd01f688"
+      ],
+      "note": "Preserves structured transcript output/failure rendering after host compaction behavior."
+    },
+    {
+      "id": "gateway-heartbeat",
+      "branch": "codex/gateway-heartbeat",
+      "commit": "73ab2bc9884f7223964d43c7db68d1260f7356fa",
+      "parent": "1fa85648e98a9bf66bea5a5a97e43999d8fae980",
+      "state": "open-unmerged",
+      "upstreamCommits": [
+        "9153be2a5126f8280839a58d143ddcf80afc6d12",
+        "e3f695e5e00ef8718d8829fbe44fd3d2e36ed236"
+      ],
+      "note": "Adds bounded silent-socket heartbeat/invalidation and a bounded foreground ping that enters exact-source supervised reconnect before HTTP probes; it is transport behavior, not a gateway mutation."
+    },
+    {
+      "id": "model-contract-copy",
+      "branch": "codex/model-contract-copy",
+      "commit": "27a12f11c3825cc8ada4860b60e298acdcc4fa37",
+      "parent": "ccb945a03bc1f9dda9a50b151becef8636fa88f4",
+      "state": "open-unmerged",
+      "upstreamCommits": [
+        "c01cd26f959fb7c5bb21c89130d1d83c50012d0d",
+        "01d8562fce28a77362e3e3ce7797f3aae57b1985"
+      ],
+      "note": "Consumes gateway-declared model.options inventory; no static provider/credential authority follows from catalog changes."
+    },
+    {
+      "id": "message-agent-projection-v2",
+      "branch": "codex/current-hermes-message-agent-projection-v2",
+      "commit": "d6024e26a805c35f9cba91c0c6b1c9e9813f13b4",
+      "parent": "f332d263d9bb2d5a53feed3727a52a5e2dd89c88",
+      "state": "open-unmerged",
+      "upstreamCommits": [
+        "e26d91dc11ea32f2f1af2c9778d424172f834431",
+        "b274b346d846fdd38ac650ebf00c50b84ad00ee2",
+        "c584d15cdc31e1ebf3989c426ed05fb2ddb0c9fc"
+      ],
+      "note": "Projects qualified A2A sender/failure evidence from canonical Bot Chat rather than calling host tools."
+    },
+    {
+      "id": "mcp-live-reload",
+      "branch": "codex/mcp-live-reload",
+      "commit": "9851fca979f40b08df283855de290de4e3f04568",
+      "parent": "ccb945a03bc1f9dda9a50b151becef8636fa88f4",
+      "state": "open-unmerged",
+      "upstreamCommits": [],
+      "note": "Existing capability reload slice is retained as context; residual MCP host tooling adds no new bounded mobile configuration authority."
+    },
+    {
+      "id": "auxiliary-model-administration",
+      "branch": "codex/auxiliary-model-administration",
+      "commit": "ebc1c577887c1f98e992a9900cbb43a4f95fe6e9",
+      "parent": "1ec216d77e156f72d6184b82c252cdff26bb6eda",
+      "state": "blocked-upstream-contract",
+      "upstreamCommits": [
+        "65c58651b0e34ab3d2c25b7024609ef9c7b7ffef"
+      ],
+      "note": "Records exact safe-wire blockers; it does not implement an auxiliary editor."
+    },
+    {
+      "id": "PR94-model-discount-presentation",
+      "branch": "codex/model-discount-presentation",
+      "commit": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+      "parent": "27a12f11c3825cc8ada4860b60e298acdcc4fa37",
+      "state": "implemented-unmerged-uncertified",
+      "upstreamCommits": [
+        "1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4",
+        "bd93a5f3160dc84d1891e27b49bffeb88483d8f0"
+      ],
+      "note": "PR94 is local/unmerged/uncertified. bd93a5f is pre-range presentation debt; 1bf8bd2c is the new residual alias delta."
+    }
+  ],
+  "sourceAssertions": [
+    {
+      "path": "cron/jobs.py",
+      "contains": "def rearm_oneshot(job_id: str, run_at: Any)",
+      "description": "The host-only one-shot rearm implementation exists at the audited target."
+    },
+    {
+      "path": "tui_gateway/methods_tools.py",
+      "contains": "if action in {\"remove\", \"pause\", \"resume\"}:",
+      "description": "The authenticated cron.manage action list remains bounded to remove/pause/resume."
+    },
+    {
+      "path": "apps/shared/src/json-rpc-gateway.ts",
+      "contains": "gateway.ping",
+      "description": "Shared JSON-RPC transport emits the bounded gateway heartbeat request."
+    },
+    {
+      "path": "ui-tui/src/gatewayClient.ts",
+      "contains": "WS_HEARTBEAT_INTERVAL_MS = 15_000",
+      "description": "TUI owns its silent-socket heartbeat/reconnect presentation."
+    },
+    {
+      "path": "ui-tui/src/lib/model-search-text.ts",
+      "contains": "'x-preview-f-free': ['ox-alpha', 'ox']",
+      "description": "The exact Ox Alpha aliases are present in a non-mobile picker."
+    },
+    {
+      "path": "web/src/pages/ModelsPage.tsx",
+      "contains": "{ key: \"review\", label: \"Review\"",
+      "description": "Dashboard adds the review auxiliary-slot label only."
+    },
+    {
+      "path": "agent/compaction_display.py",
+      "contains": "def project_compaction_message_for_display",
+      "description": "Host supplies display projection rather than a new phone mutation."
+    }
+  ],
+  "sourceAbsenceAssertions": [
+    {
+      "path": "tui_gateway/methods_tools.py",
+      "notContains": "rearm_oneshot",
+      "description": "The target gateway tool methods do not expose the host rearm function."
+    },
+    {
+      "path": "tui_gateway/methods_tools.py",
+      "notContains": "\"rearm\"",
+      "description": "cron.manage has no rearm action string at the target."
+    },
+    {
+      "path": "hermes_cli/web_server.py",
+      "notContains": "rearm_oneshot",
+      "description": "The dashboard REST host file does not expose rearm_oneshot at the target."
+    }
+  ],
+  "findings": [
+    {
+      "id": "one-shot-rearm",
+      "classification": "upstream-contract-blocked",
+      "status": "blocked-not-implemented",
+      "evidence": "a0ca adds host rearm while cron.manage has no authenticated rearm action.",
+      "required": "Add the exact bounded profile-scoped rearm contract recorded in R06 before a client slice."
+    },
+    {
+      "id": "auxiliary-model-review",
+      "classification": "upstream-contract-blocked",
+      "status": "blocked-not-implemented",
+      "evidence": "65c labels review in dashboard but current auxiliary/config authority is secret-unsafe and unrevisioned.",
+      "required": "Provide the R07 snapshot/options/write-only credential/revision contract."
+    },
+    {
+      "id": "learned-memory-management",
+      "classification": "upstream-contract-blocked",
+      "status": "pre-existing-blocker-not-implemented",
+      "evidence": "Residual memory provider changes do not repair the documented unbounded/unrevisioned management wire.",
+      "required": "Provide the R08 bounded identity/detail/mutation/import-export/refresh contract."
+    },
+    {
+      "id": "actionable-mobile-gap",
+      "classification": "portable-already-covered",
+      "status": "none-found-in-residual",
+      "evidence": "Aliases/discount presentation are PR94 local-unmerged debt, heartbeat has an open slice, and remaining portable-looking behavior is predecessor-covered or blocked.",
+      "required": "Do not implement new mobile mutations; certify/merge existing slices or wait for bounded upstream authority."
+    }
+  ]
+}

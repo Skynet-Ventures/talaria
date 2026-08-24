@@ -1,0 +1,529 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
+  "targetCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "scopeRules": {
+    "root": "hermes_cli/",
+    "excludeExact": [
+      "hermes_cli/web_server.py",
+      "hermes_cli/data/plugin_index.json",
+      "hermes_cli/observability/schemas/hermes.shared_metrics.v2.schema.json"
+    ],
+    "excludePrefixes": [
+      "hermes_cli/web_routers/",
+      "hermes_cli/tests/",
+      "hermes_cli/static/",
+      "hermes_cli/generated/"
+    ],
+    "excludeTestRules": [
+      "contains:/tests/",
+      "basename-prefix:test_",
+      "basename-suffix:_test.py"
+    ]
+  },
+  "scopeCorrection": {
+    "rawEveryParentPathCount": 126,
+    "productionPathCount": 124,
+    "generatedExcludedPaths": [
+      "hermes_cli/data/plugin_index.json",
+      "hermes_cli/observability/schemas/hermes.shared_metrics.v2.schema.json"
+    ]
+  },
+  "scopedCommitCount": 167,
+  "scopedMergeCount": 30,
+  "entryCount": 167,
+  "entriesFile": "hermes-cli-delta-40643cba-057dcdf.tsv",
+  "rawHistoryPathCount": 126,
+  "rawHistoryPathSha256": "1a68c001056e1cc6d9e375cc6a6293bf02479b8331c7686b8ccc2a9e71f76f9f",
+  "historyPathCount": 124,
+  "historyPathSha256": "488e5558dcf490da0b23b2eba9b796959752678306fc2c3d7f7d35eed8e974cb",
+  "clusterDefinitions": {
+    "CLI00-merge-parent-integration": {
+      "classification": "merge-integration",
+      "disposition": "merge-integration",
+      "talariaStatus": "none",
+      "contract": "This merge is retained because every parent union touched non-web hermes_cli production paths; it has no independent mobile contract.",
+      "evidence": "The checker recomputes every parent diff and requires the complete sorted path union for this commit.",
+      "required": "Rely on constituent evidence; do not create a duplicate phone feature for merge topology."
+    },
+    "CLI01-dashboard-desktop-surface": {
+      "classification": "desktop-only",
+      "disposition": "desktop-only",
+      "talariaStatus": "none",
+      "contract": "Dashboard PKCE cookies, direct-voice credentials, browser extension control, desktop process guards, and Linux HUD behavior are desktop or local-dashboard concerns.",
+      "evidence": "These paths are dashboard_auth, dashboard_procs, Linux desktop entry, or exact desktop-only configuration commits; they do not add a bounded authenticated Talaria wire.",
+      "required": "Keep Talaria server-mediated and credential-minimal; verify only through the host/desktop surface."
+    },
+    "CLI02-host-update-lifecycle": {
+      "classification": "gateway-host-runtime",
+      "disposition": "host-cli-only",
+      "talariaStatus": "none",
+      "contract": "Launcher repair, package and venv handling, process ownership, systemd/launchd handoff, backups, and fleet restart behavior execute on the gateway host.",
+      "evidence": "The affected commands inspect local PIDs, services, filesystems, installers, and code trees rather than exposing a bounded mobile action/result contract.",
+      "required": "Exercise host update/lifecycle regressions; do not mirror local process management in Talaria."
+    },
+    "CLI03-pr91-durable-update-recovery": {
+      "classification": "durable-host-update-recovery",
+      "disposition": "covered-by-pr91-excluded",
+      "talariaStatus": "pr91-excluded",
+      "contract": "Durable update action receipts and bounded recovery status are already owned by Talaria PR91, not this CLI delta ledger.",
+      "evidence": "PR91 is pinned at cc3322f674ac388c55a9d2694efaaf7e941a1666; raw update plans remain host-local inventory rather than a mobile-safe projection.",
+      "required": "Do not add a second update/restart path. Any future plan read needs separately bounded, authenticated, redacted authority."
+    },
+    "CLI04-provider-catalog-host-runtime": {
+      "classification": "gateway-host-runtime",
+      "disposition": "dynamic-catalog-already-consumed",
+      "talariaStatus": "existing-model-options-consumer",
+      "contract": "Provider credentials, inference routing, catalog contents, pricing, and capability discovery remain gateway-owned; Talaria consumes the dynamic model.options result.",
+      "evidence": "The range changes hermes_cli model/auth/inventory/runtime modules, while Talaria already decodes gateway-provided model options instead of shipping a static provider routing table.",
+      "required": "Refresh against a live authenticated catalog; do not add provider credential or routing mutations from the phone."
+    },
+    "CLI05-pr94-model-presentation": {
+      "classification": "portable-mobile-presentation",
+      "disposition": "implemented-unmerged-uncertified",
+      "talariaStatus": "pr94-unmerged-uncertified",
+      "contract": "The exact search aliases and bounded sale presentation are read-only model-options presentation, never model selection authority.",
+      "evidence": "PR94 ff0ea1a6e91c3af0996f406dac0acf9f607cc166 adds x-preview-f-free search aliases and renders only finite integral 1...100 discount_percent values in both pickers.",
+      "required": "Treat PR94 as local/unmerged/uncertified until focused Swift tests, verifier, and integration certification land; do not claim it is merged."
+    },
+    "CLI06-cli-local-management": {
+      "classification": "host-cli-runtime",
+      "disposition": "host-cli-only",
+      "talariaStatus": "none",
+      "contract": "Parser, curses, setup, local curation, diagnostics formatting, FTS repair, and command-line fallbacks are host CLI ergonomics or maintenance behavior.",
+      "evidence": "No bounded authenticated mobile endpoint or structured response is introduced by these local command paths.",
+      "required": "Keep the behavior on the host CLI; mobile consumes existing gateway state only where a separately proven wire exists."
+    },
+    "CLI07-plugin-dashboard-host": {
+      "classification": "dashboard-plugin-host",
+      "disposition": "host-cli-only",
+      "talariaStatus": "none",
+      "contract": "Plugin registry lifecycle and dashboard-auth registration cleanup are process-global host/dashboard management, not plugin capability wire changes.",
+      "evidence": "The affected plugins.py and dashboard registry paths do not add a bounded plugins.manage result or mobile-safe mutation receipt.",
+      "required": "Do not expose plugin lifecycle mutation from Talaria without a new authenticated bounded plugin authority."
+    },
+    "CLI08-profile-peer-host-safety": {
+      "classification": "gateway-host-runtime",
+      "disposition": "verify-on-host",
+      "talariaStatus": "none",
+      "contract": "Non-multiplex profile refusal and host peer-DM repair protect server routing or use host-held peer credentials; neither becomes a phone federation contract.",
+      "evidence": "profile_matches_home fails closed on an invalid multiplex route, while hermes peer dm targets a remote host API using local peer configuration.",
+      "required": "Regression-test routing and peer behavior on hosts; do not infer a mobile cross-connection mutation authority."
+    },
+    "CLI09-bot-cron-existing-wire": {
+      "classification": "portable-mobile-runtime",
+      "disposition": "already-portable",
+      "talariaStatus": "existing-generic-cron-delivery",
+      "contract": "bot-chat:<profile> delivery is a gateway-advertised cron delivery target that Talaria already handles generically.",
+      "evidence": "PR85 authority records a2da0ab797edf5e7ca7d3f64591facbbc37ec7f2 and Talaria uses generic CronDeliveryTarget/RoutineEditor delivery selection.",
+      "required": "Live-prove a resolved profile receives the delivery and agent reply; no iOS mutation code is required."
+    },
+    "CLI10-one-shot-rearm-contract": {
+      "classification": "upstream-contract",
+      "disposition": "upstream-contract-blocked",
+      "talariaStatus": "none",
+      "contract": "Hermes CLI can re-arm a completed one-shot, but the authenticated gateway exposes only list/add/remove/pause/resume; it has no rearm wire.",
+      "evidence": "cron.jobs.rearm_oneshot exists, cron.resume invokes it, terminal update_job rejects activation, and tui_gateway cron.manage rejects every action outside remove/pause/resume.",
+      "required": "Require a profile-scoped authenticated rearm verb using canonical job ID, mutually exclusive server-now or bounded ISO run_at, server-side one-shot/live-claim checks, and a canonical job postcondition plus revision or mutation receipt before any mobile mutation."
+    },
+    "CLI11-predecessor-covered": {
+      "classification": "predecessor-covered",
+      "disposition": "covered-by-predecessor",
+      "talariaStatus": "none",
+      "contract": "This exact upstream commit already has a PR85, PR90, or PR93 ledger row; the predecessor reference names the pinned ledger and cluster.",
+      "evidence": "The checker reads predecessor TSVs at their immutable local heads and rejects a missing, changed, or ambiguous reference.",
+      "required": "Keep the predecessor owner and its verification plan; this CLI ledger adds no duplicate work."
+    }
+  },
+  "clusterCounts": {
+    "CLI01-dashboard-desktop-surface": 14,
+    "CLI00-merge-parent-integration": 30,
+    "CLI04-provider-catalog-host-runtime": 32,
+    "CLI02-host-update-lifecycle": 43,
+    "CLI03-pr91-durable-update-recovery": 6,
+    "CLI06-cli-local-management": 21,
+    "CLI09-bot-cron-existing-wire": 1,
+    "CLI05-pr94-model-presentation": 2,
+    "CLI11-predecessor-covered": 14,
+    "CLI08-profile-peer-host-safety": 2,
+    "CLI07-plugin-dashboard-host": 1,
+    "CLI10-one-shot-rearm-contract": 1
+  },
+  "classificationCounts": {
+    "desktop-only": 14,
+    "merge-integration": 30,
+    "gateway-host-runtime": 77,
+    "durable-host-update-recovery": 6,
+    "host-cli-runtime": 21,
+    "portable-mobile-runtime": 1,
+    "portable-mobile-presentation": 2,
+    "predecessor-covered": 14,
+    "dashboard-plugin-host": 1,
+    "upstream-contract": 1
+  },
+  "dispositionCounts": {
+    "desktop-only": 14,
+    "merge-integration": 30,
+    "dynamic-catalog-already-consumed": 32,
+    "host-cli-only": 65,
+    "covered-by-pr91-excluded": 6,
+    "already-portable": 1,
+    "implemented-unmerged-uncertified": 2,
+    "covered-by-predecessor": 14,
+    "verify-on-host": 2,
+    "upstream-contract-blocked": 1
+  },
+  "talariaStatusCounts": {
+    "none": 126,
+    "existing-model-options-consumer": 32,
+    "pr91-excluded": 6,
+    "existing-generic-cron-delivery": 1,
+    "pr94-unmerged-uncertified": 2
+  },
+  "finalNetFiles": [
+    {
+      "path": "hermes_cli/__init__.py",
+      "baseSha256": "ac4b7eb9d0d62a050e936d8d09168efe0cc72ccd3056a4d9340069f5c39a1305",
+      "targetSha256": "ff302231c695bc442d8173b2a088da2a29ef13e8f45e8f02b3c4fe59f6e7cfa2"
+    },
+    {
+      "path": "hermes_cli/_early_recovery.py",
+      "baseSha256": "3b830d7996709ab23cfed966e3ee165724025f9abb0e52bb5e00f201c8071697",
+      "targetSha256": "92899a2dd597b67c9dad7bce96d0c8ca05a0c5418eec2536d8d44b7894661cb3"
+    },
+    {
+      "path": "hermes_cli/_install_repair.py",
+      "baseSha256": "bf62a84e39de46544411d676b1398b32458e4a8b7bdfe3dfb057ca947bcda8ff",
+      "targetSha256": "5047e234b5f35b30af11563f7001907c02a2d3abe37f8bf472eada4ea7f82b68"
+    },
+    {
+      "path": "hermes_cli/_parser.py",
+      "baseSha256": "145af1103b872651bc62e408b5ead48dfc678acffabd163021c1efbfc9e27f58",
+      "targetSha256": "867e45f47b553ab437554e1c69f29646d0a32c5b56da13464e0c925226b5e3a6"
+    },
+    {
+      "path": "hermes_cli/auth.py",
+      "baseSha256": "59801d820f0106cf9342f6b80558b6c0a683bee5985c75944bb7ca8705a6fa7c",
+      "targetSha256": "1ea00d41a43a90e7e5e670f16c12820dcd9f29cb42a889912b78045fb74af386"
+    },
+    {
+      "path": "hermes_cli/auth_commands.py",
+      "baseSha256": "217f189659bffbdf07386f889c2ed8610ae94c12c167ccd19b82481e098fba50",
+      "targetSha256": "e31d120acc6ba5c2114435db0ce321cbb4145a775fa678749a63f79667ebb693"
+    },
+    {
+      "path": "hermes_cli/backup.py",
+      "baseSha256": "9ebd495fa79f9093d3077d1562e76e4a6f2acb7d599b62e653f5a49a338acbdf",
+      "targetSha256": "f56705a73e8a2f16afb3e2b539e449b4f77fc639cc64f42bbee12d024170c28a"
+    },
+    {
+      "path": "hermes_cli/cli_agent_setup_mixin.py",
+      "baseSha256": "48a5168294e8ecdf626903d668cb36d139d5459cc2587f639af8e2ae7e06b9fd",
+      "targetSha256": "a7d849b4321474ccb5a37aff5cc6b5b21220964dd3ab4c3934574dccd21f08fa"
+    },
+    {
+      "path": "hermes_cli/cli_commands_mixin.py",
+      "baseSha256": "a2b8275f6d268b3e00b04363bdcbe95be509cecf98546c9cb0bd6a826f407dfd",
+      "targetSha256": "31aacf7a2094eb7c7398ff36832fab8e7a769f60ec6692dcf4ecf09f0c10980d"
+    },
+    {
+      "path": "hermes_cli/cli_output.py",
+      "baseSha256": "f4f3db80ca393ee0b57b1a156b27a4737c6c07401e30c15fcb26ccc109950027",
+      "targetSha256": "d7303fc721dc2f4f08c3f4ba59169537aab7ecc1bbbc8e1aec480154621304af"
+    },
+    {
+      "path": "hermes_cli/codex_models.py",
+      "baseSha256": "da645545ad63b8c2ca7c4449334fc368a9f89798c5894f3f1dea3771ee538c8a",
+      "targetSha256": "fe74b66cfa31fe053b91625110d9a69cb09768f4c1f931ebef3492fa05cbe08e"
+    },
+    {
+      "path": "hermes_cli/commands.py",
+      "baseSha256": "f266c6b9f40cdff709c18ff5892ff33d53154f5d597d9eb6a992727a801cddfb",
+      "targetSha256": "366aee7923b57583b9075c47d09cc0cf2f61e9df0d03694f3622f046bce1a70e"
+    },
+    {
+      "path": "hermes_cli/config.py",
+      "baseSha256": "adf517e1b49b19a39ef062a6562e4a1e0600c9c64cc9823ca10626155c2f60b6",
+      "targetSha256": "4c918464bd678adc91f5f879835757ffeb65e0d273dcee0cf4baa1c7fc79cb09"
+    },
+    {
+      "path": "hermes_cli/config_defaults.py",
+      "baseSha256": "bff1defa747912a0aec0b07c5ee34c9bc174f6e7cb3cd62f1c136e45eab5689d",
+      "targetSha256": "0c8a8bf52c28ca76014640c87b6f270ed4075b3f4ec7395918d7ff72145a9e4b"
+    },
+    {
+      "path": "hermes_cli/config_migrations.py",
+      "baseSha256": "1b16cc0c3c2a9a8b5962d2b129744896cdacc4fa61a6734a3244aa69c03b757c",
+      "targetSha256": "919fde9d46b0d0b29183d7e1eea5bb2dd9d5909ccbd22ff92b4d9000480d9133"
+    },
+    {
+      "path": "hermes_cli/console_engine.py",
+      "baseSha256": "8472c7bfd93c4c5f4c0d537477bf8020f0758f0b4ed95d94d294d3d0144dceab",
+      "targetSha256": "601ba9cd51cfa558f3de18b2176a027c6c92e51cd9484a024c0248ffceec270f"
+    },
+    {
+      "path": "hermes_cli/cron.py",
+      "baseSha256": "fe0a442aa7606e18e82f207a7b70818da983a5689d279345bfda97bf6f3a640d",
+      "targetSha256": "595dae137e1af2a4e9ce763a11d0824914f4260273a40abc4117b163e442bc51"
+    },
+    {
+      "path": "hermes_cli/curator.py",
+      "baseSha256": "fd1225e404c1c5c7e5e47a39a3f606fe620aa437b8fc5e250d7d9a6ecec627ae",
+      "targetSha256": "134b52d3d3fb4affd2cc8d4290b4b2270e128e1fdfe26827250f7f973c3c2662"
+    },
+    {
+      "path": "hermes_cli/curses_ui.py",
+      "baseSha256": "79d2368db8ebd0760a79d2797b684df77de91c4f0a7af10a583cb09948bb1526",
+      "targetSha256": "9157e4a064592dd1474be73865db9504d209a62bd5a34ae82f265439f7ee177f"
+    },
+    {
+      "path": "hermes_cli/dashboard_auth/base.py",
+      "baseSha256": "2307a97d6ac5f08cb3fd31ade22daa4be616a05f9faf53a40bd19ef0d7a58cb8",
+      "targetSha256": "dd9d5b12a8855ad3936dcc0ef2930033ab740c003a24236934215d8cd2817d8a"
+    },
+    {
+      "path": "hermes_cli/dashboard_auth/cookies.py",
+      "baseSha256": "a87cd352864fab9d8fc46ec25efe7d6cc8e58eb92caaa8c82245ea50c4a42b3d",
+      "targetSha256": "f0ef6ca781f85b07b88eb1d08027b24da5f60c07b3b7d9ae6e56daf5b80b79e9"
+    },
+    {
+      "path": "hermes_cli/dashboard_auth/login_page.py",
+      "baseSha256": "64562e80ad7abe5c5296aed2978ff2be1b48b3ddd12e549cafebd90463661051",
+      "targetSha256": "3f898f2f6dc4b088b4609b6532c3142521955ea9cc53d06f4a1ac20459237d57"
+    },
+    {
+      "path": "hermes_cli/dashboard_auth/registry.py",
+      "baseSha256": "9536cd0c88b9f71f3de61f6977e07df0a5ddaf59b909a9ec28afebe3268f1b16",
+      "targetSha256": "84b7bc8b40a56099ed2eb6bbf19f1703e6fdb534dac517febf7cc970b7423fc8"
+    },
+    {
+      "path": "hermes_cli/dashboard_auth/routes.py",
+      "baseSha256": "bff6603f0110964525c81761a01dbcd63e2ffc79efe782dfe54dd41c14f633eb",
+      "targetSha256": "480bf1cbd0c924c05573fb98374d6df2971014f26415480494d189ea91bda711"
+    },
+    {
+      "path": "hermes_cli/dashboard_procs.py",
+      "baseSha256": "c5233cc3e17043a5655b3003ab1e1b8d5558852084f12825f0d2ac96f887876d",
+      "targetSha256": "535145aa7dffeae801387020ac7dc285f5d46184c28f021677a131bd8e508fd7"
+    },
+    {
+      "path": "hermes_cli/debug.py",
+      "baseSha256": "0dc52e19941b8d3abb7069b4bf482316fe58370f021c623b669aaa88d10438c5",
+      "targetSha256": "b73bc66cb4f882a211d10b6157f0452118eee44705dffed30146ef37246a62e9"
+    },
+    {
+      "path": "hermes_cli/doctor.py",
+      "baseSha256": "5a9637424ab1628fc9db5a3f1f41b9ee6c86940fd540c52fcbfea27f53e38a2b",
+      "targetSha256": "9c1be0f23d70f9c508795030be5f9e9682cbfe1c5b307cd5b70e03ad55355cdd"
+    },
+    {
+      "path": "hermes_cli/gateway.py",
+      "baseSha256": "33dcc5fa4b9178c3a7294f8a5c78a880d9ac44ac61d4828f519a465c1b7d726c",
+      "targetSha256": "89a8b65c11c3e4b6b117933db50bc2f5599f7c3c51c5c3dc7467067cbae4bd5c"
+    },
+    {
+      "path": "hermes_cli/inventory.py",
+      "baseSha256": "0a3f2e3d51f8667463673f71194e6d64bea04acb18611eb3f1a6093ec11ff7a8",
+      "targetSha256": "b83bf785900f55114f69d350dec53b455b461878b80585a0fb68e0eb9c5dbeea"
+    },
+    {
+      "path": "hermes_cli/linux_desktop_entry.py",
+      "baseSha256": "e883d843216be6df0fc7adaa149ae444a0b64b09b10c823f78ba86876ea6d097",
+      "targetSha256": "e8958e5e5fc2051b3a66cc3c69f3c345f3431c5613bac4c3292368ab2d7b9ca8"
+    },
+    {
+      "path": "hermes_cli/main.py",
+      "baseSha256": "2451f4c6afd745d2dcc55b43886ffcbd616bfc6fdb76f09d91c73fa2bb2fc248",
+      "targetSha256": "88fc12a31763b4f01fd046f9475fcce5bc727610c556eac96bc55d13b8869a81"
+    },
+    {
+      "path": "hermes_cli/model_search.py",
+      "baseSha256": "b58ced2ff6cbf79485b2f53e4b26724ed1c9e13cdcf8bbbd5f0aa9b5343b35a4",
+      "targetSha256": "bf5198461a339e2cafc638b3e2d3f970559240e8ee702d4f7f89e69cf12f3abf"
+    },
+    {
+      "path": "hermes_cli/model_setup_flows.py",
+      "baseSha256": "d02af8047623e889eabc49d1942f58deb39af2f037507453a4d90a8a7c6c6bf6",
+      "targetSha256": "8754470352f74b4e6fa8aa430f85b1ce5a06e4695c9f815256d94c93753ebff6"
+    },
+    {
+      "path": "hermes_cli/model_switch.py",
+      "baseSha256": "331c04772e10a4924c7a1818ad874218aec2bb8ea95284f5803a5da588571610",
+      "targetSha256": "490ad4ace5c4959200fe04f3ef1d19ad85a1916a2a04ede93354a012565dd661"
+    },
+    {
+      "path": "hermes_cli/models.py",
+      "baseSha256": "968fa0408766cefeb820170f7d812129dd3e2d2b4cd8bdced4327a2cdb936e4f",
+      "targetSha256": "c0d881ff5f1d1927fa0f76cb9a307afd49c0b445f93000bdc5daeec28f711dfb"
+    },
+    {
+      "path": "hermes_cli/nous_subscription.py",
+      "baseSha256": "de345e4e3280cbf2e0e466bbc0b677964033551ba9c5304ca9b15e703cf4800f",
+      "targetSha256": "69ee8a4edbfc53b3b475f48a32e6956f8f8b1ad3b3bd35458aa72ea43b0d5b95"
+    },
+    {
+      "path": "hermes_cli/oneshot.py",
+      "baseSha256": "f820d7576745560a06ac5167ed1ef5869aa42c8423e58e4c587856e4c714facd",
+      "targetSha256": "b54b4957e77327e8e9586e5d9e8180321551cda3cd606d381acb64c08eb5e0d1"
+    },
+    {
+      "path": "hermes_cli/plugins.py",
+      "baseSha256": "4a0297785f51dee1c4d59e0001ed92f31afdc8f9f0f7ffe7906931f6021eeb27",
+      "targetSha256": "4bdca832fa1369490db5b70cf068633f32e6d5628e2e817c4f8c2d7b3536cb9b"
+    },
+    {
+      "path": "hermes_cli/profiles.py",
+      "baseSha256": "db1b0ae8657d1731597d33e63502482246b0fd7d7df37b5af13f2d13a65e5ec0",
+      "targetSha256": "64605600efb4a28807d22af6cfb1025446cde56bc3000e0872fcc249ff8975bf"
+    },
+    {
+      "path": "hermes_cli/provider_catalog.py",
+      "baseSha256": "d7f52f81f9ec3cbc3dee4506a7a7391a37e34441e41955d11b3129ad1d401441",
+      "targetSha256": "e956c0fd2022aeed3864e9eff8b7ce00d4b3b919830c2e66de7b10557ff17ff7"
+    },
+    {
+      "path": "hermes_cli/providers.py",
+      "baseSha256": "0cda05b2c9e0d1c0ada42b06bb8525f7ffb2e044429a4f8802ec486aa96ef095",
+      "targetSha256": "90152c39b087f4123177bba7f240e4766954f2adf62f83841df7173f6b4e10be"
+    },
+    {
+      "path": "hermes_cli/runtime_provider.py",
+      "baseSha256": "5a61dca8600e06f70fcb9361410cc7a237d1826f24c8018182eb0ca529cf46ab",
+      "targetSha256": "f4c8b9714fd1e84b084468a5b645adfd1724ed902b84c74b73fa5e957eaa1bd2"
+    },
+    {
+      "path": "hermes_cli/setup.py",
+      "baseSha256": "ffcba7335c894662559de70596e53570838838f6b7b99a79d71ea262920cebd1",
+      "targetSha256": "5d19122d3a2e251768cc17ffbbbc1096566f1fad90831df92e4c9737f5d5c3e7"
+    },
+    {
+      "path": "hermes_cli/subcommands/cron.py",
+      "baseSha256": "8619a32e73a9d7b132f8973b3e023205e1d54e5f5bfb588b8afb98e27d449d14",
+      "targetSha256": "354b3af59613e163066e39a17c66ae45c61f7ce67285ddeb410c1136b6b2e592"
+    },
+    {
+      "path": "hermes_cli/subcommands/peer.py",
+      "baseSha256": "75210fe3152317a699c08f9859418e955554779ce2dc07864877c510c54c4d96",
+      "targetSha256": "25d2c43658bcd11deeb403dd8fc592d0a3d6e58d907cec09acfa216df5f3acbe"
+    },
+    {
+      "path": "hermes_cli/subcommands/update.py",
+      "baseSha256": "211124f175cd96bc01b9c9018083befa037972ef2abd74c2246fc70d5753dfac",
+      "targetSha256": "276626b96af2ee8cfdf87ad7297e312e4ee6a9dde5e3f3bcf23c24795dd1192f"
+    },
+    {
+      "path": "hermes_cli/uninstall.py",
+      "baseSha256": "6646e25e286c2971bb05fe5b22df800beec5550230742089fdcbfd507248179d",
+      "targetSha256": "3faec751b11cb96d029e7a9558c21340c57f58462294e325404de5a6f1661402"
+    },
+    {
+      "path": "hermes_cli/update_cmd.py",
+      "baseSha256": "828a6da4a36adc98fc12980dfd6ed99850b7323bf15a90ace52734824a9bce31",
+      "targetSha256": "89ea7b3fc5290e9e3920c05fa503fe75e1be90f3a55c95b7fb6718857b39502a"
+    },
+    {
+      "path": "hermes_cli/update_inventory.py",
+      "baseSha256": "absent",
+      "targetSha256": "009d60af35d8d71e455175863e548321f11523ea4ba0c4662dbc37b86c9a3ce7"
+    },
+    {
+      "path": "hermes_cli/update_receipt.py",
+      "baseSha256": "25dc67871b6427cce9d6cddcb081244a061c899a139e6bd8eec7ade43d55ff08",
+      "targetSha256": "eb381a05a1a0b2856bbe6c30300751e5ba369e41ed08c84db98a22ce7b3e8d65"
+    }
+  ],
+  "predecessorLedgers": {
+    "authority": {
+      "head": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "entriesFile": "parity/hermes-authority-delta-40643cba-057dcdf.tsv"
+    },
+    "client-wire": {
+      "head": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "entriesFile": "parity/hermes-client-wire-delta-40643cba-057dcdf.tsv"
+    },
+    "core-runtime": {
+      "head": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "entriesFile": "parity/hermes-core-runtime-delta-40643cba-057dcdf.tsv"
+    }
+  },
+  "predecessorCounts": {
+    "client-wire": 17,
+    "core-runtime": 20,
+    "authority": 6
+  },
+  "talariaReferences": [
+    {
+      "id": "PR91-durable-host-update-recovery",
+      "branch": "codex/durable-host-update-recovery",
+      "commit": "cc3322f674ac388c55a9d2694efaaf7e941a1666",
+      "parent": "a8463632e409620d471cfd40d25b2197015ae00d",
+      "state": "implemented-excluded",
+      "upstreamCommits": [
+        "0aecadc17c5c6cfe5b1f50fdd88e65041cb3095c",
+        "1684877868807aad695dd714b9109a216d5741ae",
+        "18b7fc82b66f2850172a45d0e08b8c11d27e63cb",
+        "40b4a3bfe1504c3e9b078fe25ff8503e24bb6a5d",
+        "60b6269142db284f5142a73b4be8e6d78c0661a3",
+        "7a54ab22e648a0d2d7e740fad908dda93f025820"
+      ],
+      "note": "PR91 owns durable host-update recovery receipt/status behavior. This ledger retains exact source inventory but excludes that contract from new mobile work."
+    },
+    {
+      "id": "PR94-model-discount-presentation",
+      "branch": "codex/model-discount-presentation",
+      "commit": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+      "parent": "27a12f11c3825cc8ada4860b60e298acdcc4fa37",
+      "state": "unmerged-uncertified",
+      "upstreamCommits": [
+        "1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4",
+        "bd93a5f3160dc84d1891e27b49bffeb88483d8f0"
+      ],
+      "note": "Local-only PR94 adds search-only Ox Alpha aliases and bounded read-only discount presentation. It is neither merged nor certified."
+    }
+  ],
+  "sourceAssertions": [
+    {
+      "path": "hermes_cli/cron.py",
+      "contains": "rearm_oneshot(args.job_id, run_at)",
+      "description": "CLI resume delegates a completed one-shot to the host re-arm implementation."
+    },
+    {
+      "path": "cron/jobs.py",
+      "contains": "def rearm_oneshot(job_id: str, run_at: Any)",
+      "description": "The core host re-arm primitive is one-shot lifecycle behavior."
+    },
+    {
+      "path": "cron/jobs.py",
+      "contains": "through update_job; use cron resume --run-now or --at.",
+      "description": "Generic updates reject terminal-job activation."
+    },
+    {
+      "path": "tui_gateway/methods_tools.py",
+      "contains": "if action in {\"remove\", \"pause\", \"resume\"}:",
+      "description": "Authenticated cron.manage has no rearm action."
+    },
+    {
+      "path": "hermes_cli/model_search.py",
+      "contains": "\"x-preview-f-free\": (\"ox-alpha\", \"ox\"),",
+      "description": "Ox Alpha aliases enrich only the picker search text."
+    },
+    {
+      "path": "hermes_cli/inventory.py",
+      "contains": "entry[\"discount_percent\"] = discount_percent",
+      "description": "Pricing metadata is supplied through the dynamic catalog rather than a static mobile map."
+    }
+  ],
+  "sourceAbsenceAssertions": [
+    {
+      "path": "hermes_cli/web_routers/cron.py",
+      "notContains": "rearm",
+      "description": "The REST cron router has no re-arm endpoint."
+    },
+    {
+      "path": "hermes_cli/web_server.py",
+      "notContains": "rearm_oneshot",
+      "description": "The web server does not project the host re-arm primitive."
+    }
+  ]
+}

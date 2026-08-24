@@ -227,7 +227,7 @@ reproduce Electron HUD/always-on-top/titlebar behavior. Those remain genuinely
 desktop-local.
 
 Remote operator capabilities are **not** n/a merely because their Desktop UI
-is local. Audited Hermes `40643cba` exposes an authenticated `/api/pty` WebSocket with
+is local. Audited Hermes `057dcdf23` exposes an authenticated `/api/pty` WebSocket with
 profile/session binding, opaque reattach tokens, bounded replay, resize, and
 native TUI approvals; a mobile advanced terminal is therefore portable. The
 gateway also exposes guarded Git, Projects, Files, and maintenance APIs. iOS
@@ -272,9 +272,9 @@ row by row in [PARITY.md](../PARITY.md#mobile-ceiling).
 
 <a id="what-is-actually-left"></a>
 
-## What is actually left (reconciled 2026-08-21)
+## What is actually left (reconciled 2026-08-24)
 
-Reconciled against pinned Hermes `40643cba`, the current source, and reviewed
+Reconciled against pinned Hermes `057dcdf23`, the current source, and reviewed
 delivery through Advanced Terminal. Ordered by what a phone-first operator
 loses, not by effort.
 

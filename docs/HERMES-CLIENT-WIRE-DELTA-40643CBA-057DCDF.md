@@ -56,7 +56,7 @@ unknown disposition/impact, or a changed cluster count.
 | W08 client-direct voice | 1 | Desktop's provider-key response is intentionally not portable; Talaria keeps voice server-mediated. |
 | W09 WebSocket/session lifecycle | 13 | Mostly gateway-owned lifecycle correctness; no guessed client authority. |
 | W10 dashboard security | 3 | Browser origin/CSP/session hardening is dashboard-only and remains gateway-owned. |
-| W11 application heartbeat | 1 | Implemented on open PR73, exact head `d1825fe8412a7ed6b6f4a430370545f0c8682bd4`; retain live proof and do not duplicate it here. |
+| W11 application heartbeat | 1 | Implemented on open PR73, exact head `73ab2bc9884f7223964d43c7db68d1260f7356fa`; retain corrected-device sleep/Wi-Fi/socket-retirement proof and do not duplicate it here. |
 
 The seven authority intersections are exact commits `8f30e9c7`, `98f6fc54`,
 `9c829f96`, `a2da0ab7`, `a9860d41`, `b274b346`, and `d3e087fd`. Their wire paths
@@ -100,4 +100,6 @@ cases. This audit makes no product change.
   server-mediated voice boundary and is intentionally out of scope.
 
 This ledger closes only the stated 22-path client-wire slice. The canonical pin
-stays at `40643cba` until the wider upstream range is independently complete.
+stayed at `40643cba` until the wider upstream range was independently complete;
+the seven-ledger full-range closure now supplies that proof and owns the move
+to `057dcdf23`.

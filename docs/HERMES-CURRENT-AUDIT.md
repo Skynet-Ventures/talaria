@@ -1,8 +1,9 @@
 # Current Hermes parity delta
 
-This is the requirement ledger for Talaria baseline
-`04695b91e8fe7cc59a8638e266b5b151c58144ab` against Hermes
-`40643cbaf9b767af146694131ffb8f8160f25e1c`. It retains the audited move
+This is the requirement ledger for the historical Talaria baseline
+`04695b91e8fe7cc59a8638e266b5b151c58144ab` through the current Talaria audit
+base `7e46a9ab4e68f4f74ecc68fe2222798883a66091`, against canonical Hermes
+`057dcdf236f8a6a26721c10fcc6ccb72726e272a`. It retains the audited move
 from `b5455fdd16fe608214f91149233660e1836b067c` through
 `9ef9b2d2d01eb4bcf9420973c5ef6c98f2176455` and
 `c1e25cadffe539b058816be5fdfc9127d7199fa4`, records a disposition for every
@@ -12,23 +13,28 @@ commits in the `18a15a46..efb6b40f` window and the bounded
 row-by-row ledgers; when they disagree, this exact-source delta is newer.
 
 The authority hashes live in [`parity/hermes-upstream.json`](../parity/hermes-upstream.json).
-The later five-file authority slice through `057dcdf23` is dispositioned
+The five-file authority slice through `057dcdf23` is dispositioned
 commit-by-commit in
 [`HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md`](HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md).
-That bounded ledger does not repin the canonical manifest or claim coverage of
-the other 978 net-changed files in the complete range.
+That bounded ledger did not independently repin the canonical manifest or
+claim coverage of the other 978 net-changed files in the complete range.
 The independent production client-wire slice over `tui_gateway/**`,
 `hermes_cli/web_routers/**`, and `hermes_cli/web_server.py` is dispositioned in
 [`HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md`](HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md):
 71 exact commits partition into 64 new ledger rows plus 7 authority-ledger
 cross-references. It identifies durable restart-crossing update receipt
 recovery as a separate runtime gap, and credits gateway heartbeat to open PR73
-exact head `d1825fe8412a7ed6b6f4a430370545f0c8682bd4` rather than duplicating it.
-That audit also remains too narrow to repin the canonical manifest.
+exact head `73ab2bc9884f7223964d43c7db68d1260f7356fa` rather than duplicating it.
+That audit also remained too narrow to repin the canonical manifest by itself.
 An implementation row is not certified merely because it is checked below:
 the evidence column names the remaining gateway or device proof explicitly.
-The audit cutoff is the exact `40643cba` snapshot reviewed on 2026-08-20
-(America/Los_Angeles). A later moving remote `HEAD` is a prompt for another
+The complete seven-ledger production closure is
+[`HERMES-FULL-RANGE-CLOSURE-40643CBA-057DCDF.md`](HERMES-FULL-RANGE-CLOSURE-40643CBA-057DCDF.md).
+It is the joint proof that authorizes the current `057dcdf23` pin while keeping
+open merge/device certification and upstream-contract blockers explicit.
+
+The current audit cutoff is the exact `057dcdf23` snapshot reviewed on
+2026-08-24 (America/New_York). A later moving remote `HEAD` is a prompt for another
 explicit audit, not a reason to silently repin or invalidate this reproducible
 checkout and its hashes. Only an explicit audit that finds an authority-file
 change or a material portable-contract delta creates a parity blocker;

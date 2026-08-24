@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
+  "targetCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "auditedAt": "2026-08-24",
+  "talariaAuditBase": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+  "methodology": "Seven non-overlapping or explicitly cross-referenced every-parent ledgers cover the authority, client wire, core runtime, Desktop, non-web CLI, gateway/platform, and residual production ranges. Component hashes make this closure fail closed if any inventory changes.",
+  "ledgers": [
+    {
+      "id": "authority",
+      "metadataFile": "parity/hermes-authority-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-authority-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_authority_delta.py",
+      "documentationFile": "docs/HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "775e78cf9c80db969143335ecc93913a7592fc36c6c303579a52a24a07bc9f22",
+      "entriesSha256": "34f3b775e3f613cac1158fc15f5e9051f400a9eff1707d61f29cd2c1c9d12145",
+      "scopedCommitCount": 63
+    },
+    {
+      "id": "client-wire",
+      "metadataFile": "parity/hermes-client-wire-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-client-wire-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_client_wire_delta.py",
+      "documentationFile": "docs/HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "4eb018f0662d6cf9ff5d050c8feced0cb78de8d2f39095d0ef791c399be11d8a",
+      "entriesSha256": "793fc4337ce6ee1591ade30240a008ceac91d39cf1c8dee349a9c42173450081",
+      "scopedCommitCount": 71
+    },
+    {
+      "id": "core-runtime",
+      "metadataFile": "parity/hermes-core-runtime-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-core-runtime-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_core_runtime_delta.py",
+      "documentationFile": "docs/HERMES-CORE-RUNTIME-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "2f2919f5804ddc68058c3ce56e1c9e289bb369464089939a9acd7f52e7a4f143",
+      "entriesSha256": "84dfe220664489e7002da4a2a35456b2ca13ed4d0b1404f37e7724c97c723b89",
+      "scopedCommitCount": 112
+    },
+    {
+      "id": "desktop",
+      "metadataFile": "parity/hermes-desktop-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-desktop-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_desktop_delta.py",
+      "documentationFile": "docs/HERMES-DESKTOP-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "a55968cc9cf4957f2d71dbdf74a104f6587eaccd5b2dadd138da3fec603a2325",
+      "entriesSha256": "9dd0832633b57697e43c97ce456a602f4b38f9f6073cf7807aba92654d6c16e4",
+      "scopedCommitCount": 241
+    },
+    {
+      "id": "cli",
+      "metadataFile": "parity/hermes-cli-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-cli-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_cli_delta.py",
+      "documentationFile": "docs/HERMES-CLI-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "94bc18bdccc14ce3e2eb3fe99a249a40eae69a7aff97a012f8ca6161ed4917f0",
+      "entriesSha256": "3c34e6b9daa562b29571fcf63687c4bcb9336edbcb8c0106fc3fa40db3986e85",
+      "scopedCommitCount": 167
+    },
+    {
+      "id": "gateway-platform",
+      "metadataFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_gateway_platform_delta.py",
+      "documentationFile": "docs/HERMES-GATEWAY-PLATFORM-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "051cbbf050c4a870869c143d690f295a7c9b49dddb8a90fa818416b19f4f025f",
+      "entriesSha256": "7d82ecd09a4e5e4dc4f281f5daa7446326636908f63d1c40989806c1655d5d5b",
+      "scopedCommitCount": 82
+    },
+    {
+      "id": "residual-runtime",
+      "metadataFile": "parity/hermes-residual-runtime-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-residual-runtime-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_residual_runtime_delta.py",
+      "documentationFile": "docs/HERMES-RESIDUAL-RUNTIME-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "826ed67663c40f4bf84663f6163a4bbc495fbfb7d2a6069fd2d25ae56423ef3b",
+      "entriesSha256": "5338d9646b1e518b1badafc0b300e25800e9e16372b922e6fff6662583479b46",
+      "scopedCommitCount": 201
+    }
+  ],
+  "conclusion": {
+    "undispositionedPortableGapCount": 0,
+    "openImplementationSlices": [
+      {
+        "pullRequest": 73,
+        "branch": "codex/gateway-heartbeat",
+        "head": "73ab2bc9884f7223964d43c7db68d1260f7356fa",
+        "status": "implemented-unmerged-device-proof-pending"
+      },
+      {
+        "pullRequest": 91,
+        "branch": "codex/durable-host-update-recovery",
+        "head": "cc3322f674ac388c55a9d2694efaaf7e941a1666",
+        "status": "implemented-unmerged-live-proof-pending"
+      },
+      {
+        "pullRequest": 94,
+        "branch": "codex/model-discount-presentation",
+        "head": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+        "status": "implemented-unmerged-device-proof-pending"
+      },
+      {
+        "pullRequest": 95,
+        "branch": "codex/source-qualified-push-presentation",
+        "head": "1b50d7969810c33582caaad5273b8e83520ad54d",
+        "implementationCommit": "4a06df18e768fe4bb8a206dc86f1dce0a08feec6",
+        "status": "implemented-unmerged-device-proof-pending"
+      }
+    ],
+    "upstreamContractBlockers": [
+      "one-shot cron re-arm",
+      "learned-memory row and import/export management",
+      "auxiliary-model and MoA administration"
+    ]
+  }
+}
