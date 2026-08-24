@@ -375,6 +375,10 @@ extension AppModel {
         CanonicalChatRuntime.shared.resetPrimaryScope(
             retainAmbiguousForReconnect: ConnectionSupervisor.shared.isReconnecting,
             retainLocalPins: ConnectionSupervisor.shared.isReconnecting)
+        // Older-page reads retain the exact client/generation that owned this
+        // primary connection. Cancelling at teardown is an optimization; the
+        // lease re-check after await remains the authoritative fence.
+        resetPrimaryTranscriptBackfillScope()
         // Switching gateways reaches here WITHOUT going through
         // disconnectGateway (switchGateway calls connectGateway directly), so
         // the per-gateway caches have to be dropped on both paths. Done before
@@ -662,6 +666,9 @@ extension AppModel {
         // Teardown while both the captured source id and its client still
         // exist. Clearing either first makes A2A mistake a deliberate primary
         // disconnect for an unknown-source reset and cancel retained remotes.
+        if let departingGatewayID {
+            resetRoutedTranscriptBackfillScope(gatewayID: departingGatewayID)
+        }
         dropPerGatewayCaches(gatewayID: departingGatewayID)
         if let gatewayID = departingGatewayID {
             await ConnectionRegistry.shared.clientPool.disconnect(gatewayID: gatewayID)
@@ -697,6 +704,7 @@ extension AppModel {
         CanonicalChatRuntime.shared.resetPrimaryScope(
             retainAmbiguousForReconnect: ConnectionSupervisor.shared.isReconnecting,
             retainLocalPins: ConnectionSupervisor.shared.isReconnecting)
+        resetPrimaryTranscriptBackfillScope()
         // ~11 MB of decoded spritesheets and a per-profile pet cache belong to
         // the gateway that served them, not to the next one.
         detachPetEventRouter()
@@ -1024,6 +1032,14 @@ extension AppModel {
         let bindingChanged = (oldSessionID != nil && oldSessionID != live.sessionID)
             || (newStoredID != nil && chat.storedSessionID != newStoredID)
             || routeChanged
+        if routeChanged || (newStoredID != nil && chat.storedSessionID != newStoredID) {
+            // A same-named profile on another gateway (or a new durable root)
+            // is a replacement transcript source. `sessionID` rotation below
+            // handles the ordinary reconnect case; this covers the rarer
+            // route-stable runtime id that would otherwise leave a stale
+            // "Show earlier" cursor visible.
+            discardTranscriptBackfill(chat: chat)
+        }
         if routeChanged, let oldRoute, let bindingRoute, let oldStoredID,
            oldStoredID == durableID {
             ChatRuntime.shared.migrateProfileRouteState(
@@ -1140,7 +1156,9 @@ extension AppModel {
     /// ordered calls. Only exact wire ids pair calls/results; names and text
     /// are presentation data and never identity.
     static func chatMessages(fromTranscript payload: JSONValue,
-                             toolsMayBeRunning: Bool = false) -> [ChatMessage] {
+                             toolsMayBeRunning: Bool = false,
+                             maximumRows: Int = StoredTranscriptHydrationPayloadPolicy.maximumRows)
+        -> [ChatMessage] {
         var rows = payload["messages"]?.arrayValue ?? payload.arrayValue ?? []
         // Durable ids outrank wall-clock timestamps, which can move backward.
         if rows.count > 1,
@@ -1156,8 +1174,14 @@ extension AppModel {
         // Normalize direction before clipping. `latest` REST pages may arrive
         // newest-first; clipping first would discard the newest row rather
         // than the oldest one and make a 201-row page regress by one turn.
-        if rows.count > StoredTranscriptHydrationPayloadPolicy.maximumRows {
-            rows = Array(rows.suffix(StoredTranscriptHydrationPayloadPolicy.maximumRows))
+        // Existing callers retain the original bounded 200-row tail behavior.
+        // A source-fenced older-history ledger passes only rows it has already
+        // bounded page-by-page and asks the established hydrator to see the
+        // whole chronological sequence, so tool calls/results and ordered
+        // parts can cross a reverse-page seam intact.
+        let rowLimit = max(1, maximumRows)
+        if rows.count > rowLimit {
+            rows = Array(rows.suffix(rowLimit))
         }
         let ambiguousToolIDs = Self.ambiguousTranscriptToolIDs(rows)
 

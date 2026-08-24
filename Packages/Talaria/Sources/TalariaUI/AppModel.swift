@@ -26,13 +26,27 @@ public final class ChatState {
     /// Runtime session id (live mode).
     public var sessionID: String? {
         didSet {
-            if oldValue != sessionID { clearAssistantResponseAlternatives() }
+            if oldValue != sessionID {
+                clearAssistantResponseAlternatives()
+                // A runtime id rotation may keep the same durable root, but a
+                // suspended older-page read captured the old session/client
+                // generation. Cancel it rather than letting it publish into
+                // the replacement binding.
+                TranscriptBackfillRuntime.shared.cancel(chatID: ObjectIdentifier(self))
+                transcriptBackfill = TranscriptBackfillPresentation()
+            }
         }
     }
     /// Durable session key for resume-after-reconnect.
     public var storedSessionID: String? {
         didSet {
-            if oldValue != storedSessionID { clearAssistantResponseAlternatives() }
+            if oldValue != storedSessionID {
+                clearAssistantResponseAlternatives()
+                // Durable roots are the paging authority. Never carry a raw
+                // ledger (or its retry status) across a stored-session swap.
+                TranscriptBackfillRuntime.shared.cancel(chatID: ObjectIdentifier(self))
+                transcriptBackfill = TranscriptBackfillPresentation()
+            }
         }
     }
     public var usage: Usage?
@@ -55,6 +69,11 @@ public final class ChatState {
     public var storedSessionsHasMore: Bool = false
     /// Live context-window breakdown (session.context_breakdown).
     public var contextSegments: [ContextSegment] = []
+
+    /// Observable older-history state for this exact in-memory chat. The
+    /// source/client/raw ledger is kept in `TranscriptBackfillRuntime`; this
+    /// exposes only safe UI facts and is reset on every session replacement.
+    public var transcriptBackfill = TranscriptBackfillPresentation()
 
     /// Current-ChatState only. This shelf never participates in Codable
     /// transcript storage or session-tree/branch persistence.

@@ -820,6 +820,10 @@ extension AppModel {
             self.replayInflight(live, botID: botID)
             guard let sourceAuthority = await self.captureTranscriptHydrationSourceAuthority(
                 route: route, client: client) else { throw CancellationError() }
+            let storedPageSource = StoredTranscriptPageSource(
+                gatewayID: route.gatewayID, profile: route.profile,
+                storedSessionID: stored)
+            var storedTailPage: StoredTranscriptPage?
 
             try await Self.hydrateTranscript(
                 chat: chat,
@@ -827,8 +831,18 @@ extension AppModel {
                 clearWhenEmpty: true,
                 toolsMayBeRunning: live.running || live.retainedInflight?.streaming == true,
                 fallback: {
-                    try? await client.latestSessionMessages(storedID: stored,
-                                                            profile: route.profile)
+                    guard storedPageSource.isUsable else {
+                        return try? await client.latestSessionMessages(
+                            storedID: stored, profile: route.profile)
+                    }
+                    guard let page = try? await client.storedTranscriptPage(
+                        StoredTranscriptPageRequest(
+                            source: storedPageSource, offset: 0,
+                            limit: StoredTranscriptPageRequest.defaultLimit,
+                            includeCompacted: true)),
+                          page.matches(storedPageSource) else { return nil }
+                    storedTailPage = page
+                    return .array(page.messages)
                 },
                 accepts: {
                     await self.transcriptHydrationSourceIsCurrent(sourceAuthority)
@@ -842,6 +856,11 @@ extension AppModel {
                             storedSessionID: stored, route: route)
                 })
             try requireCurrentOpen()
+            if let storedTailPage, storedTailPage.matches(storedPageSource) {
+                await self.installTranscriptBackfillTail(
+                    storedTailPage, botID: botID, chat: chat, route: route,
+                    authority: sourceAuthority, runtimeSessionID: live.sessionID)
+            }
 
             // Same replay every other resume path uses: the approval keeps
             // its real choice set, and a parked clarify is recovered too.

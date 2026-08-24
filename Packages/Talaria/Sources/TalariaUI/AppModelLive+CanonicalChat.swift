@@ -352,6 +352,11 @@ enum TranscriptHydrationMerge {
         row.time = live.time ?? stored.time
         row.card = live.card ?? stored.card
         row.reasoning = live.reasoning ?? stored.reasoning
+        // Ordered parts are additive transcript evidence. A sparse live row
+        // must not erase the raw stored envelope merely because it has newer
+        // presentation state (streaming/tools); when live did carry an
+        // envelope, it remains the current stream's authoritative version.
+        row.orderedParts = live.orderedParts ?? stored.orderedParts
         row.toolCalls = mergeToolCalls(stored: stored.toolCalls, live: live.toolCalls)
         row.rowID = live.rowID ?? stored.rowID
         row.failure = TurnFailureLifecycle.merge(stored.failure, live.failure)
@@ -1330,6 +1335,17 @@ extension AppModel {
                 route: sourceRoute, client: client) else { throw CancellationError() }
         let sourceGatewayID = sourceRoute.gatewayID
         let storedID = live.storedSessionID.isEmpty ? chat.storedSessionID : live.storedSessionID
+        let storedPageSource = storedID.flatMap { durableID -> StoredTranscriptPageSource? in
+            let source = StoredTranscriptPageSource(
+                gatewayID: sourceRoute.gatewayID, profile: profile,
+                storedSessionID: durableID)
+            return source.isUsable ? source : nil
+        }
+        // The same bounded 200-row read that supplements initial hydration
+        // becomes the raw tail ledger only after the canonical source accepts
+        // it. Keep the raw page separate from its JSON projection so a later
+        // older-page request cannot accidentally address the resolved tip.
+        var storedTailPage: StoredTranscriptPage?
         if let binding = chat.assistantResponseBinding,
            (binding.chatID != chat.chatIdentity
             || binding.storedSessionID != (storedID ?? "")
@@ -1354,8 +1370,27 @@ extension AppModel {
             toolsMayBeRunning: live.running || live.retainedInflight?.streaming == true,
             fallback: { durableTarget in
                 guard !durableTarget.isEmpty else { return nil }
-                return try await client.latestSessionMessages(
-                    storedID: durableTarget, profile: profile)
+                guard let storedPageSource,
+                      storedPageSource.storedSessionID == durableTarget else {
+                    // Keep compatibility with legacy/invalid source names for
+                    // the visible initial hydration, but do not create a
+                    // source-less long-history ledger from them.
+                    return try await client.latestSessionMessages(
+                        storedID: durableTarget, profile: profile)
+                }
+                let page = try await client.storedTranscriptPage(
+                    StoredTranscriptPageRequest(
+                        source: storedPageSource,
+                        offset: 0,
+                        limit: StoredTranscriptPageRequest.defaultLimit,
+                        includeCompacted: true))
+                guard page.matches(storedPageSource) else {
+                    throw GatewayError(
+                        code: -8,
+                        message: "stored transcript page lost its captured source")
+                }
+                storedTailPage = page
+                return .array(page.messages)
             },
             accepts: {
                 guard await self.transcriptHydrationSourceIsCurrent(sourceAuthority),
@@ -1366,6 +1401,15 @@ extension AppModel {
                       let route = gatewayRoute(for: botID) else { return false }
                 return route == sourceRoute
             })
+        if let storedTailPage, let storedPageSource,
+           storedTailPage.matches(storedPageSource) {
+            // Re-prove the same authority after the hydrator's suspension.
+            // A route/client/session replacement may have occurred after the
+            // page decoded but before its visible merge completed.
+            await installTranscriptBackfillTail(
+                storedTailPage, botID: botID, chat: chat, route: sourceRoute,
+                authority: sourceAuthority, runtimeSessionID: live.sessionID)
+        }
         if let lease = CanonicalChatRuntime.shared.ambiguousKickoffs[botID],
            CanonicalChatRuntime.shared.kickoffs[botID] == lease.id,
            lease.sessionID == live.sessionID,
