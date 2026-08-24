@@ -85,6 +85,8 @@ public struct ChatView: View {
     @State private var showModelSheet = false
     @State private var showCommands = false
     @State private var showQueuePanel = false
+    @State private var showSubagentLiveSheet = false
+    @State private var presentedSubagentSource: SubagentSourceFence?
     @State private var editingQueuedPromptID: UUID?
     /// Capture the presenting bot id with the reservation. A profile route can
     /// change while the sheet is visible; Cancel must still release the exact
@@ -195,6 +197,20 @@ public struct ChatView: View {
         }
     }
 
+    /// Observe the event-driven ledger revision explicitly: this surface
+    /// updates as admitted gateway frames arrive and never polls Hermes.
+    private var subagentPresentation: SubagentLivePresentationPolicy.Summary? {
+        _ = SubagentLiveRuntime.shared.store.presentationRevision
+        guard model.mode == .live,
+              let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID),
+              let runtimeID = chat?.sessionID,
+              let source = SubagentSourceFence(
+                gatewayID: route.gatewayID, parentRuntimeSessionID: runtimeID)
+        else { return nil }
+        return SubagentLivePresentationPolicy.make(
+            snapshot: model.subagentLiveSnapshot(for: source))
+    }
+
     private var quickReplies: [String] {
         model.mode == .demo ? (DemoData.quickReplies[botID] ?? []) : []
     }
@@ -239,6 +255,16 @@ public struct ChatView: View {
     private var chatContent: some View {
         VStack(spacing: 0) {
             header
+            if let subagentPresentation {
+                SubagentLiveStatusSurface(
+                    presentation: subagentPresentation,
+                    theme: theme,
+                    action: {
+                        presentedSubagentSource = subagentPresentation.source
+                        showSubagentLiveSheet = true
+                    }
+                )
+            }
             if transcriptFindPresented {
                 transcriptFindBar
                     .transition(reducedMotion ? .opacity
@@ -287,6 +313,14 @@ public struct ChatView: View {
             transcriptFindResultMessageGeneration = -1
         }
         .onChange(of: transcriptFindAccessibilityStatus) { announceTranscriptFindStatus() }
+        .onChange(of: subagentPresentation?.source) { _, currentSource in
+            guard showSubagentLiveSheet,
+                  currentSource != presentedSubagentSource else { return }
+            // Never let an open sheet silently migrate from a torn-down
+            // parent runtime to a replacement that already has its own rows.
+            showSubagentLiveSheet = false
+            presentedSubagentSource = nil
+        }
         .onChange(of: transcriptFindOwnsScroll) {
             guard transcriptFindOwnsScroll else { return }
             _ = initialTranscriptAnchor.userDeparted(botID: botID,
@@ -404,6 +438,30 @@ public struct ChatView: View {
                     cancel: { model.dismissPrivateDiagnosticsShare(id: state.id) }
                 )
                 .id(state.id)
+            }
+        }
+        .sheet(isPresented: $showSubagentLiveSheet, onDismiss: {
+            presentedSubagentSource = nil
+        }) {
+            if let presentation = subagentPresentation,
+               presentation.source == presentedSubagentSource {
+                SubagentLiveSheet(
+                    presentation: presentation,
+                    theme: theme,
+                    canOpenChild: { node in
+                        model.provenSubagentChildStoredSessionID(
+                            for: node, botID: botID,
+                            source: presentation.source) != nil
+                    },
+                    openChild: { node in
+                        if model.openProvenSubagentChildSession(
+                            for: node, botID: botID,
+                            source: presentation.source) {
+                            showSubagentLiveSheet = false
+                        }
+                    },
+                    dismiss: { showSubagentLiveSheet = false }
+                )
             }
         }
     }

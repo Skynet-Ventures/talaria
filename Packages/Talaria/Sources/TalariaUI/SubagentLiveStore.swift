@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import TalariaKit
 
 /// Hard local ceilings for foreground-only subagent progress.  The relay is a
@@ -19,6 +20,7 @@ public enum SubagentLiveStoreLimits {
 /// its exact parent runtime session is bound and tear down that same source
 /// when it is released.
 @MainActor
+@Observable
 public final class SubagentLiveStore {
     private struct Node {
         let key: SubagentNodeKey
@@ -82,6 +84,11 @@ public final class SubagentLiveStore {
     private var droppedNodeCountBySource: [SubagentSourceFence: Int] = [:]
     private var order: UInt64 = 0
 
+    /// Monotone presentation invalidation for source-qualified SwiftUI
+    /// surfaces. The live ledger is event-driven; consumers observe this
+    /// value rather than polling Hermes for state the gateway cannot prove.
+    public private(set) var presentationRevision: UInt64 = 0
+
     public init() {}
 
     /// Open the exact parent-session fence. Re-activating the same foreground
@@ -99,9 +106,12 @@ public final class SubagentLiveStore {
     /// session on the same gateway, or the same short sid on another gateway,
     /// remains untouched.
     public func tearDown(_ source: SubagentSourceFence) {
+        let hadEvidence = nodes.keys.contains { $0.source == source }
+            || droppedNodeCountBySource[source] != nil
         activeSources.remove(source)
         nodes = nodes.filter { $0.key.source != source }
         droppedNodeCountBySource.removeValue(forKey: source)
+        if hadEvidence { advancePresentationRevision() }
     }
 
     /// Apply a previously decoded event only while its exact parent source is
@@ -124,6 +134,7 @@ public final class SubagentLiveStore {
             let eventOrder = nextOrder()
             merge(event, into: &node, order: eventOrder, inboundSequence: inboundSequence)
             nodes[key] = node
+            advancePresentationRevision()
             return true
         }
 
@@ -132,6 +143,7 @@ public final class SubagentLiveStore {
                 SubagentLiveStoreLimits.maximumDroppedNodeCount,
                 (droppedNodeCountBySource[source] ?? 0) + 1
             )
+            advancePresentationRevision()
             return false
         }
 
@@ -140,6 +152,7 @@ public final class SubagentLiveStore {
                         status: initialStatus(for: event))
         merge(event, into: &node, order: eventOrder, inboundSequence: inboundSequence)
         nodes[key] = node
+        advancePresentationRevision()
         return true
     }
 
@@ -170,6 +183,10 @@ public final class SubagentLiveStore {
     private func nextOrder() -> UInt64 {
         if order < UInt64.max { order += 1 }
         return order
+    }
+
+    private func advancePresentationRevision() {
+        if presentationRevision < UInt64.max { presentationRevision += 1 }
     }
 
     private func accepts(inboundSequence: UInt64, after prior: UInt64) -> Bool {
