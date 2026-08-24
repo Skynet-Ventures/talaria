@@ -2,7 +2,12 @@
 
 Talaria renders a specialist transcript card only for the exact,
 case-sensitive Hermes `image_generate` tool. This slice was checked against
-Hermes `77d6c78cf52ec9f2c3245174cf763ff32a75d572`.
+Hermes `77d6c78cf52ec9f2c3245174cf763ff32a75d572` as a scoped historical
+transcript fixture, then reconciled against the canonical parity authority
+`40643cbaf9b767af146694131ffb8f8160f25e1c`. The latter is 832 commits newer;
+the fixture must not be treated as a moving-current pin. Later textual result
+elision/reference stubs remain valid bounded generic tool evidence and do not
+change the `image_generate` admission contract below.
 
 ## Authority and admission
 

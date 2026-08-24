@@ -33,6 +33,16 @@ surface), and made React/compiler and contributor-only changes. The exact
 per-commit dispositions are in the current audit. Moving the pin records that
 review; it does not certify gateway- or device-dependent behavior.
 
+## Open-stack implementation scope
+
+Rich-transcript hydration through assistant `MEDIA:` projection and the
+durable Queue descriptions below refer to the independently gated, still-open
+PR #54-#63 stack ending at Talaria `ab6c89f09ebc6260a0e15ce38efb862c0ba32580`,
+not released `main` (`a8463632e409620d471cfd40d25b2197015ae00d` at this
+edit). They remain provisional until the exact reviewed heads merge. The
+checkbox rule in the delivery ledger still means checked implementation is on
+`main`.
+
 The next `95057c2..18a15a46` move adds no authority-file hash changes. Its
 portable deltas are gateway prompt-delivery semantics and per-job cron
 reasoning. Approval/clarify sends now preserve registrations when connector
@@ -143,7 +153,7 @@ missing mobile equivalent.
 | Connections union roster and routed requests | Retained authenticated gateway clients, `GatewayBotRoute` identity, collision-safe `@name-device` handles, and source-fenced chat/management mutations without globally switching the app | Implemented, certification pending | Wi-Fi/cellular handoff, detach/reconnect, colliding names, and foreign-profile lifecycle cases |
 | Bot Mode group chats | Durable standalone rooms with immutable ids, multiple ordered memberships, source-qualified members, prompt/deadline recovery, attachment export, and bounded shared projection/CAS | Implemented, certification pending | Deadline/relaunch, rename/disband, cross-gateway prompt, and projection-conflict device cases |
 | Composer send/steer plus pending prompts | Send remains steer-first; a separate explicit text-only durable Queue persists exact route/session authority and provides scoped edit, pause/resume, removal, and uncertainty handling | Implemented, certification pending | FIFO/edit/relaunch/offline cases on a real gateway; attachment replay remains intentionally unsupported |
-| Markdown transcript, actions, tools, media, branching | Native transcript with markdown/tables/code, quiet and advanced tools, edit/rewind/regenerate, exact-source child creation, and phone-shaped navigation | Partial / open | Persistent multimodal parts, generated-media lightbox, grouped tools, specialist renderers, branch picker/lineage, TTS, timing, tours, and transcript-wide activity |
+| Markdown transcript, actions, tools, media, branching | Native transcript with markdown/tables/code, quiet and advanced tools, edit/rewind/regenerate, exact-source child creation, typed retained-history hydration, bounded diff/structured-terminal/web-search renderers, local find, generated-image cards/lightbox/share, and explicit assistant `MEDIA:` image/audio/video/file cards | Partial / open | Live/device certification remains open. Persistent multimodal message parts, grouped generic tool runs, specialist ANSI/math/diagram rendering, branch picker/lineage, per-message TTS, whole-turn timing, tours, and transcript-wide activity remain unimplemented |
 | Image, PDF, file, clipboard, and room attachments | Native source picker and gateway-staged attachments with bounded payload handling; room attachments have protected local storage/export | Implemented, certification pending | Physical-device picker, large/failure, background/relaunch, and cross-source cases; durable Queue remains text-only |
 | Notification center and background completion | Source-qualified APNs relay, per-device profile filter, real-event notification actions, exact-session tap routing, and a local activity journal | Implemented, certification pending | Retained Debug positive/negative matrix and separate TestFlight production-APNs matrix |
 | Desktop task progress chrome | Live Activity only for sustained operational tool work, not merely because a chat is open or a normal answer is running | Implemented, certification pending | Lock-screen start/update/end behavior, background transition, stale cleanup, and reduced-motion device checks |
@@ -171,7 +181,8 @@ substantial Bot Mode support, not yet a 1:1 client. Source-qualified A2A,
 standalone multi-member rooms, rich transcript interaction, and a guarded
 gateway-backed Command Center are implemented and automated-gate certified;
 they remain provisional until live-gateway and real-device certification. The
-largest remaining product gaps are richer transcript media/tool presentation,
+largest remaining product gaps are the still-missing transcript specialists and
+session lineage/timing surfaces,
 portable management depth (including auxiliary goal-judge controls), workspace
 depth, and artifact pagination/unlocked-root exceptions. The authenticated gateway PTY is now
 implemented, with live-gateway and real-device certification still open:
@@ -302,6 +313,14 @@ partial until the unchecked certification gates are recorded.
       explicit public-host contact, bounded raster validation, accessible retry,
       and focused coverage, but their real gateway/device load and share matrix
       remains open.
+      Exact assistant `MEDIA:` projection is also implemented for ordered
+      image/audio/video/file cards. All loads are explicit; gateway image/file
+      bytes use bounded managed reads, audio/video uses the bounded stream
+      route, public hosts receive no gateway credentials and cannot redirect,
+      source authority is re-proved across awaits, playback is single-owner and
+      lifecycle-paused, and stuck metadata workers are deadline-returning plus
+      concurrency-capped. Real gateway/device load, playback, cancellation,
+      VoiceOver, rotation, and share certification remains open.
       The separate source-qualified, text-only durable composer queue is
       implemented and focused-test covered; its gateway/device certification is
       still open.

@@ -40,6 +40,10 @@ only as redacted hashes or suffixes.
 | Case id | Area | Result | Evidence link / retained artifact | Notes |
 |---|---|---|---|---|
 | `DEV-THREAD-001` | Long transcript | NOT RUN | TODO | |
+| `DEV-TOOL-001` | Retained/live specialist tool transcripts | NOT RUN | TODO | |
+| `DEV-FIND-001` | Transcript find navigation and mutation | NOT RUN | TODO | |
+| `DEV-MEDIA-001` | Generated image transcript cards | NOT RUN | TODO | |
+| `DEV-MEDIA-002` | Assistant MEDIA image/audio/video/file cards | NOT RUN | TODO | |
 | `DEV-LIFE-001` | Background/foreground, idle | NOT RUN | TODO | |
 | `DEV-LIFE-002` | Background/foreground, active turn | NOT RUN | TODO | |
 | `DEV-QUEUE-001` | Explicit durable Queue FIFO/edit | NOT RUN | TODO | |
@@ -53,6 +57,8 @@ only as redacted hashes or suffixes.
 | `DEV-LAYOUT-001` | Rotation/layout restoration | NOT RUN | TODO | |
 | `DEV-NET-001` | Wi-Fi → cellular handoff | NOT RUN | TODO | |
 | `DEV-NET-002` | Cellular → Wi-Fi handoff | NOT RUN | TODO | |
+| `DEV-GATEWAY-001` | Saved-gateway detach/credential/client replacement | NOT RUN | TODO | |
+| `DEV-PROFILE-001` | Profile lifecycle and stale-callback fencing | NOT RUN | TODO | |
 | `DEV-PTY-001` | PTY input/output/resize | NOT RUN | TODO | |
 | `DEV-PTY-002` | PTY background/reattach/expiry | NOT RUN | TODO | |
 | `PUSH-DBG-001` | Debug approval positive | NOT RUN | TODO | sandbox only |
@@ -77,6 +83,73 @@ only as redacted hashes or suffixes.
    remains selected. Record transcript size, session ids, memory warning/crash
    observations, screen recording, and gateway timestamps.
 
+### `DEV-TOOL-001` — retained/live specialist tool transcripts
+
+1. Retain and then stream exact-id file-edit diff, structured terminal/execute,
+   and web-search tool pairs, including pending, success, malformed, failed,
+   duplicate, orphan, oversized, and unknown-tool evidence.
+2. Switch chats and sources during one live completion, then relaunch and load
+   the same stored session.
+3. Pass only if stored/live overlay preserves one stable ordered row per exact
+   tool identity, specialist cards admit only their bounded contracts, failure
+   and malformed evidence remains visible through the generic fallback, source
+   mutation cannot publish stale specialist state, and Quiet/Advanced mode does
+   not hide meaningful failures. Retain raw redacted event order, stored rows,
+   screenshots, and source/session identifiers.
+
+### `DEV-FIND-001` — transcript find
+
+1. Open find with the hardware and software keyboard; exercise previous, next,
+   wrap, zero/one/many matches, keyboard dismissal, and a match inside a long
+   transcript above and below the viewport.
+2. While one match is selected, append streamed text, replace stored history,
+   switch chats, toggle VoiceOver and Reduce Motion, and manually scroll before
+   invoking the next result.
+3. Pass only if focus and match count are honest, one match re-centers without
+   oscillation, mutation invalidates stale ranges, manual scrolling retains
+   ownership until an explicit find navigation, wrapped navigation is stable,
+   and announcements/motion obey the active accessibility settings.
+
+### `DEV-MEDIA-001` — exact generated-image transcript cards
+
+1. Produce one successful `image_generate` result as a gateway path and one as
+   a public URL; separately retain an orphan/unmatched result and a failed call.
+2. Exercise pending, loading, public-host permission, failure/Retry, loaded,
+   full-screen inspection, share/save, chat switch, background, relaunch,
+   VoiceOver, and Reduce Motion. Include private and legacy-numeric IPs, a
+   redirect, and a controlled DNS-answer change.
+3. Pass only if exact successful invocation/message/source authority renders a
+   card, orphan or failed evidence remains inert, public bytes are never fetched
+   before the explicit action, no gateway credential or redirect reaches the
+   public host, unsafe/animated/oversized raster evidence fails closed, and
+   source mutation cannot publish stale bytes. The hinted aspect must stay fixed
+   through pending/loading/permission/failure and update only from validated
+   decoded dimensions; status changes must be announced without decorative
+   motion. Private/legacy IPs and redirects must fail closed. Record the
+   preflight-only DNS rebinding residual, gateway request logs, public-host
+   request headers, screen capture, and the saved file type.
+
+### `DEV-MEDIA-002` — generic assistant MEDIA cards
+
+1. In one assistant transcript, emit ordered prose around gateway-local image,
+   audio, video, and generic-file `MEDIA:` directives. Repeat with public URLs,
+   duplicates, quoted paths containing spaces, and literal examples inside
+   fenced/inline code, blockquotes, and JSON-looking example lines. Retain one
+   exact protected fixture and one ordinary prose fixture so the bounded parser
+   boundary is explicit rather than implying arbitrary inline JSON shielding.
+2. Confirm every card is inert until **Load** is tapped. Exercise image inspect,
+   audio play/pause/rebuffer, native video controls, file share/open, Retry,
+   cancel during load/metadata, starting B while A plays, background/foreground,
+   chat switch, source/session replacement, VoiceOver, and Reduce Motion.
+3. Pass only if prose/card ordering matches stored and live text, examples never
+   become requests, gateway images/files use managed reads while audio/video use
+   the stream route, public hosts are named and receive no gateway credentials,
+   only one player owns playback (including waiting/buffering), canceled owned
+   files are removed, stuck metadata work stays bounded, and copy/voice/find omit
+   raw directive paths without altering user-authored literal `MEDIA:` text.
+   Retain correlated gateway/public-host logs, accessibility recording, and a
+   temporary-folder before/after check.
+
 ### `DEV-LIFE-001` — idle background/foreground
 
 1. Open an idle chat, background for at least 60 seconds, then foreground.
@@ -95,12 +168,18 @@ only as redacted hashes or suffixes.
 ### `DEV-QUEUE-001` — explicit Queue FIFO and edit
 
 1. While a turn is running, use the distinct **Queue** control for at least
-   three text-only prompts. Edit the middle local row and remove another.
+   three text-only prompts. Edit the middle ready row and remove another.
+   Separately edit a parked row and a retry-exhausted row, hold an edit
+   reservation on the FIFO head, and attempt edits while rows are submitting,
+   accepted, and uncertain.
 2. Let the current turn reach authoritative idle.
 3. Pass only if normal Send remains steer-first, queued rows drain in final
    FIFO order one at a time, no optimistic assistant/user duplicate appears,
-   and the edited text—not the old text—is submitted. Record stored/runtime
-   session ids and gateway receipt/event ordering.
+   and the edited text—not the old text—is submitted. Editing must preserve row
+   identity, order, and creation time; retry-exhausted edits reset to ready,
+   parked edits remain parked, active edit reservation blocks the head, and
+   submitting/accepted/uncertain edits are rejected. Record stored/runtime
+   session ids, row-state transitions, and gateway receipt/event ordering.
 
 ### `DEV-QUEUE-002` — relaunch, offline, Stop, and uncertainty
 
@@ -182,6 +261,29 @@ only as redacted hashes or suffixes.
    replayed, and stale clients cannot publish after replacement. Record iOS
    network state, gateway process uptime/restart count, socket logs, and routes.
 
+### `DEV-GATEWAY-001` — detach and retained-client replacement
+
+1. With transcript/media loading and an approval outstanding on gateway A,
+   remove its saved gateway entry. Repeat by replacing A's credential and by
+   reconnecting the same source id with a newly retained client while gateway B
+   and a colliding profile name remain available.
+2. Pass only if A's in-flight callbacks cannot publish after detach or
+   replacement, no operation falls through to B, the retired credential is not
+   reused, approval UI cannot answer the wrong source, and reconnect converges
+   without a process restart loop. Retain connection generations, request ids,
+   redacted credential suffixes, and gateway logs.
+
+### `DEV-PROFILE-001` — profile lifecycle
+
+1. Prove primary-profile delete refusal. On a non-primary foreign-source
+   profile, exercise rename, duplicate, delete cancel, a failed delete/rollback,
+   and successful delete while transcript/media work is in flight.
+2. Pass only if every mutation stays on the exact route, failures restore an
+   honest roster state, successful retirement cleans source-owned navigation
+   and pending state, profile lifecycle generation fences old callbacks, and a
+   same-named profile on another gateway is untouched. Retain before/after
+   profile ids, route ids, mutation receipts, and stale-callback logs.
+
 ### `DEV-PTY-001` — PTY interaction
 
 1. Open the authenticated terminal on a non-default source/profile, type and
@@ -214,7 +316,10 @@ showing why no Talaria fan-out occurred.
 
 - `PUSH-DBG-001`: trigger a real approval request. Require correct bot display
   name (not `default: approval required`), exact source/session action routing,
-  and successful approve/deny handling.
+  and successful approve/deny handling. Then hold simultaneous approvals whose
+  request/session labels collide across two sources, retire one prompt/profile,
+  and invoke its stale action. Pass only if request-id fallback cannot answer
+  the surviving or wrong approval and the stale action fails closed.
 - `PUSH-DBG-002`: trigger one non-interrupted non-empty final response through
   the `post_llm_call` producer. Require the bot display name without the
   `: response ready` suffix, source/session tap routing, and no duplicate legacy

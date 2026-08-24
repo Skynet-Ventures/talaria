@@ -1,5 +1,10 @@
 # Assistant MEDIA directive projection
 
+This contract is reconciled against the canonical Hermes parity authority
+`40643cbaf9b767af146694131ffb8f8160f25e1c`. The older local checkout at
+`77d6c78cf52ec9f2c3245174cf763ff32a75d572` is a historical fixture, not the
+current authority.
+
 `AssistantMediaProjection` is a pure TalariaKit parser for assistant-authored
 transcript text. It does not mutate or persist input, fetch media, or choose a
 UI. Display, Copy, voice, and transcript find consume the same ordered
