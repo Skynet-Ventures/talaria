@@ -17,6 +17,14 @@ commit-by-commit in
 [`HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md`](HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md).
 That bounded ledger does not repin the canonical manifest or claim coverage of
 the other 978 net-changed files in the complete range.
+The independent production client-wire slice over `tui_gateway/**`,
+`hermes_cli/web_routers/**`, and `hermes_cli/web_server.py` is dispositioned in
+[`HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md`](HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md):
+71 exact commits partition into 64 new ledger rows plus 7 authority-ledger
+cross-references. It identifies durable restart-crossing update receipt
+recovery as a separate runtime gap, and credits gateway heartbeat to open PR73
+exact head `d1825fe8412a7ed6b6f4a430370545f0c8682bd4` rather than duplicating it.
+That audit also remains too narrow to repin the canonical manifest.
 An implementation row is not certified merely because it is checked below:
 the evidence column names the remaining gateway or device proof explicitly.
 The audit cutoff is the exact `40643cba` snapshot reviewed on 2026-08-20
