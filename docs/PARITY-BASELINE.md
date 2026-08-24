@@ -299,7 +299,18 @@ partial until the unchecked certification gates are recorded.
       import/export exists. Desktop Star Map codes drop prose and are
       visualization-only. The audit records the immutable-id, pagination,
       CAS, secret-attestation, and prepare/commit contract required before a
-      phone editor can be implemented.
+      phone editor can be implemented. Auxiliary model administration remains
+      fail-closed after the exact `057dcdf23` audit: the dedicated model API
+      exposes only 12 fixed revisionless slots and omits `goal_judge`, while
+      generic config is the only path for goal-judge model/timeout and returns
+      stored nested API keys on reads. Generic writes accept an arbitrary
+      deep-merged dictionary without field/range admission, expected revision,
+      409 conflict, or canonical postcondition. The audit records the bounded
+      gateway-declared task/options, write-only credential, per-slot clear,
+      and revisioned mutation contract required before phone controls can be
+      added. The `e400e008..057dcdf23` MCP timeout change is runtime-only and
+      the Linux Desktop HUD changes are non-portable; neither supplies that
+      missing authority.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source
       discovery, explicit bounded/stale/failure state, and conditionally locked
       retained-body reads are implemented. Gateways returning `locked_root: nil`
