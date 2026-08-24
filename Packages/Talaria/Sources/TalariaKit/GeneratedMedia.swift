@@ -290,13 +290,106 @@ public enum ToolGeneratedImageCodec {
 
 public enum RemoteGeneratedImagePolicy {
     public static let maximumResolvedAddresses = 64
+    public static let maximumBlockingResolvers = 2
+    public static let resolverDeadlineSeconds: TimeInterval = 2
 
     public enum ResolvedAddress: Sendable, Equatable {
         case ipv4(UInt8, UInt8, UInt8, UInt8)
         case ipv6([UInt8])
     }
 
-    public typealias Resolver = @Sendable (String) async -> [ResolvedAddress]?
+    typealias Resolver = @Sendable (String) async -> [ResolvedAddress]?
+    public typealias BlockingResolver = @Sendable (String) -> [ResolvedAddress]?
+    public typealias WorkerDispatcher = @Sendable (@escaping @Sendable () -> Void) -> Void
+    public typealias DeadlineCancellation = @Sendable () -> Void
+    public typealias DeadlineScheduler = @Sendable (
+        @escaping @Sendable () -> Void
+    ) -> DeadlineCancellation
+
+    public final class ResolutionGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private let limit: Int
+        private var active = 0
+
+        public init(limit: Int = maximumBlockingResolvers) {
+            self.limit = max(1, limit)
+        }
+
+        fileprivate func acquire() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard active < limit else { return false }
+            active += 1
+            return true
+        }
+
+        fileprivate func release() {
+            lock.lock()
+            active = max(0, active - 1)
+            lock.unlock()
+        }
+
+        var activeCountForTesting: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return active
+        }
+    }
+
+    private final class ResolutionAttempt: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<[ResolvedAddress]?, Never>?
+        private var finished = false
+        private var result: [ResolvedAddress]?
+        private var cancelDeadline: DeadlineCancellation?
+
+        func install(_ continuation: CheckedContinuation<[ResolvedAddress]?, Never>) {
+            lock.lock()
+            if finished {
+                let result = result
+                lock.unlock()
+                continuation.resume(returning: result)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+
+        func claim(_ gate: ResolutionGate) -> Bool {
+            lock.lock()
+            guard !finished else { lock.unlock(); return false }
+            let admitted = gate.acquire()
+            lock.unlock()
+            return admitted
+        }
+
+        func setDeadlineCancellation(_ cancellation: @escaping DeadlineCancellation) {
+            lock.lock()
+            if finished {
+                lock.unlock()
+                cancellation()
+            } else {
+                cancelDeadline = cancellation
+                lock.unlock()
+            }
+        }
+
+        func finish(_ result: [ResolvedAddress]?) {
+            lock.lock()
+            guard !finished else { lock.unlock(); return }
+            finished = true
+            self.result = result
+            let continuation = continuation
+            let cancellation = cancelDeadline
+            self.continuation = nil
+            cancelDeadline = nil
+            lock.unlock()
+            cancellation?()
+            continuation?.resume(returning: result)
+        }
+    }
+
+    private static let systemResolutionGate = ResolutionGate()
 
     public static func hostIsPublic(_ raw: String) -> Bool {
         guard raw.utf8.count <= 253 else { return false }
@@ -324,9 +417,13 @@ public enum RemoteGeneratedImagePolicy {
         return true
     }
 
-    public static func resolvedHostIsPublic(
-        _ raw: String, resolver: Resolver? = nil
-    ) async -> Bool {
+    public static func resolvedHostIsPublic(_ raw: String) async -> Bool {
+        await resolvedHostIsPublic(raw, resolver: { host in
+            await systemResolve(host)
+        })
+    }
+
+    static func resolvedHostIsPublic(_ raw: String, resolver: Resolver) async -> Bool {
         guard hostIsPublic(raw) else { return false }
         var host = raw.lowercased()
         if host.hasPrefix("[") && host.hasSuffix("]") {
@@ -334,8 +431,7 @@ public enum RemoteGeneratedImagePolicy {
         }
         if host.hasSuffix(".") { host.removeLast() }
         if let literal = parsedLiteral(host) { return addressIsPublic(literal) }
-        let addresses = resolver == nil
-            ? await systemResolve(host) : await resolver?(host)
+        let addresses = await resolver(host)
         guard let addresses, !addresses.isEmpty,
               addresses.count <= maximumResolvedAddresses else { return false }
         return addresses.allSatisfy(addressIsPublic)
@@ -369,41 +465,83 @@ public enum RemoteGeneratedImagePolicy {
     }
 
     public static func systemResolve(_ host: String) async -> [ResolvedAddress]? {
-        await Task.detached(priority: .userInitiated) {
-            var hints = addrinfo()
-            hints.ai_family = AF_UNSPEC
-            #if canImport(Darwin)
-            hints.ai_socktype = SOCK_STREAM
-            #else
-            hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
-            #endif
-            var head: UnsafeMutablePointer<addrinfo>?
-            guard getaddrinfo(host, nil, &hints, &head) == 0, let head else { return nil }
-            defer { freeaddrinfo(head) }
-            var result: [ResolvedAddress] = []
-            var inspected = 0
-            var cursor: UnsafeMutablePointer<addrinfo>? = head
-            while let info = cursor?.pointee {
-                inspected += 1
-                guard inspected <= maximumResolvedAddresses else { return nil }
-                if info.ai_family == AF_INET,
-                   let socket = info.ai_addr?.withMemoryRebound(
-                    to: sockaddr_in.self, capacity: 1, { $0.pointee }) {
-                    var raw = socket.sin_addr
-                    withUnsafeBytes(of: &raw) { bytes in
-                        result.append(.ipv4(bytes[0], bytes[1], bytes[2], bytes[3]))
-                    }
-                } else if info.ai_family == AF_INET6,
-                          let socket = info.ai_addr?.withMemoryRebound(
-                            to: sockaddr_in6.self, capacity: 1, { $0.pointee }) {
-                    var raw = socket.sin6_addr
-                    let bytes = withUnsafeBytes(of: &raw) { Array($0.prefix(16)) }
-                    result.append(.ipv6(bytes))
+        await boundedResolve(host: host, gate: systemResolutionGate)
+    }
+
+    static func boundedResolve(
+        host: String,
+        gate: ResolutionGate,
+        blockingResolver: BlockingResolver? = nil,
+        workerDispatcher: WorkerDispatcher? = nil,
+        deadlineScheduler: DeadlineScheduler? = nil
+    ) async -> [ResolvedAddress]? {
+        let attempt = ResolutionAttempt()
+        let resolver = blockingResolver ?? rawSystemResolve
+        let dispatchWorker: WorkerDispatcher = workerDispatcher ?? { work in
+            DispatchQueue.global(qos: .utility).async(execute: work)
+        }
+        let scheduleDeadline: DeadlineScheduler = deadlineScheduler ?? { finish in
+            let work = DispatchWorkItem(block: finish)
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + resolverDeadlineSeconds, execute: work)
+            return { work.cancel() }
+        }
+        let resolved = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                attempt.install(continuation)
+                guard !Task.isCancelled, attempt.claim(gate) else {
+                    attempt.finish(nil)
+                    return
                 }
-                cursor = info.ai_next
+                attempt.setDeadlineCancellation(scheduleDeadline {
+                    attempt.finish(nil)
+                })
+                dispatchWorker {
+                    let result = resolver(host)
+                    gate.release()
+                    attempt.finish(result)
+                }
             }
-            return result
-        }.value
+        } onCancel: {
+            attempt.finish(nil)
+        }
+        return Task.isCancelled ? nil : resolved
+    }
+
+    private static func rawSystemResolve(_ host: String) -> [ResolvedAddress]? {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        #if canImport(Darwin)
+        hints.ai_socktype = SOCK_STREAM
+        #else
+        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        #endif
+        var head: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &head) == 0, let head else { return nil }
+        defer { freeaddrinfo(head) }
+        var result: [ResolvedAddress] = []
+        var inspected = 0
+        var cursor: UnsafeMutablePointer<addrinfo>? = head
+        while let info = cursor?.pointee {
+            inspected += 1
+            guard inspected <= maximumResolvedAddresses else { return nil }
+            if info.ai_family == AF_INET,
+               let socket = info.ai_addr?.withMemoryRebound(
+                to: sockaddr_in.self, capacity: 1, { $0.pointee }) {
+                var raw = socket.sin_addr
+                withUnsafeBytes(of: &raw) { bytes in
+                    result.append(.ipv4(bytes[0], bytes[1], bytes[2], bytes[3]))
+                }
+            } else if info.ai_family == AF_INET6,
+                      let socket = info.ai_addr?.withMemoryRebound(
+                        to: sockaddr_in6.self, capacity: 1, { $0.pointee }) {
+                var raw = socket.sin6_addr
+                let bytes = withUnsafeBytes(of: &raw) { Array($0.prefix(16)) }
+                result.append(.ipv6(bytes))
+            }
+            cursor = info.ai_next
+        }
+        return result
     }
 
     private static func parsedLiteral(_ host: String) -> ResolvedAddress? {
@@ -509,10 +647,14 @@ public extension GatewayClient {
 }
 
 public enum GeneratedRemoteImageLoader {
-    public static func load(
-        _ url: URL,
-        resolver: RemoteGeneratedImagePolicy.Resolver? = nil
-    ) async throws -> Data {
+    public static func load(_ url: URL) async throws -> Data {
+        try await load(url, resolver: { host in
+            await RemoteGeneratedImagePolicy.systemResolve(host)
+        })
+    }
+
+    static func load(_ url: URL,
+                     resolver: RemoteGeneratedImagePolicy.Resolver) async throws -> Data {
         guard let host = url.host(), RemoteGeneratedImagePolicy.hostIsPublic(host),
               url.scheme?.lowercased() == "http" || url.scheme?.lowercased() == "https"
         else { throw GatewayError(code: 403, message: "Private image hosts are not allowed.") }

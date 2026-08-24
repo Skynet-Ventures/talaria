@@ -3,6 +3,13 @@ import ImageIO
 import TalariaKit
 
 @MainActor
+final class GeneratedImageRuntime {
+    static let shared = GeneratedImageRuntime()
+    var afterTranscriptAuthorityCaptureForTesting: (() async -> Void)?
+    private init() {}
+}
+
+@MainActor
 struct GeneratedImagePresentationSource {
     let model: AppModel
     let botID: String
@@ -106,7 +113,8 @@ extension AppModel {
         guard source.model === self,
               GeneratedImageEchoPolicy.hasSuccessfulAuthority(call),
               let output = call.generatedImage,
-              let authority = await captureGeneratedImageAuthority(call, from: source)
+              let authority = await captureGeneratedImageAuthority(call, from: source),
+              generatedImageAuthorityAcceptsSynchronously(authority)
         else { return .unavailable("The producing chat is no longer current.") }
 
         let bytes: Data
@@ -114,6 +122,9 @@ extension AppModel {
         do {
             switch output.sourceKind {
             case .gatewayPath:
+                guard generatedImageAuthorityAcceptsSynchronously(authority) else {
+                    return .unavailable("The producing chat changed before the image request.")
+                }
                 let dataURL = try await authority.snapshot.client
                     .generatedMediaDataURL(path: output.source)
                 guard let decoded = Self.decodeGeneratedImageDataURL(dataURL) else {
@@ -125,6 +136,9 @@ extension AppModel {
                 guard allowRemote else { return .externalApprovalRequired }
                 guard let url = URL(string: output.source) else {
                     return .unavailable("The generated image link was invalid.")
+                }
+                guard generatedImageAuthorityAcceptsSynchronously(authority) else {
+                    return .unavailable("The producing chat changed before the image request.")
                 }
                 bytes = try await GeneratedRemoteImageLoader.load(url)
                 expectedMIME = nil
@@ -197,7 +211,7 @@ extension AppModel {
             expectedPooledSnapshot: source.route.gatewayID == LiveRuntime.shared.gatewayID
                 ? nil : retainedSource.connection)
         guard let transcript else { return nil }
-        return GeneratedImageLoadAuthority(
+        let authority = GeneratedImageLoadAuthority(
             botID: source.botID, route: source.route,
             storedSessionID: source.storedSessionID,
             liveSessionID: source.liveSessionID, chatID: chatID,
@@ -207,6 +221,11 @@ extension AppModel {
             lifecycle: lifecycle, transcript: transcript,
             snapshot: retainedSource.connection, registryURL: saved.urlString,
             registryCredential: credential)
+        if let hook = GeneratedImageRuntime.shared.afterTranscriptAuthorityCaptureForTesting {
+            await hook()
+        }
+        guard generatedImageAuthorityAcceptsSynchronously(authority) else { return nil }
+        return authority
     }
 
     private func generatedImageAuthorityIsCurrent(
@@ -225,6 +244,7 @@ extension AppModel {
         guard !Task.isCancelled, mode == .live,
               profileLifecycleAccepts(authority.lifecycle),
               profileLifecycleAllowsGatewayTraffic(authority.route.gatewayID),
+              generatedImageTranscriptSourceAcceptsSynchronously(authority),
               (stateRoute(for: authority.botID) ?? gatewayRoute(for: authority.botID))
                 == authority.route,
               let chat = chats[authority.botID], ObjectIdentifier(chat) == authority.chatID,
@@ -248,6 +268,29 @@ extension AppModel {
             return false
         }
         return true
+    }
+
+    private func generatedImageTranscriptSourceAcceptsSynchronously(
+        _ authority: GeneratedImageLoadAuthority
+    ) -> Bool {
+        let transcript = authority.transcript
+        guard transcript.route == authority.route,
+              LiveRuntime.shared.generation == transcript.liveGeneration,
+              ObjectIdentifier(authority.snapshot.client)
+                == ObjectIdentifier(transcript.client) else { return false }
+        if transcript.wasPrimary {
+            return LiveRuntime.shared.gatewayID == authority.route.gatewayID
+                && self.client.map(ObjectIdentifier.init)
+                    == ObjectIdentifier(transcript.client)
+        }
+        guard LiveRuntime.shared.gatewayID != authority.route.gatewayID,
+              let generation = transcript.routedEventGeneration,
+              let routed = MultiGatewayRuntime.shared.routedEvents[
+                authority.route.gatewayID] else { return false }
+        return ObjectIdentifier(routed.client) == ObjectIdentifier(transcript.client)
+            && routed.generation == generation
+            && MultiGatewayRuntime.shared.routedEventGenerations[
+                authority.route.gatewayID] == generation
     }
 
     private func currentGeneratedImageCall(

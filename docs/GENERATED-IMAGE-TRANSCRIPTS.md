@@ -37,26 +37,32 @@ stay in the generic tool presentation.
 
 ## Loading and presentation
 
-Pending and ready cards use the argument's landscape/square/portrait hint;
-decoded raster dimensions replace the hint after a valid image loads. The
-card is a standalone ordered transcript run and completed images remain
-visible in Quiet mode as assistant content. Transcript find indexes neither
-the card nor tool payloads.
+Pending, loading, permission, and failure/Retry states share one fixed surface
+using the argument's landscape/square/portrait hint; their 44-point actions stay
+inside that surface. Decoded raster dimensions replace the hint only after a
+valid image loads. The card is a standalone ordered transcript run; completed
+images remain visible in Quiet mode as assistant content. Transcript find
+indexes neither the card nor tool payloads.
 
 Gateway paths are fetched only from the exact producing gateway client through
 authenticated, bounded, no-redirect `/api/media`. Publication is fenced by
 gateway/profile, stable message identity, exact gateway tool ID and output,
 chat object, stored and live session IDs, connection generation,
-routed/primary event generation, and profile lifecycle. These facts are
-re-proved before the request, after bytes arrive, and while the final retained
-connection lease is held.
+routed/primary event generation, and profile lifecycle. These facts are proved
+synchronously immediately after the final transcript-authority await, again
+immediately before starting either gateway or remote loading, after bytes
+arrive, and while the final retained connection lease is held.
 
 Public HTTP(S) images never auto-fetch: **Load image** is an explicit 44-point
 action that contacts the displayed external host. The ephemeral request sends
 no gateway credentials or cookies, rejects redirects and URL credentials,
 rejects legacy numeric IP spellings, and performs a pre-connect DNS check that
 fails if any answer is private, loopback, link-local, multicast, or unspecified;
-the resolver traversal is capped at 64 answers.
+the resolver traversal is capped at 64 answers. At most two blocking OS resolver
+attempts run globally. Saturation fails closed without spawning another worker;
+cancellation or the fixed two-second deadline releases the caller immediately,
+while the occupied resolver slot is released only when `getaddrinfo` returns.
+Thus at most two OS resolver threads may remain after their callers have left.
 That separate DNS lookup cannot pin URLSession's later connection address, so a
 DNS change between preflight and connect remains a documented residual risk.
 A separate explicit browser-open action remains available.
@@ -87,7 +93,9 @@ and bidi, Codable re-admission, raw/live/canonical exact-ID pairing,
 completion-before-start, duplicate names, nonimage discard, monotonic failure,
 exact formatting-preserving echo stripping, source identity, legacy/private IP
 and injectable DNS refusal, real TIFF/ICO and raster-bomb refusal, typed share
-format, ordering, Quiet mode, transcript-find exclusion, accessibility, retry,
+format, resolver timeout/cancellation/saturation/late-completion races,
+mutation during the final authority await, every unloaded hinted-aspect layout
+state, ordering, Quiet mode, transcript-find exclusion, accessibility, retry,
 and reduced-motion policy.
 Real gateway and physical-device loading/share behavior remains a certification
 item rather than a completed claim.

@@ -22,7 +22,74 @@ private final class GeneratedMediaRedirectProtocol: URLProtocol, @unchecked Send
     override func stopLoading() {}
 }
 
+private final class ManualGeneratedImageResolver: @unchecked Sendable {
+    private final class Deadline: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        private let action: @Sendable () -> Void
+
+        init(action: @escaping @Sendable () -> Void) { self.action = action }
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+        func fire() {
+            lock.lock()
+            let shouldFire = !cancelled
+            cancelled = true
+            lock.unlock()
+            if shouldFire { action() }
+        }
+    }
+
+    private let lock = NSLock()
+    private var workers: [@Sendable () -> Void] = []
+    private var deadlines: [Deadline] = []
+
+    var workerDispatcher: RemoteGeneratedImagePolicy.WorkerDispatcher {
+        { [weak self] worker in
+            self?.lock.lock()
+            self?.workers.append(worker)
+            self?.lock.unlock()
+        }
+    }
+
+    var deadlineScheduler: RemoteGeneratedImagePolicy.DeadlineScheduler {
+        { [weak self] action in
+            let deadline = Deadline(action: action)
+            self?.lock.lock()
+            self?.deadlines.append(deadline)
+            self?.lock.unlock()
+            return { deadline.cancel() }
+        }
+    }
+
+    var workerCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return workers.count
+    }
+
+    func runNextWorker() {
+        lock.lock()
+        let worker = workers.isEmpty ? nil : workers.removeFirst()
+        lock.unlock()
+        worker?()
+    }
+
+    func fireNextDeadline() {
+        lock.lock()
+        let deadline = deadlines.isEmpty ? nil : deadlines.removeFirst()
+        lock.unlock()
+        deadline?.fire()
+    }
+}
+
 final class GeneratedMediaTests: XCTestCase {
+    private func waitUntil(_ condition: @escaping @Sendable () -> Bool) async {
+        for _ in 0..<1_000 {
+            if condition() { return }
+            await Task.yield()
+        }
+        XCTFail("condition did not become true")
+    }
+
     func testExactNameObjectAndJSONStringAdmission() throws {
         let arguments = ToolPayloadCodec.arguments(from: ["aspect_ratio": "portrait"])
         let direct = try XCTUnwrap(ToolGeneratedImageCodec.admit(
@@ -197,6 +264,99 @@ final class GeneratedMediaTests: XCTestCase {
             XCTAssertEqual(error.code, 403)
         } catch {
             XCTFail("unexpected DNS rejection error: \(error)")
+        }
+    }
+
+    func testBlockingResolverTimeoutCancellationSaturationAndLateRelease() async {
+        XCTAssertEqual(RemoteGeneratedImagePolicy.maximumBlockingResolvers, 2)
+        XCTAssertEqual(RemoteGeneratedImagePolicy.resolverDeadlineSeconds, 2)
+        let answer: [RemoteGeneratedImagePolicy.ResolvedAddress] = [
+            .ipv4(93, 184, 216, 34),
+        ]
+
+        do {
+            let gate = RemoteGeneratedImagePolicy.ResolutionGate(limit: 1)
+            let harness = ManualGeneratedImageResolver()
+            let task = Task {
+                await RemoteGeneratedImagePolicy.boundedResolve(
+                    host: "timeout.example", gate: gate,
+                    blockingResolver: { _ in answer },
+                    workerDispatcher: harness.workerDispatcher,
+                    deadlineScheduler: harness.deadlineScheduler)
+            }
+            await waitUntil { harness.workerCount == 1 }
+            XCTAssertEqual(gate.activeCountForTesting, 1)
+            harness.fireNextDeadline()
+            let timedOut = await task.value
+            XCTAssertNil(timedOut, "deadline must return without waiting on the worker")
+            XCTAssertEqual(gate.activeCountForTesting, 1,
+                           "the OS resolver owns its slot until it actually returns")
+            harness.runNextWorker()
+            XCTAssertEqual(gate.activeCountForTesting, 0)
+            let afterLateCompletion = await task.value
+            XCTAssertNil(afterLateCompletion, "late completion must not resume twice")
+        }
+
+        do {
+            let gate = RemoteGeneratedImagePolicy.ResolutionGate(limit: 1)
+            let harness = ManualGeneratedImageResolver()
+            let task = Task {
+                await RemoteGeneratedImagePolicy.boundedResolve(
+                    host: "cancel.example", gate: gate,
+                    blockingResolver: { _ in answer },
+                    workerDispatcher: harness.workerDispatcher,
+                    deadlineScheduler: harness.deadlineScheduler)
+            }
+            await waitUntil { harness.workerCount == 1 }
+            task.cancel()
+            let cancelled = await task.value
+            XCTAssertNil(cancelled, "cancellation must return without waiting on the worker")
+            XCTAssertEqual(gate.activeCountForTesting, 1)
+            harness.runNextWorker()
+            XCTAssertEqual(gate.activeCountForTesting, 0)
+            harness.fireNextDeadline()
+            let afterCancelledCompletion = await task.value
+            XCTAssertNil(afterCancelledCompletion)
+        }
+
+        do {
+            let gate = RemoteGeneratedImagePolicy.ResolutionGate(limit: 2)
+            let harness = ManualGeneratedImageResolver()
+            func resolve(_ host: String) -> Task<[
+                RemoteGeneratedImagePolicy.ResolvedAddress
+            ]?, Never> {
+                Task {
+                    await RemoteGeneratedImagePolicy.boundedResolve(
+                        host: host, gate: gate,
+                        blockingResolver: { _ in answer },
+                        workerDispatcher: harness.workerDispatcher,
+                        deadlineScheduler: harness.deadlineScheduler)
+                }
+            }
+            let first = resolve("one.example")
+            let second = resolve("two.example")
+            await waitUntil { harness.workerCount == 2 }
+            XCTAssertEqual(gate.activeCountForTesting, 2)
+            let saturated = resolve("three.example")
+            let saturatedValue = await saturated.value
+            XCTAssertNil(saturatedValue)
+            XCTAssertEqual(harness.workerCount, 2,
+                           "saturation must not dispatch another blocking resolver")
+
+            harness.runNextWorker()
+            XCTAssertEqual(gate.activeCountForTesting, 1)
+            let admittedAfterRelease = resolve("four.example")
+            await waitUntil { harness.workerCount == 2 }
+            XCTAssertEqual(gate.activeCountForTesting, 2)
+            harness.runNextWorker()
+            harness.runNextWorker()
+            let firstValue = await first.value
+            let secondValue = await second.value
+            let admittedValue = await admittedAfterRelease.value
+            XCTAssertEqual(firstValue, answer)
+            XCTAssertEqual(secondValue, answer)
+            XCTAssertEqual(admittedValue, answer)
+            XCTAssertEqual(gate.activeCountForTesting, 0)
         }
     }
 

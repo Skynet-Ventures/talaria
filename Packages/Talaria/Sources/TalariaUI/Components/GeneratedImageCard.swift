@@ -11,6 +11,10 @@ import AppKit
 
 @MainActor
 enum GeneratedImagePresentationPolicy {
+    enum UnloadedState: CaseIterable, Sendable {
+        case pending, loading, permission, failure
+    }
+
     static let minimumInteractiveDimension: CGFloat = 44
     static let titleTextStyle: Font.TextStyle = .subheadline
     static let statusTextStyle: Font.TextStyle = .caption
@@ -19,6 +23,14 @@ enum GeneratedImagePresentationPolicy {
     static let retryLabel = "Retry"
     static let reducedMotionUsesSpatialAnimation = false
     static let accessibilityLiveRegion = "polite"
+
+    static func unloadedSurfaceAspectRatio(
+        state: UnloadedState, hint: CGFloat
+    ) -> CGFloat {
+        switch state {
+        case .pending, .loading, .permission, .failure: hint
+        }
+    }
 
     static func accessibilityValue(call: ToolCall, loaded: Bool,
                                    loading: Bool = false,
@@ -68,6 +80,12 @@ struct GeneratedImageCard: View {
         [source.identity, call.gatewayToolID ?? call.id, call.state.rawValue,
          output?.source ?? ""].joined(separator: "\u{1f}")
     }
+    private var unloadedState: GeneratedImagePresentationPolicy.UnloadedState {
+        if call.state == .running { return .pending }
+        if loading || status == nil { return .loading }
+        if remoteApprovalRequired && !remoteWasApproved { return .permission }
+        return .failure
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -111,7 +129,7 @@ struct GeneratedImageCard: View {
                 .accessibilityHint("Opens the public image URL in your browser")
             }
 
-            if let status {
+            if data != nil, let status {
                 Text(status)
                     .font(.system(GeneratedImagePresentationPolicy.statusTextStyle))
                     .foregroundStyle(theme.sub)
@@ -176,64 +194,60 @@ struct GeneratedImageCard: View {
             .frame(minHeight: GeneratedImagePresentationPolicy.minimumInteractiveDimension)
             .accessibilityLabel("Generated image")
             .accessibilityHint("Opens a full-screen image viewer")
-        } else if remoteApprovalRequired && !remoteWasApproved {
-            Button {
-                remoteWasApproved = true
-                loadTask?.cancel()
-                loadTask = Task { await load(allowRemote: true) }
-            } label: {
-                HStack {
-                    if loading { ProgressView().controlSize(.small) }
-                    Text(GeneratedImagePresentationPolicy.loadRemoteLabel)
-                        .font(.system(GeneratedImagePresentationPolicy.titleTextStyle)
-                            .weight(.semibold))
-                    Spacer()
-                    Image(systemName: "arrow.down.circle")
-                }
-                .foregroundStyle(accent)
-                .padding(.horizontal, 10)
-                .frame(maxWidth: .infinity,
-                       minHeight: GeneratedImagePresentationPolicy.minimumInteractiveDimension)
-                .background(theme.inset,
-                            in: RoundedRectangle(cornerRadius: theme.rowRadius,
-                                                 style: .continuous))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(loading)
-            .accessibilityLabel(loading ? "Loading external generated image" : "Load image")
-            .accessibilityHint("Contacts the public image host shown by the tool")
-        } else if status != nil && call.state == .done {
-            Button {
-                loadTask?.cancel()
-                loadTask = Task { await load(allowRemote: remoteWasApproved) }
-            } label: {
-                Label(GeneratedImagePresentationPolicy.retryLabel,
-                      systemImage: "arrow.clockwise")
-                    .font(.system(GeneratedImagePresentationPolicy.titleTextStyle)
-                        .weight(.semibold))
-                    .frame(maxWidth: .infinity,
-                           minHeight: GeneratedImagePresentationPolicy.minimumInteractiveDimension)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(accent)
-            .disabled(loading)
-            .accessibilityHint("Attempts to load this generated image again")
         } else {
+            unloadedPreview
+        }
+    }
+
+    private var unloadedPreview: some View {
+        VStack(alignment: .leading, spacing: 6) {
             Text(call.state == .running
                  ? GeneratedImagePresentationPolicy.pendingMessage
                  : (status ?? "Loading from the producing gateway…"))
                 .font(.system(GeneratedImagePresentationPolicy.statusTextStyle))
                 .foregroundStyle(theme.sub)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(10)
-                .aspectRatio(hintRatio, contentMode: .fit)
-                .background(theme.inset,
-                            in: RoundedRectangle(cornerRadius: theme.rowRadius,
-                                                 style: .continuous))
                 .generatedImagePoliteLiveRegion()
+            Spacer(minLength: 0)
+            if remoteApprovalRequired && !remoteWasApproved {
+                unloadedAction(GeneratedImagePresentationPolicy.loadRemoteLabel,
+                               symbol: "arrow.down.circle") {
+                    remoteWasApproved = true
+                    loadTask?.cancel()
+                    loadTask = Task { await load(allowRemote: true) }
+                }
+                .accessibilityHint("Contacts the public image host shown by the tool")
+            } else if status != nil && call.state == .done {
+                unloadedAction(GeneratedImagePresentationPolicy.retryLabel,
+                               symbol: "arrow.clockwise") {
+                    loadTask?.cancel()
+                    loadTask = Task { await load(allowRemote: remoteWasApproved) }
+                }
+                .accessibilityHint("Attempts to load this generated image again")
+            }
         }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .aspectRatio(GeneratedImagePresentationPolicy.unloadedSurfaceAspectRatio(
+            state: unloadedState, hint: hintRatio), contentMode: .fit)
+        .background(theme.inset,
+                    in: RoundedRectangle(cornerRadius: theme.rowRadius,
+                                         style: .continuous))
+    }
+
+    private func unloadedAction(_ label: String, symbol: String,
+                                operation: @escaping () -> Void) -> some View {
+        Button(action: operation) {
+            Label(label, systemImage: symbol)
+                .font(.system(GeneratedImagePresentationPolicy.titleTextStyle)
+                    .weight(.semibold))
+                .frame(maxWidth: .infinity,
+                       minHeight: GeneratedImagePresentationPolicy.minimumInteractiveDimension)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(accent)
+        .disabled(loading)
     }
 
     private func load(allowRemote: Bool) async {

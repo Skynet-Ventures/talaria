@@ -3,6 +3,11 @@ import XCTest
 @testable import TalariaKit
 @testable import TalariaUI
 
+private actor GeneratedImageRequestCounter {
+    private(set) var count = 0
+    func record() { count += 1 }
+}
+
 @MainActor
 final class GeneratedImageTranscriptTests: XCTestCase {
     private func output(_ path: String = "/tmp/image.png") throws -> ToolGeneratedImage {
@@ -166,6 +171,92 @@ final class GeneratedImageTranscriptTests: XCTestCase {
         XCTAssertEqual(GeneratedImagePresentationPolicy.accessibilityValue(
             call: calls[1], loaded: false, failed: true),
             "Generated image unavailable. Retry available")
+        let hint: CGFloat = 9.0 / 16.0
+        for state in GeneratedImagePresentationPolicy.UnloadedState.allCases {
+            XCTAssertEqual(GeneratedImagePresentationPolicy.unloadedSurfaceAspectRatio(
+                state: state, hint: hint), hint,
+                "every unloaded UI branch must use the fixed hinted-aspect surface")
+        }
+    }
+
+    func testMutationDuringFinalAuthorityAwaitPreventsAnyImageRequest() async throws {
+        let registry = ConnectionRegistry.shared
+        let live = LiveRuntime.shared
+        let events = MultiGatewayRuntime.shared
+        let oldGateway = live.gatewayID
+        let oldBaseURL = live.baseURL
+        let oldGeneration = live.generation
+        let nonce = UUID().uuidString
+        let url = try XCTUnwrap(URL(string: "https://image-authority-\(nonce).example"))
+        let credential = GatewayCredential.sessionToken("image-authority-\(nonce)")
+        let gateway = try XCTUnwrap(registry.upsert(
+            urlString: url.absoluteString, name: "Image authority", credential: credential))
+        registry.setCredentialForTesting(credential, for: gateway)
+        let requests = GeneratedImageRequestCounter()
+        let client = GatewayClient(
+            baseURL: try XCTUnwrap(gateway.baseURL), credential: credential,
+            restExecutor: { request, _ in
+                await requests.record()
+                return (Data(), HTTPURLResponse(
+                    url: request.url!, statusCode: 500, httpVersion: nil,
+                    headerFields: nil)!)
+            })
+        await registry.clientPool.adopt(client, for: gateway.id)
+        let route = GatewayBotRoute(gatewayID: gateway.id, profile: "worker")
+        let botID = route.qualifiedID
+        let pump = Task<Void, Never> {}
+        let oldEvents = events.routedEvents[gateway.id]
+        let oldEventGeneration = events.routedEventGenerations[gateway.id]
+        defer {
+            GeneratedImageRuntime.shared.afterTranscriptAuthorityCaptureForTesting = nil
+            pump.cancel()
+            events.routedEvents[gateway.id] = oldEvents
+            events.routedEventGenerations[gateway.id] = oldEventGeneration
+            live.gatewayID = oldGateway
+            live.baseURL = oldBaseURL
+            live.generation = oldGeneration
+            registry.setCredentialForTesting(nil, for: gateway)
+            if registry.saved.contains(where: { $0.id == gateway.id }) {
+                registry.remove(id: gateway.id)
+            }
+        }
+        live.gatewayID = "unrelated-primary-\(nonce)"
+        live.baseURL = nil
+        live.generation &+= 1
+        events.routedEventGenerations[gateway.id] = 41
+        events.routedEvents[gateway.id] = MultiGatewayRuntime.RoutedEvents(
+            client: client, handlerID: UUID(), pump: pump, generation: 41)
+
+        let model = AppModel()
+        model.mode = .live
+        let call = ToolCall(id: "call", name: "image_generate", context: "",
+                            state: .done, gatewayToolID: "wire",
+                            generatedImage: try output(), provenance: .live)
+        let message = ChatMessage(author: .bot, text: "", toolCalls: [call], rowID: 7)
+        let chat = ChatState(messages: [message])
+        chat.storedSessionID = "stored"
+        chat.sessionID = "live"
+        model.chats[botID] = chat
+        let source = GeneratedImagePresentationSource(
+            model: model, botID: botID, route: route,
+            storedSessionID: "stored", liveSessionID: "live",
+            messageRowID: 7, messageRevisionID: message.id)
+        var hookRan = false
+        GeneratedImageRuntime.shared.afterTranscriptAuthorityCaptureForTesting = {
+            hookRan = true
+            chat.messages[0].toolCalls[0].state = .failed
+        }
+
+        let result = await model.loadGeneratedImage(call, from: source)
+        if case .unavailable = result {} else {
+            XCTFail("mutated exact call must fail closed")
+        }
+        XCTAssertTrue(hookRan)
+        let requestCount = await requests.count
+        XCTAssertEqual(requestCount, 0,
+                       "the post-await synchronous proof must precede request dispatch")
+        model.clearProfileLifecycleRouteForTesting(route)
+        await registry.clientPool.disconnect(gatewayID: gateway.id)
     }
 
     func testSamePathAcrossSourcesHasDistinctTaskIdentityAndNoAuthorityFailsClosed() async throws {
