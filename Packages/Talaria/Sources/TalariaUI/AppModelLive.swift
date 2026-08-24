@@ -559,6 +559,9 @@ extension AppModel {
         // Arm socket-loss recovery only after the initial adoption transaction
         // can no longer resume and CAS-remove this same pooled client.
         startSupervisedMonitor(for: client, generation: authority.generation)
+        scheduleDurableHermesUpdateRecovery(
+            gatewayID: savedGateway.id, client: client,
+            generation: authority.generation)
     }
 
     private func isCurrentConnectionAttempt(_ authority: PrimaryConnectionAttemptAuthority) -> Bool {

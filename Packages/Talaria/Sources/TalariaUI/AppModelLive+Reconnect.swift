@@ -643,6 +643,9 @@ extension AppModel {
         ConnectionRegistry.shared.noteState(.connected, forURL: authority.baseURL)
 
         startSupervisedMonitor(for: authority.client, generation: adoptedGeneration)
+        scheduleDurableHermesUpdateRecovery(
+            gatewayID: authority.gatewayID, client: authority.client,
+            generation: adoptedGeneration)
 
         // ensureSession does the whole reattach: resume by durable key, bind the
         // new sid, replay the inflight snapshot and any pending approval. The
@@ -917,6 +920,7 @@ extension AppModel {
     /// Remove the gateway entirely — registry row and Keychain credential.
     public func removeGateway(_ gateway: SavedGateway) async {
         invalidateManagedCloudBootEpisode(gatewayID: gateway.id)
+        GatewayMaintenanceRuntime.shared.removeUpdateRecovery(gatewayID: gateway.id)
         ArtifactStore.shared.purge(gatewayID: gateway.id)
         AdvancedTerminalCoordinator.shared.stopAndForget(gatewayID: gateway.id)
         beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
