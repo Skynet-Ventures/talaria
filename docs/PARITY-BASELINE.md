@@ -17,6 +17,10 @@ are not current until they are regenerated against this baseline.
 - Later authority-file-only delta through `057dcdf23` (63 exact commits; does
   not move this canonical pin):
   [`docs/HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md`](HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md)
+- Later production client-wire delta through `057dcdf23` (71 scoped commits,
+  partitioned into 64 new rows and 7 authority-ledger cross-references; does
+  not move this canonical pin):
+  [`docs/HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md`](HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md)
 
 The earlier `b5455fdd..c1e25cad` drift was material: it changed all five
 authority files and added canonical-chat adoption, renamed-friendly mentions,
