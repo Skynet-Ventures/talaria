@@ -93,6 +93,105 @@ gateway/profile/client/generation/route/revision, require confirmations for
 delete or external delivery, and direct any restart through the existing
 explicit maintenance fence.
 
+## Targeted profile transfer and backup audit at `e400e008`
+
+Profile duplicate/export/import and whole-Hermes backup were audited directly
+against exact Hermes source
+`e400e0088767a596ee21985d661a924cb087775a`. Talaria is based on
+`d38835ced5192fe2de314667a2a613e6713a7b38`: this is the final current
+management head, contains the complete profile-lifecycle serialization chain
+through `f7e767989e36cb6670fbdf3be510525773c62b11`, and adds the latest leased
+management traffic without changing profile-transfer authority. Basing on the
+older profile feature commit would discard later lifecycle fencing.
+
+The current wire does not justify a phone profile transfer flow. No import,
+export, preview, Files/share integration, gateway restart, or live mutation is
+added. The four superficially related operations have materially different
+contracts:
+
+### Duplicate
+
+Talaria already implements Desktop's duplicate verb with gateway RPC
+`profiles.create {name, clone_from, clone_all:true}`. Hermes rejects an
+existing target, and copied credentials remain on the gateway rather than
+crossing the phone. However the success payload echoes the requested `name`
+and a host path; it does not return canonical source and target profile ids, a
+profile/store revision, copied-field inventory, or a durable postcondition.
+Credential mirroring also defaults on, while several model/MCP/skill/alias
+follow-ups are best-effort. Current Talaria refreshes the roster and runs its
+existing lifecycle activation, but a lost acknowledgement can still leave an
+unreported created profile. This existing feature is not evidence that the
+archive contracts are safe, and it should not be broadened or recertified as
+transfer parity until Hermes returns canonical identities plus a mutation
+receipt/revision that can be reconciled after ambiguity.
+
+### Credential-free profile export/import
+
+`POST /api/profiles/{name}/export` and `POST /api/profiles/import` exchange
+**host filesystem paths, not archive bytes**. Desktop's native picker and its
+local/pooled backend share one machine; an iPhone and a remote gateway do not.
+Export has no authenticated download endpoint, byte length/hash/media receipt,
+or resolved-profile echo. It accepts an arbitrary output path and arbitrary
+extra text files. The exporter excludes `.env` and `auth.json` and force-
+redacts recognized text files, but its own source notes that binary databases,
+images, and other non-text artifacts in named profiles may still leave
+unscrubbed. There is therefore no server assertion that an archive is safe to
+share.
+
+Import likewise accepts only a server-local path. Its extractor correctly
+rejects traversal, links, multiple roots, `default`, and an existing target,
+but it has no compressed-byte, expanded-byte, member-count, per-file, or text
+bound; no manifest/preview or secret inventory; no dry-run token; and no
+expected inventory revision. It moves the staged tree into place before
+returning only `{name,path}` and an unbounded Desktop overlay. A phone cannot
+preview what will be installed, prove the canonical target before mutation,
+or reconcile a lost response without guessing.
+
+### Whole-Hermes backup/restore
+
+`POST /api/ops/backup` and `/api/ops/backup/download` are an existing Talaria
+Command Center operator flow, not profile sharing. A full backup intentionally
+contains `.env`, `auth.json`, `state.db`, and other restore credentials/state;
+the contained files are permission-hardened on restore, not redacted for
+sharing. The download is constrained to the active backend's backup directory,
+and Talaria streams it under a client byte cap, but the API does not echo a
+canonical profile/root, archive size/hash, secret classification, or backup
+generation. It must never be offered as the substitute archive for a profile
+share surface.
+
+The general `/api/ops/import-upload` accepts at most 100 MiB of compressed ZIP
+input, then spawns whole-root `hermes import`; `force=true` can overwrite the
+running home after a Desktop confirmation. Its acknowledgement identifies a
+background process, not the inspected contents, resolved root, revision, or
+postcondition. It is destructive restore authority and is deliberately outside
+this phone profile-transfer slice.
+
+### Required portable contract
+
+Mobile work can resume only when Hermes provides separate server-owned
+prepare/commit contracts:
+
+- export must accept and echo one canonical snapshot-declared profile id,
+  produce an authenticated bounded byte download with size/hash/media type,
+  and attest that credentials and unscreened binary state are absent;
+- import must accept a bounded upload, enforce compressed/expanded/member/
+  per-file/text limits, and return a bounded canonical manifest plus detected
+  secret/risk facts without mutation;
+- commit must consume an expiring prepare token, exact proposed target id and
+  expected profile inventory revision, reject collisions with 409, never
+  overwrite silently, and return a canonical revisioned postcondition;
+- duplicate must return canonical source/target ids, explicit credential-copy
+  policy and a reconcilable mutation receipt; and
+- every stage must carry the profile in the request and response so Talaria can
+  hold its exact gateway/client/pool-generation/profile-lifecycle leases across
+  each await, revalidate afterward, and purge staged bytes on any source or
+  lifecycle change.
+
+With that authority, iOS can show a bounded import preview and explicit
+confirmation, keep archive bytes in protected temporary storage, export
+through Files/share sheet, and expose secrets only as boolean risk facts—never
+raw values, previews, toasts, logs, retry state, or persisted model state.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit
@@ -264,7 +363,7 @@ therefore never inferred as removal.
 | Unknown explicit Project profile | Hermes currently falls back to the launch profile. Talaria revalidates the selected route immediately before writes and fails closed, but Hermes should reject an explicit unknown profile. |
 | Cron per-job reasoning effort | Implemented as an explicitly authorized mobile REST mutation. Talaria decodes and displays the raw field, preserves unknown values on unrelated edits, and sends only canonical/clear values through the exact REST PUT normalizer, which delegates to Hermes' canonical `cron.jobs.update_job` validation. The model tool remains read-only and cannot set this job-owned field. Live certification remains open. |
 | Rich transcript parity | Partial: markdown, tables, code, working avatar, transcript actions, jump-to-bottom, exact-source message-level child creation, and bounded typed tool-history hydration now exist. The mobile generic fallback groups larger runs and discloses status, arguments, result, provenance, and diagnostics without name/prose pairing. Explicit file-edit diffs now hydrate and overlay only by exact tool id, then render as bounded, sanitized, selectable mobile disclosures with +/- counts; live gateway/device proof remains open. Persistent multimodal parts, generated images/lightbox, specialist ANSI/search/math/diagram renderers, per-message TTS, whole-turn timing, the N/M alternative-branch picker, lineage presentation, and tour/activity remain. |
-| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, profile import/export, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. |
+| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. Profile import/export is also explicitly blocked: Desktop exchanges host paths, export has no bounded credential-free byte receipt/download, and import has no bounded preview/prepare/revision contract. Existing duplicate and whole-backup flows do not supply that authority. |
 | Git/System depth | Partial: core review and guarded mutations exist. Base/commit/ship context, dirty-worktree recovery, worktree-session integration, usage periods/daily/model/skill detail, and multi-gateway backend update orchestration remain. |
 | Artifact completeness | Exact retained-source discovery is implemented with atomic no-dial snapshots, sequential reads, compacted rows, collision isolation, and explicit bounded/stale/failure state. Retained bodies use the exact captured client only after `/api/files` proves one canonical locked root; root and body responses are wire-bounded, authority is rechecked after awaits, and sign-out purges source-owned bytes. Hermes `session.list` still has no global continuation, transcript offsets remain informational under Talaria's 150-item cap, and gateways returning `locked_root: nil` remain fail-closed. Live certification remains open. |
 

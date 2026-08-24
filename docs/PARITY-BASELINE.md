@@ -285,7 +285,14 @@ partial until the unchecked certification gates are recorded.
       contract required to resume mobile work is recorded in
       `HERMES-CURRENT-AUDIT.md`.
       Routine per-job reasoning effort is implemented but remains
-      live-certification pending.
+      live-certification pending. Profile import/export remains fail-closed
+      after the exact `e400e008` audit: Desktop's routes exchange host paths,
+      not bounded archive bytes; export cannot attest that a named-profile
+      archive is credential/binary-safe; and import has no bounded preview,
+      prepare token, inventory revision, or canonical postcondition. Existing
+      server-side duplicate and secret-bearing whole-backup operations are not
+      substitutes. See `HERMES-CURRENT-AUDIT.md` for the required portable
+      contract.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source
       discovery, explicit bounded/stale/failure state, and conditionally locked
       retained-body reads are implemented. Gateways returning `locked_root: nil`
