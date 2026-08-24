@@ -181,6 +181,33 @@ public struct MCPOAuthStatus: Sendable, Equatable {
     public var isPending: Bool { status == "pending" }
 }
 
+/// A positive acknowledgement from `reload.mcp`.  The gateway can successfully
+/// answer an RPC without actually applying a reload (for example,
+/// `confirm_required`), so callers must not treat an arbitrary result as proof
+/// that an active agent rebuilt its tool snapshot.
+public struct MCPReloadReceipt: Sendable, Equatable {
+    /// The configuration revision Hermes actually loaded, when this gateway
+    /// exposes the regular-process reload path.
+    public var loadedRevision: String?
+    /// True when another in-flight reload already loaded this exact revision
+    /// and Hermes refreshed this session against that result.
+    public var coalesced: Bool
+    /// Compute-host sessions rebuild their per-turn tool snapshot through the
+    /// host supervisor rather than the regular registry path.
+    public var turnIsolation: Bool
+
+    init(_ value: JSONValue) throws {
+        guard value["status"]?.stringValue == "reloaded" else {
+            let message = value["message"]?.stringValue
+                ?? "MCP reload was not acknowledged by the gateway."
+            throw GatewayError(code: -8, message: message)
+        }
+        loadedRevision = value["loaded_rev"]?.stringValue
+        coalesced = value["coalesced"]?.boolValue ?? false
+        turnIsolation = value["turn_isolation"]?.boolValue ?? false
+    }
+}
+
 public struct ToolsetEntry: Identifiable, Sendable, Equatable {
     public var id: String { name }
     public var name: String
@@ -422,6 +449,26 @@ extension GatewayClient {
         return MCPOAuthStatus(status: result["status"]?.stringValue ?? "pending",
                               errorMessage: result["error_message"]?.stringValue,
                               authURL: result["auth_url"]?.stringValue.flatMap(URL.init(string:)))
+    }
+
+    /// Rebuild the MCP registry and this exact runtime session's cached tools.
+    /// `reload.mcp` is intentionally not profile-scoped: `session_id` is the
+    /// sole authority for both the live gateway process and the agent whose
+    /// snapshot changes. Callers must therefore prove that the id is still the
+    /// active session for the profile they just persisted before invoking it.
+    public func reloadMCP(sessionID: String) async throws -> MCPReloadReceipt {
+        let trimmed = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw GatewayError(code: -8, message: "MCP reload requires an active session.")
+        }
+        let result = try await rpc(
+            "reload.mcp",
+            .object([
+                "confirm": .bool(true),
+                "session_id": .string(trimmed),
+            ]),
+            timeout: 120)
+        return try MCPReloadReceipt(result)
     }
 
     // MARK: Plugins
