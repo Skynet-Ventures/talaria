@@ -222,7 +222,7 @@ is not an exception. The current classifications are:
 | Native Windows PTY when the selected gateway exposes no supported PTY backend | **True host capability exception.** A phone cannot manufacture a missing remote PTY service. | Show the unsupported state honestly; do not silently fall back to another gateway. |
 | Replacing the running app binary or applying a Desktop updater | **True distribution exception.** App Store/TestFlight owns signed iOS updates. | Gateway compatibility and release-channel state still need visible, testable handling. |
 | Local desktop notifications, tray/dock badges, and foreground toast placement | **Presentation exception only.** APNs, the local activity journal, badges, and in-app toasts carry the portable signal. | Source identity, filtering, action routing, negative cases, and Debug/production APNs must be certified separately. |
-| Desktop main-window progress chrome | **Presentation exception only.** A Live Activity is permitted for sustained operational tool work, not ordinary open chats or short answers. | Start/update/end policy, background cleanup, and reduced-motion behavior remain device-certification requirements. |
+| Desktop main-window progress chrome | **Presentation exception only.** A Live Activity is permitted only after sustained operational tool work survives Talaria's explicit 20-second admission grace, never for ordinary open chats or short answers. | Start/update/end policy, background cleanup, and reduced-motion behavior remain device-certification requirements. |
 
 The following are explicitly **not** platform exceptions: union-roster routing,
 rooms, canonical chats, durable queued work, rich transcripts and generated

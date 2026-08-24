@@ -213,11 +213,14 @@ only as redacted hashes or suffixes.
 
 ### `DEV-LIFE-002` — active turn background/foreground
 
-1. Start a turn containing sustained operational tool work, background during
-   the work, wait for at least one update, and foreground before or after end.
-2. Pass only if transcript recovery is source/session exact, operational Live
-   Activity policy starts/updates/ends once, and no five-minute clock is shown
-   merely for a normal answer. Record lock-screen video and correlated events.
+1. First finish operational tool work inside the 20-second admission grace and
+   prove no Live Activity starts. Then run tool work beyond 20 seconds,
+   background during the work, wait for at least one update, and foreground
+   before or after end.
+2. Pass only if transcript recovery is source/session exact, the short case
+   remains silent, the sustained operational Live Activity starts/updates/ends
+   once after admission, and no five-minute clock is shown merely for a normal
+   answer. Record lock-screen video and correlated events.
 
 ### `DEV-QUEUE-001` — explicit Queue FIFO and edit
 
