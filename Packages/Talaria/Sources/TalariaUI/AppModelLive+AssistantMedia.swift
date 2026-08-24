@@ -66,6 +66,32 @@ private final class AssistantMediaValidationAttempt: @unchecked Sendable {
     }
 }
 
+final class AssistantMediaValidationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var active = 0
+
+    init(limit: Int) { self.limit = max(1, limit) }
+
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard active < limit else { return false }
+        active += 1
+        return true
+    }
+
+    func release() {
+        lock.lock()
+        active = max(0, active - 1)
+        lock.unlock()
+    }
+
+    var activeCountForTesting: Int {
+        lock.lock(); defer { lock.unlock() }
+        return active
+    }
+}
+
 @MainActor
 struct AssistantMediaPresentationSource {
     let model: AppModel
@@ -103,6 +129,9 @@ enum AssistantMediaAVPolicy {
     static let maximumDimension: Double = 8_192
     static let maximumPixels: Double = 40_000_000
     static let metadataDeadlineSeconds: TimeInterval = 5
+    static let maximumConcurrentMetadataWorkers = 2
+    static let validationGate = AssistantMediaValidationGate(
+        limit: maximumConcurrentMetadataWorkers)
 
     static func admits(duration: Double, trackCount: Int,
                        width: Double? = nil, height: Double? = nil) -> Bool {
@@ -402,11 +431,24 @@ extension AppModel {
         deadlineSeconds: TimeInterval = AssistantMediaAVPolicy.metadataDeadlineSeconds,
         operation: @escaping @Sendable () async -> Bool
     ) async -> Bool {
+        await boundedAssistantMediaValidation(
+            deadlineSeconds: deadlineSeconds,
+            gate: AssistantMediaAVPolicy.validationGate,
+            operation: operation)
+    }
+
+    nonisolated static func boundedAssistantMediaValidation(
+        deadlineSeconds: TimeInterval,
+        gate: AssistantMediaValidationGate,
+        operation: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+        guard gate.claim() else { return false }
         let attempt = AssistantMediaValidationAttempt()
         let value = await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 attempt.install(continuation)
                 guard !Task.isCancelled else {
+                    gate.release()
                     attempt.finish(false)
                     return
                 }
@@ -416,6 +458,7 @@ extension AppModel {
                     deadline: .now() + max(0, deadlineSeconds), execute: deadline)
                 let worker = Task.detached(priority: .utility) {
                     let result = await operation()
+                    gate.release()
                     attempt.finish(result)
                 }
                 attempt.setWorker(worker)
@@ -433,6 +476,8 @@ extension AppModel {
         do {
             let duration = try await asset.load(.duration).seconds
             let allTracks = try await asset.load(.tracks)
+            guard !allTracks.isEmpty,
+                  allTracks.count <= AssistantMediaAVPolicy.maximumTracks else { return false }
             switch kind {
             case .audio:
                 let tracks = try await asset.loadTracks(withMediaType: .audio)
@@ -440,7 +485,8 @@ extension AppModel {
                     duration: duration, trackCount: allTracks.count)
             case .video:
                 let tracks = try await asset.loadTracks(withMediaType: .video)
-                guard !tracks.isEmpty else { return false }
+                guard !tracks.isEmpty,
+                      tracks.count <= AssistantMediaAVPolicy.maximumTracks else { return false }
                 var dimensions: [CGSize] = []
                 dimensions.reserveCapacity(tracks.count)
                 for track in tracks {

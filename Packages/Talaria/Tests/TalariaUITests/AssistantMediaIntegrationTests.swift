@@ -8,6 +8,25 @@ private actor AssistantMediaRequestCounter {
     func record() { count += 1 }
 }
 
+private final class ManualAssistantMediaValidation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func wait() async -> Bool {
+        await withCheckedContinuation { continuation in
+            lock.lock(); self.continuation = continuation; lock.unlock()
+        }
+    }
+
+    func finish(_ value: Bool) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+}
+
 @MainActor
 final class AssistantMediaIntegrationTests: XCTestCase {
     func testSourceAdmissionMIMEAndPresentationPolicies() throws {
@@ -19,6 +38,12 @@ final class AssistantMediaIntegrationTests: XCTestCase {
         XCTAssertTrue(AssistantMediaPresentationPolicy.waitingOwnsPlayback)
         XCTAssertTrue(AssistantMediaPresentationPolicy.observesNativePlayerStatus)
         XCTAssertTrue(AssistantMediaPresentationPolicy.accessibilityAnnouncements)
+        XCTAssertTrue(AssistantMediaPresentationPolicy.acceptsPlayerCallback(
+            capturedGeneration: 4, currentGeneration: 4, playerMatches: true))
+        XCTAssertFalse(AssistantMediaPresentationPolicy.acceptsPlayerCallback(
+            capturedGeneration: 3, currentGeneration: 4, playerMatches: true))
+        XCTAssertFalse(AssistantMediaPresentationPolicy.acceptsPlayerCallback(
+            capturedGeneration: 4, currentGeneration: 4, playerMatches: false))
 
         let local = try XCTUnwrap(AssistantMediaSourcePolicy.admit("/tmp/voice.mp3"))
         XCTAssertEqual(local.presentationKind, .audio)
@@ -72,6 +97,22 @@ final class AssistantMediaIntegrationTests: XCTestCase {
             }
         XCTAssertFalse(admitted)
         XCTAssertLessThan(start.duration(to: .now), .seconds(1))
+    }
+
+    func testAVMetadataGateStaysOccupiedUntilTimedOutWorkerActuallyExits() async {
+        let gate = AssistantMediaValidationGate(limit: 1)
+        let manual = ManualAssistantMediaValidation()
+        let first = await AppModel.boundedAssistantMediaValidation(
+            deadlineSeconds: 0.01, gate: gate) { await manual.wait() }
+        XCTAssertFalse(first)
+        XCTAssertEqual(gate.activeCountForTesting, 1)
+        let second = await AppModel.boundedAssistantMediaValidation(
+            deadlineSeconds: 0.01, gate: gate) { true }
+        XCTAssertFalse(second, "a cancellation-ignoring worker must retain its slot")
+        manual.finish(false)
+        for _ in 0..<100 where gate.activeCountForTesting != 0 { await Task.yield() }
+        XCTAssertEqual(gate.activeCountForTesting, 0)
+        XCTAssertEqual(AssistantMediaAVPolicy.maximumConcurrentMetadataWorkers, 2)
     }
 
     func testPlaybackCoordinatorDeactivatesPreviousOwnerAndClearsCurrentOwner() {

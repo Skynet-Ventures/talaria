@@ -19,6 +19,12 @@ enum AssistantMediaPresentationPolicy {
     static let waitingOwnsPlayback = true
     static let observesNativePlayerStatus = true
     static let accessibilityAnnouncements = true
+
+    static func acceptsPlayerCallback(capturedGeneration: UInt64,
+                                      currentGeneration: UInt64,
+                                      playerMatches: Bool) -> Bool {
+        playerMatches && capturedGeneration == currentGeneration
+    }
 }
 
 @MainActor
@@ -66,6 +72,7 @@ struct AssistantMediaCard: View {
     @State private var loadTask: Task<Void, Never>?
     @State private var player: AVPlayer?
     @State private var playerStatusObservation: NSKeyValueObservation?
+    @State private var playerGeneration: UInt64 = 0
     @State private var playing = false
     @State private var viewerPresented = false
     @State private var sharedFile: ExportedFile?
@@ -336,14 +343,23 @@ struct AssistantMediaCard: View {
     }
 
     private func installPlayer(_ next: AVPlayer) {
+        playerGeneration &+= 1
+        let generation = playerGeneration
         playerStatusObservation?.invalidate()
         player = next
         let identity = source.identity
         let playing = $playing
+        let currentPlayer = $player
+        let currentGeneration = $playerGeneration
         playerStatusObservation = next.observe(
             \.timeControlStatus, options: [.initial, .new]) { player, change in
             guard let status = change.newValue else { return }
             Task { @MainActor in
+                guard AssistantMediaPresentationPolicy.acceptsPlayerCallback(
+                    capturedGeneration: generation,
+                    currentGeneration: currentGeneration.wrappedValue,
+                    playerMatches: currentPlayer.wrappedValue === player),
+                      player.timeControlStatus == status else { return }
                 switch status {
                 case .playing, .waitingToPlayAtSpecifiedRate:
                     AssistantMediaPlaybackCoordinator.shared.activate(
@@ -389,6 +405,7 @@ struct AssistantMediaCard: View {
 
     private func cleanupLoadedFile() {
         pause()
+        playerGeneration &+= 1
         playerStatusObservation?.invalidate()
         playerStatusObservation = nil
         player = nil
