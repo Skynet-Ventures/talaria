@@ -1400,13 +1400,15 @@ public actor GatewayClient {
     /// redirect is rejected before URLSession can replay gateway credentials.
     public func restJSONBoundedNoRedirect(path: String, method: String = "GET",
                                           query: [URLQueryItem] = [],
+                                          body: JSONValue? = nil,
                                           timeout: TimeInterval = 30,
                                           maximumResponseBytes: Int) async throws -> JSONValue {
         guard maximumResponseBytes >= 0 else {
             throw GatewayError(code: -11, message: "Invalid REST response limit.")
         }
+        let payload = try body.map { try JSONEncoder().encode($0) }
         let data = try await authenticatedRESTData(
-            path: path, method: method, query: query, body: nil,
+            path: path, method: method, query: query, body: payload,
             contentType: "application/json", timeout: timeout,
             responseLimit: maximumResponseBytes, rejectsRedirects: true)
         guard !data.isEmpty else { return .null }

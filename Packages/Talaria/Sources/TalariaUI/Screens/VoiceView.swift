@@ -452,6 +452,7 @@ final class VoiceSession {
     @ObservationIgnored private var segment: CheckedContinuation<SegmentEnd?, Never>?
     @ObservationIgnored private var started = false
     @ObservationIgnored private var voiceLease: UUID?
+    @ObservationIgnored private var audioOwnership: MobileAudioOwnership.Lease?
 
     // MARK: Lifecycle
 
@@ -465,6 +466,11 @@ final class VoiceSession {
             phase = .demo
             return
         }
+        guard let audioOwnership = model.acquireVoiceAudioOwnership() else {
+            phase = .gatewayFailed("Audio is already in use.")
+            return
+        }
+        self.audioOwnership = audioOwnership
         model.voice.resetConversation()
         loop = Task { [weak self] in
             let lease = await model.acquireVoiceRouter(for: botID)
@@ -501,6 +507,10 @@ final class VoiceSession {
         if let voiceLease {
             model.releaseVoiceRouter(voiceLease)
             self.voiceLease = nil
+        }
+        if let audioOwnership {
+            model.releaseVoiceAudioOwnership(audioOwnership)
+            self.audioOwnership = nil
         }
         started = false
         phase = .starting

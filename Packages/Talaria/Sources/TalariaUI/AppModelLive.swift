@@ -631,6 +631,9 @@ extension AppModel {
     public func disconnectGateway() async {
         let runtime = LiveRuntime.shared
         let departingGatewayID = runtime.gatewayID
+        if let departingGatewayID {
+            ReadAloudRuntime.shared.sourceDidInvalidate(gatewayID: departingGatewayID)
+        }
         invalidateManagedCloudBootEpisode(gatewayID: departingGatewayID)
         let departingPrimaryBots = Set(chats.keys.filter {
             stateRoute(for: $0)?.gatewayID == departingGatewayID
