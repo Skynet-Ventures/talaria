@@ -302,7 +302,7 @@ final class ToolWebSearchRenderingTests: XCTestCase {
             result: ["results": [["title": "candidate"]]]).output)
     }
 
-    func testDuplicateRawReplayCannotEraseMeaningfulFailedGenericEvidence() throws {
+    func testDuplicateRawReplayFailsClosedWithoutPairingOrErasingEvidence() throws {
         let transcript: JSONValue = ["messages": [
             ["id": 1, "role": "assistant", "content": "", "tool_calls": [[
                 "id": "duplicate", "function": ["name": "read_file", "arguments": "{}"],
@@ -314,13 +314,24 @@ final class ToolWebSearchRenderingTests: XCTestCase {
              "tool_name": "read_file", "context": "late benign replay",
              "content": ["message": "late"]],
         ]]
-        let call = try XCTUnwrap(AppModel.chatMessages(fromTranscript: transcript)
-            .flatMap(\.toolCalls).first(where: { $0.gatewayToolID == "duplicate" }))
-        XCTAssertEqual(call.state, .failed)
-        XCTAssertEqual(call.summary, "permission denied")
-        XCTAssertEqual(call.result?.json?["evidence"]?.stringValue, "original")
-        XCTAssertTrue(call.resultText?.contains("original") == true)
-        XCTAssertFalse(call.resultText?.contains("late") == true)
+        let calls = AppModel.chatMessages(fromTranscript: transcript).flatMap(\.toolCalls)
+        XCTAssertEqual(calls.count, 3)
+        XCTAssertTrue(calls.allSatisfy { $0.gatewayToolID == "duplicate" })
+        XCTAssertTrue(calls.allSatisfy { $0.provenance == .malformed })
+
+        // Duplicate exact execution ids are ambiguous evidence. The call is
+        // left unpaired, while both retained result rows remain visible in
+        // their original order rather than letting either replay settle it.
+        XCTAssertEqual(calls[0].state, .done)
+        XCTAssertEqual(calls[0].result?.kind, .unavailable)
+        XCTAssertEqual(calls[1].state, .failed)
+        XCTAssertEqual(calls[1].summary, "permission denied")
+        XCTAssertEqual(calls[1].result?.json?["evidence"]?.stringValue, "original")
+        XCTAssertTrue(calls[1].resultText?.contains("original") == true)
+        XCTAssertFalse(calls[1].resultText?.contains("late") == true)
+        XCTAssertEqual(calls[2].state, .done)
+        XCTAssertEqual(calls[2].summary, "late benign replay")
+        XCTAssertTrue(calls[2].resultText?.contains("late") == true)
     }
 
     func testSpecialistDoesNotEraseGenericResultEvidence() throws {
