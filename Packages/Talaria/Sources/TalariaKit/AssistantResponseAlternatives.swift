@@ -79,6 +79,23 @@ public struct AssistantResponseAlternativeGroup: Identifiable, Sendable, Equatab
     }
 }
 
+/// Presentation-only placement for one group's compact response navigator.
+/// The control belongs after the final displayed bot row in that source
+/// turn, never before the prompt or in a transcript-wide header.
+public struct AssistantResponseAlternativeControlPlacement: Identifiable,
+    Sendable, Equatable {
+    public var id: UUID { groupID }
+    public var groupID: UUID
+    public var sourceUserID: UUID
+    public var botMessageID: UUID
+
+    public init(groupID: UUID, sourceUserID: UUID, botMessageID: UUID) {
+        self.groupID = groupID
+        self.sourceUserID = sourceUserID
+        self.botMessageID = botMessageID
+    }
+}
+
 /// Non-persistent, current-ChatState response-alternative state.
 public struct AssistantResponseAlternatives: Sendable, Equatable {
     public var groups: [AssistantResponseAlternativeGroup]
@@ -310,6 +327,32 @@ public enum AssistantResponseAlternativesPolicy {
         return displayed
     }
 
+    /// Locate each valid group's navigator after the final displayed bot row
+    /// in that source turn.  The selected archived group is projected first,
+    /// so a run containing several assistant/tool-only rows still anchors to
+    /// its last displayed bot row.  At most one placement is emitted per
+    /// retained group; this policy never creates a global transcript header.
+    public static func controlPlacements(
+        current: [ChatMessage], state: AssistantResponseAlternatives,
+        binding: AssistantResponseAlternativesBinding?
+    ) -> [AssistantResponseAlternativeControlPlacement] {
+        let projectionBinding = state.selectedGroup?.binding ?? binding
+        let displayed = displayedMessages(current: current, state: state,
+                                          binding: projectionBinding)
+        return state.groups.compactMap { group in
+            guard let sourceIndex = displayed.firstIndex(where: {
+                $0.author == .user && $0.id == group.binding.sourceUserID
+            }) else { return nil }
+            let sourceEnd = displayed[(sourceIndex + 1)..<displayed.endIndex]
+                .firstIndex(where: { $0.author == .user }) ?? displayed.endIndex
+            guard let bot = displayed[(sourceIndex + 1)..<sourceEnd]
+                .last(where: { $0.author == .bot }) else { return nil }
+            return AssistantResponseAlternativeControlPlacement(
+                groupID: group.id, sourceUserID: group.binding.sourceUserID,
+                botMessageID: bot.id)
+        }
+    }
+
     /// Position text uses the newest/current sentinel as the final response.
     public static func responsePosition(
         in state: AssistantResponseAlternatives
@@ -352,33 +395,32 @@ public enum AssistantResponseAlternativesPolicy {
     public static func boundedRun(
         _ source: [ChatMessage], id: UUID = UUID()
     ) -> AssistantResponseAlternativeRun {
-        var clipped = source.count > maximumMessagesPerRun
-        let clippedMessages = max(0, source.count - maximumMessagesPerRun)
+        let messageLimit = min(maximumMessagesPerRun, maximumWorkItemsPerRun)
+        var clipped = source.count > messageLimit
+        let clippedMessages = max(0, source.count - messageLimit)
         var clippedVisibleScalars = 0
         var clippedWorkItems = 0
-        var admitted = source.prefix(maximumMessagesPerRun).map {
+        var admitted = source.prefix(messageLimit).map {
             boundedMessage($0, clipped: &clipped)
         }
+        clippedWorkItems = source.prefix(messageLimit).reduce(0) {
+            $0 + max(0, $1.toolCalls.count - 128)
+        }
 
-        // A work item is a retained message or tool invocation. Drop only
-        // whole tool items at this boundary; never retain a partial ToolCall.
-        var remainingWork = maximumWorkItemsPerRun
+        // Reserve one work item for every admitted message before admitting
+        // any tool call. This keeps the message projection stable while
+        // guaranteeing that message + tool work can never cross the hard
+        // cap at the boundary.
+        var remainingToolWork = max(0, maximumWorkItemsPerRun - admitted.count)
         for index in admitted.indices {
-            guard remainingWork > 0 else {
-                clippedWorkItems += admitted[index].toolCalls.count + 1
-                clipped = clipped || !admitted[index].toolCalls.isEmpty
-                admitted[index].toolCalls.removeAll()
-                continue
-            }
-            remainingWork -= 1 // the message itself
-            let allowedCalls = min(admitted[index].toolCalls.count, remainingWork)
+            let allowedCalls = min(admitted[index].toolCalls.count, remainingToolWork)
             if allowedCalls < admitted[index].toolCalls.count {
                 clippedWorkItems += admitted[index].toolCalls.count - allowedCalls
                 clipped = true
                 admitted[index].toolCalls = Array(
                     admitted[index].toolCalls.prefix(allowedCalls))
             }
-            remainingWork -= admitted[index].toolCalls.count
+            remainingToolWork -= admitted[index].toolCalls.count
         }
 
         // Consume the scalar budget in display order, including argument and

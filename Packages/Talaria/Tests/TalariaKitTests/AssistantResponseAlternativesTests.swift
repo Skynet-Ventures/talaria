@@ -178,4 +178,107 @@ final class AssistantResponseAlternativesTests: XCTestCase {
             AssistantResponseAlternativesPolicy.maximumBytesPerRun)
         XCTAssertTrue(run.isClipped)
     }
+
+    func testWorkCapReservesEveryAdmittedMessageBeforeToolCalls() {
+        let messageCount = AssistantResponseAlternativesPolicy.maximumMessagesPerRun
+        let callsPerMessage = 128
+        let source = (0..<messageCount).map { messageIndex in
+            ChatMessage(
+                author: .bot, text: "message-\(messageIndex)",
+                toolCalls: (0..<callsPerMessage).map { toolIndex in
+                    ToolCall(id: "tool-\(messageIndex)-\(toolIndex)",
+                             name: "terminal", context: "echo")
+                })
+        }
+        let run = AssistantResponseAlternativesPolicy.boundedRun(source)
+
+        XCTAssertEqual(run.messages.count, messageCount,
+                       "work clipping must not erase later assistant rows")
+        XCTAssertEqual(run.workItems,
+                       AssistantResponseAlternativesPolicy.maximumWorkItemsPerRun)
+        XCTAssertLessThanOrEqual(run.workItems,
+                                 AssistantResponseAlternativesPolicy.maximumWorkItemsPerRun)
+        let fullMessages = (AssistantResponseAlternativesPolicy.maximumWorkItemsPerRun
+            - messageCount) / callsPerMessage
+        XCTAssertEqual(run.messages.prefix(fullMessages).map(\.toolCalls.count),
+                       Array(repeating: callsPerMessage, count: fullMessages))
+        XCTAssertEqual(run.messages.dropFirst(fullMessages).flatMap(\.toolCalls).count,
+                       AssistantResponseAlternativesPolicy.maximumWorkItemsPerRun
+                           - messageCount - (fullMessages * callsPerMessage))
+        XCTAssertTrue(run.isClipped)
+    }
+
+    func testControlPlacementsFollowFinalBotRowForEverySourceGroup() throws {
+        let chatID = UUID()
+        let source1 = ChatMessage(author: .user, text: "one")
+        let firstBot = ChatMessage(author: .bot, text: "one / first")
+        let finalBot = ChatMessage(author: .bot, text: "one / final",
+                                   toolCalls: [ToolCall(id: "tool-1", name: "terminal",
+                                                        context: "echo")])
+        let source2 = ChatMessage(author: .user, text: "two")
+        let secondFirstBot = ChatMessage(author: .bot, text: "two / first")
+        let secondFinalBot = ChatMessage(author: .bot, text: "two / final")
+        let key1 = binding(source: source1.id, chat: chatID)
+        let key2 = binding(source: source2.id, chat: chatID)
+        var state = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "old one")], binding: key1)
+        state = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "old two")], binding: key2, state: state)
+        let displayed = [source1, firstBot, finalBot, source2, secondFirstBot, secondFinalBot]
+        let placements = AssistantResponseAlternativesPolicy.controlPlacements(
+            current: displayed, state: state, binding: key2)
+
+        XCTAssertEqual(placements.count, 2)
+        XCTAssertEqual(Set(placements.map(\.groupID)), Set(state.groups.map(\.id)))
+        XCTAssertEqual(placements.first(where: { $0.groupID == state.groups[0].id })?.botMessageID,
+                       finalBot.id)
+        XCTAssertEqual(placements.first(where: { $0.groupID == state.groups[1].id })?.botMessageID,
+                       secondFinalBot.id)
+        for placement in placements {
+            let sourceIndex = try XCTUnwrap(displayed.firstIndex {
+                $0.id == placement.sourceUserID
+            })
+            let botIndex = try XCTUnwrap(displayed.firstIndex {
+                $0.id == placement.botMessageID
+            })
+            XCTAssertGreaterThan(botIndex, sourceIndex,
+                                 "a navigator cannot precede its prompt")
+            XCTAssertEqual(displayed[botIndex].author, .bot)
+        }
+    }
+
+    func testSelectedArchivedMultiRowRunMovesOnlyThatGroupPlacement() throws {
+        let chatID = UUID()
+        let source1 = ChatMessage(author: .user, text: "one")
+        let currentOne = ChatMessage(author: .bot, text: "current one")
+        let source2 = ChatMessage(author: .user, text: "two")
+        let currentTwo = ChatMessage(author: .bot, text: "current two")
+        let oldOneFirst = ChatMessage(author: .bot, text: "old one / first")
+        let oldOneTool = ChatMessage(author: .bot, text: "", toolCalls: [
+            ToolCall(id: "old-tool", name: "terminal", context: "echo")
+        ])
+        let oldOneFinal = ChatMessage(author: .bot, text: "old one / final")
+        let key1 = binding(source: source1.id, chat: chatID)
+        let key2 = binding(source: source2.id, chat: chatID)
+        var state = AssistantResponseAlternativesPolicy.record(
+            [oldOneFirst, oldOneTool, oldOneFinal], binding: key1)
+        state = AssistantResponseAlternativesPolicy.record(
+            [ChatMessage(author: .bot, text: "old two")], binding: key2, state: state)
+        state = AssistantResponseAlternativesPolicy.select(
+            groupID: try XCTUnwrap(state.groups.first?.id), archivedIndex: 0, in: state)
+        let current = [source1, currentOne, source2, currentTwo]
+        let placements = AssistantResponseAlternativesPolicy.controlPlacements(
+            current: current, state: state, binding: key2)
+        let projected = AssistantResponseAlternativesPolicy.displayedMessages(
+            current: current, state: state, binding: key1)
+
+        XCTAssertEqual(placements.count, 2)
+        XCTAssertEqual(placements.first(where: { $0.groupID == state.groups[0].id })?.botMessageID,
+                       oldOneFinal.id)
+        XCTAssertEqual(placements.first(where: { $0.groupID == state.groups[1].id })?.botMessageID,
+                       currentTwo.id)
+        XCTAssertEqual(projected.map(\.id),
+                       [source1.id, oldOneFirst.id, oldOneTool.id, oldOneFinal.id,
+                        source2.id, currentTwo.id])
+    }
 }

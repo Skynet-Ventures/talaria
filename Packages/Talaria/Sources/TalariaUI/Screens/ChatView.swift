@@ -141,6 +141,13 @@ public struct ChatView: View {
     /// projection is presentation/find-only and may substitute one selected
     /// local response snapshot in place.
     private var transcriptMessages: [ChatMessage] { chat?.displayedMessages() ?? [] }
+    private var responseAlternativeControlPlacements:
+        [AssistantResponseAlternativeControlPlacement] {
+        guard let chat else { return [] }
+        return AssistantResponseAlternativesPolicy.controlPlacements(
+            current: chat.messages, state: chat.assistantResponseAlternatives,
+            binding: chat.assistantResponseBinding)
+    }
     private var responseAlternativeSelectionKey: String {
         guard let chat else { return "none" }
         let group = chat.assistantResponseAlternatives.selectedGroupID?.uuidString ?? "none"
@@ -953,10 +960,15 @@ public struct ChatView: View {
     }
 
     @ViewBuilder private var transcriptRows: some View {
+        let placements = responseAlternativeControlPlacements
         ForEach(transcriptMessages) { message in
-            assistantResponseControls(for: message)
             messageRow(message)
                 .id(message.id.uuidString)
+            if let placement = placements.first(where: {
+                $0.botMessageID == message.id
+            }) {
+                assistantResponseControls(after: message, placement: placement)
+            }
         }
         if showingWorkingAvatar {
             TranscriptWorkingAvatar(model: model, bot: bot, theme: theme,
@@ -975,10 +987,13 @@ public struct ChatView: View {
             )
     }
 
-    @ViewBuilder private func assistantResponseControls(for source: ChatMessage) -> some View {
-        if let chat, source.author == .user,
+    @ViewBuilder private func assistantResponseControls(
+        after message: ChatMessage,
+        placement: AssistantResponseAlternativeControlPlacement
+    ) -> some View {
+        if let chat, message.author == .bot,
            let group = chat.assistantResponseGroups.first(where: {
-               $0.binding.sourceUserID == source.id
+               $0.id == placement.groupID
            }),
            let position = AssistantResponseAlternativesPolicy.responsePosition(
                groupID: group.id, in: chat.assistantResponseAlternatives) {
@@ -991,9 +1006,8 @@ public struct ChatView: View {
                         chat.selectPreviousAssistantResponse()
                     } else {
                         chat.selectAssistantResponseGroup(
-                            group.id, archivedIndex: group.alternatives.last.map { _ in
-                                group.alternatives.count - 1
-                            })
+                            group.id, archivedIndex: group.alternatives.isEmpty
+                                ? nil : group.alternatives.count - 1)
                     }
                 } label: {
                     Image(systemName: "chevron.left")
