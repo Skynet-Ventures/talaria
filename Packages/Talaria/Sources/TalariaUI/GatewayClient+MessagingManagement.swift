@@ -143,6 +143,22 @@ struct MessagingPlatform: Identifiable, Equatable, Sendable {
         MessagingPlatformMutationAuthority(platformID: id,
                                            environmentKeys: Set(environment.map(\.key)))
     }
+
+    /// Hermes exposes relay in the platform catalog, but relay enrollment and
+    /// routing are deployment lifecycle concerns rather than profile-local
+    /// messaging-platform controls. Keep the row visible without minting
+    /// profile-scoped mutation authority for it.
+    var isDeploymentManaged: Bool {
+        MessagingPlatformManagementScope.isDeploymentManaged(id)
+    }
+}
+
+enum MessagingPlatformManagementScope {
+    private static let deploymentManagedPlatformIDs: Set<String> = ["relay"]
+
+    static func isDeploymentManaged(_ platformID: String) -> Bool {
+        deploymentManagedPlatformIDs.contains(platformID)
+    }
 }
 
 struct MessagingPlatformCatalog: Equatable, Sendable {
@@ -200,6 +216,7 @@ enum MessagingPlatformMutationValidation {
         let cleared = Set(mutation.clearEnvironment)
         return MessagingPlatformIdentityAdmission.platform(authority.platformID)
                 == authority.platformID
+            && !MessagingPlatformManagementScope.isDeploymentManaged(authority.platformID)
             && submitted.isSubset(of: authority.environmentKeys)
             && cleared.isSubset(of: authority.environmentKeys)
             && submitted.isDisjoint(with: cleared)
@@ -293,6 +310,12 @@ extension GatewayClient {
               platformID == authority.platformID else {
             throw GatewayError(code: 400, message: "The platform identity is unsafe.")
         }
+        guard !MessagingPlatformManagementScope.isDeploymentManaged(platformID) else {
+            throw GatewayError(
+                code: 409,
+                message: "Relay enrollment and routing are managed by the gateway deployment."
+            )
+        }
         guard MessagingPlatformMutationValidation.admits(mutation, authority: authority) else {
             throw GatewayError(code: 400,
                                message: "Only credentials declared by this platform can be changed.")
@@ -311,6 +334,12 @@ extension GatewayClient {
         guard let platformID = MessagingPlatformIdentityAdmission.platform(authority.platformID),
               platformID == authority.platformID else {
             throw GatewayError(code: 400, message: "The platform identity is unsafe.")
+        }
+        guard !MessagingPlatformManagementScope.isDeploymentManaged(platformID) else {
+            throw GatewayError(
+                code: 409,
+                message: "Relay connection checks are managed by the gateway deployment."
+            )
         }
         return MessagingPlatformTestResult(try await restJSONBounded(
             path: "api/messaging/platforms/\(platformID)/test", method: "POST",

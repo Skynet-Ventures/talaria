@@ -1,5 +1,5 @@
 import XCTest
-import TalariaKit
+@testable import TalariaKit
 @testable import TalariaUI
 
 private actor MessagingTestGate {
@@ -21,6 +21,17 @@ private actor MessagingTestGate {
         waiters.removeAll()
         current.forEach { $0.resume() }
     }
+}
+
+private actor MessagingRESTProbe {
+    private var requestCount = 0
+
+    func execute(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        requestCount += 1
+        throw GatewayError(code: -99, message: "request should not be sent")
+    }
+
+    func count() -> Int { requestCount }
 }
 
 @MainActor
@@ -215,6 +226,59 @@ final class MessagingPlatformManagementTests: XCTestCase {
             MessagingPlatformMutation(environment: ["SLACK_APP_TOKEN": "new"],
                                       clearEnvironment: ["SLACK_APP_TOKEN"]),
             authority: authority))
+    }
+
+    func testRelayCatalogRowRemainsVisibleButCannotMintProfileMutationAuthority() {
+        let catalog = MessagingPlatformCatalog([
+            "platforms": .array([
+                platformValue(id: "relay", fields: []),
+                platformValue(id: "slack"),
+            ]),
+        ])
+
+        XCTAssertEqual(catalog.platforms.map(\.id), ["relay", "slack"])
+        XCTAssertTrue(catalog.platforms[0].isDeploymentManaged)
+        XCTAssertFalse(catalog.platforms[1].isDeploymentManaged)
+        XCTAssertFalse(MessagingPlatformMutationValidation.admits(
+            MessagingPlatformMutation(enabled: true),
+            authority: catalog.platforms[0].authority
+        ))
+        XCTAssertTrue(MessagingPlatformMutationValidation.admits(
+            MessagingPlatformMutation(enabled: true),
+            authority: catalog.platforms[1].authority
+        ))
+    }
+
+    func testRelayUpdateAndCheckRejectBeforeAnyRESTRequest() async throws {
+        let probe = MessagingRESTProbe()
+        let client = GatewayClient(
+            baseURL: try XCTUnwrap(URL(string: "https://gateway.example")),
+            credential: .sessionToken("test"),
+            restExecutor: { request, _ in try await probe.execute(request) }
+        )
+        let authority = MessagingPlatformMutationAuthority(
+            platformID: "relay", environmentKeys: [])
+
+        do {
+            try await client.updateMessagingPlatform(
+                authority: authority,
+                mutation: MessagingPlatformMutation(enabled: true),
+                profile: "default")
+            XCTFail("relay update must fail before REST dispatch")
+        } catch let error as GatewayError {
+            XCTAssertEqual(error.code, 409)
+        }
+
+        do {
+            _ = try await client.testMessagingPlatform(
+                authority: authority, profile: "default")
+            XCTFail("relay connection check must fail before REST dispatch")
+        } catch let error as GatewayError {
+            XCTAssertEqual(error.code, 409)
+        }
+
+        let requestCount = await probe.count()
+        XCTAssertEqual(requestCount, 0)
     }
 
     func testProfileAndInterpolatedIdentitiesMatchHermesBounds() {
