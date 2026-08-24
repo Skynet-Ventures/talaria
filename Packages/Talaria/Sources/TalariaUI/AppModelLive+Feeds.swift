@@ -1982,6 +1982,20 @@ public extension AppModel {
 
 public extension AppModel {
 
+    /// Resolve an inbox sender only when the wire carried an authoritative
+    /// route. A markerless current-Hermes handle is presentation data, not a
+    /// key into the union roster: duplicate handles must stay neutral rather
+    /// than borrowing whichever local or foreign bot happens to match first.
+    func inboxSenderBot(for message: A2AMessage) -> Bot? {
+        guard message.fromBotRouteKnown != false else { return nil }
+        return bot(resolvedBotID(message.fromBotID))
+    }
+
+    func inboxRecipientBot(for message: A2AMessage) -> Bot? {
+        guard message.toBotRouteKnown != false, message.toBotID != "all" else { return nil }
+        return bot(resolvedBotID(message.toBotID))
+    }
+
     /// Build the inbox from each profile's "Agent Inbox" session — the session
     /// upstream's handoff writes into (`hermes -p <bot> chat -c "Agent Inbox"`).
     /// Rows are split back into from → to by the A2A prefix the sender uses.
@@ -2003,6 +2017,7 @@ public extension AppModel {
                               sourceGatewayID: String? = nil) -> [(A2AMessage, Date)] {
         var out: [(A2AMessage, Date)] = []
         var lastSender: String?
+        var lastSenderRouteKnown = false
         var lastAttemptID: UUID?
         let orderedRows = rows.enumerated().sorted { left, right in
             let lhs = HermesTime.date(left.element["timestamp"]) ?? .distantPast
@@ -2025,18 +2040,26 @@ public extension AppModel {
             if role == "user" {
                 guard let sender = a2aSender(in: text) else { continue }
                 let immutableSenderRoute = A2AWire.senderRoute(in: text)
-                lastSender = immutableSenderRoute?.qualifiedID ?? sourceGatewayID.flatMap { gatewayID in
-                    guard gatewayID != LiveRuntime.shared.gatewayID else { return sender }
-                    return GatewayBotRoute(gatewayID: gatewayID, profile: sender).qualifiedID
-                } ?? sender
+                // Current Hermes' message_agent attribution carries a handle,
+                // not an authenticated source route. The transcript belongs to
+                // the recipient, so qualifying a markerless sender with this
+                // session's gateway invents the wrong provenance for peer DMs.
+                // Preserve the handle as unqualified unless a legacy Talaria
+                // row includes its explicit immutable source marker.
+                lastSender = immutableSenderRoute?.qualifiedID ?? sender
+                lastSenderRouteKnown = immutableSenderRoute != nil
                 lastAttemptID = A2AWire.attemptID(in: text)
                 out.append((A2AMessage(id: lastAttemptID ?? UUID(),
-                                       fromBotID: lastSender ?? sender, toBotID: owner, time: time,
+                                       fromBotID: lastSender ?? sender,
+                                       fromBotRouteKnown: immutableSenderRoute != nil,
+                                       toBotID: owner, toBotRouteKnown: true, time: time,
                                        text: strippedA2A(text)), at))
             } else if let sender = lastSender {
                 // The owner's reply goes back to whoever last wrote in.
                 out.append((A2AMessage(id: lastAttemptID.map(A2AWire.replyID(for:)) ?? UUID(),
-                                       fromBotID: owner, toBotID: sender, time: time,
+                                       fromBotID: owner, fromBotRouteKnown: true,
+                                       toBotID: sender, toBotRouteKnown: lastSenderRouteKnown,
+                                       time: time,
                                        text: previewLine(text)), at))
             }
         }

@@ -652,13 +652,24 @@ public struct ActivityDay: Identifiable, Codable, Sendable, Equatable {
 public struct A2AMessage: Identifiable, Codable, Sendable, Equatable {
     public var id: UUID
     public var fromBotID: String
+    /// `false` when current Hermes supplied only a display handle and no
+    /// authenticated source route. Optional keeps older encoded rows
+    /// source-compatible; an absent value means the historical known route.
+    public var fromBotRouteKnown: Bool?
     /// Receiving bot id, or "all" for a broadcast.
     public var toBotID: String
+    /// Mirrors `fromBotRouteKnown` for the recipient endpoint. A reply to a
+    /// markerless sender must not borrow a colliding roster identity either.
+    public var toBotRouteKnown: Bool?
     public var time: String
     public var text: String
 
-    public init(id: UUID = UUID(), fromBotID: String, toBotID: String, time: String, text: String) {
+    public init(id: UUID = UUID(), fromBotID: String, fromBotRouteKnown: Bool? = true,
+                toBotID: String, toBotRouteKnown: Bool? = true,
+                time: String, text: String) {
         self.id = id; self.fromBotID = fromBotID; self.toBotID = toBotID
+        self.fromBotRouteKnown = fromBotRouteKnown
+        self.toBotRouteKnown = toBotRouteKnown
         self.time = time; self.text = text
     }
 }

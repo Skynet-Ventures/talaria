@@ -1918,6 +1918,54 @@ final class SourceQualifiedRoutingTests: XCTestCase {
         XCTAssertEqual(parsed.first?.0.text, "first")
     }
 
+    func testInboxParserDoesNotInventSenderGatewayForCurrentHermesWire() {
+        let rows: [JSONValue] = [
+            .object(["role": .string("user"),
+                     "content": .string("Message from 🤖 hermes (@hermes): peer request")]),
+            .object(["role": .string("assistant"),
+                     "content": .string("peer reply")]),
+        ]
+
+        let parsed = AppModel.inboxMessages(
+            in: rows, owner: "peer::researcher", sourceGatewayID: "peer")
+
+        XCTAssertEqual(parsed.map(\.0.fromBotID), ["hermes", "peer::researcher"])
+        XCTAssertEqual(parsed.map(\.0.toBotID), ["peer::researcher", "hermes"])
+        XCTAssertEqual(parsed.first?.0.fromBotRouteKnown, false)
+        XCTAssertEqual(parsed.first?.0.toBotRouteKnown, true)
+        XCTAssertEqual(parsed.last?.0.fromBotRouteKnown, true)
+        XCTAssertEqual(parsed.last?.0.toBotRouteKnown, false)
+        XCTAssertFalse(parsed.contains { $0.0.fromBotID == "peer::hermes" })
+    }
+
+    func testOpaqueInboxSenderNeverBorrowsDuplicateRosterIdentity() {
+        let model = AppModel()
+        model.bots = [
+            Bot.unlisted(id: "ops"),
+            Bot(id: "peer::ops", job: "", shape: .circle, hue: .teal,
+                remoteSource: BotSource(profile: "ops", gatewayID: "peer",
+                                        connectionLabel: "Peer")),
+            Bot(id: "peer::researcher", job: "", shape: .circle, hue: .violet,
+                remoteSource: BotSource(profile: "researcher", gatewayID: "peer",
+                                        connectionLabel: "Peer")),
+        ]
+        let opaque = A2AMessage(fromBotID: "ops", fromBotRouteKnown: false,
+                                toBotID: "peer::researcher", toBotRouteKnown: true,
+                                time: "now", text: "hello")
+        let known = A2AMessage(fromBotID: "peer::ops", fromBotRouteKnown: true,
+                               toBotID: "researcher", toBotRouteKnown: true,
+                               time: "now", text: "hello")
+        let opaqueReply = A2AMessage(fromBotID: "peer::researcher",
+                                     fromBotRouteKnown: true,
+                                     toBotID: "ops", toBotRouteKnown: false,
+                                     time: "now", text: "reply")
+
+        XCTAssertNil(model.inboxSenderBot(for: opaque))
+        XCTAssertEqual(model.inboxSenderBot(for: known)?.id, "peer::ops")
+        XCTAssertEqual(model.inboxRecipientBot(for: opaque)?.id, "peer::researcher")
+        XCTAssertNil(model.inboxRecipientBot(for: opaqueReply))
+    }
+
     func testAcceptedUntrackedDeliveryKeepsPortableSenderOwnership() {
         let senderRoute = GatewayBotRoute(gatewayID: "primary", profile: "ops")
         let targetRoute = GatewayBotRoute(gatewayID: "homelab", profile: "worker")
@@ -1968,6 +2016,11 @@ final class SourceQualifiedRoutingTests: XCTestCase {
                 .object(["role": .string("user"), "content": .string(primaryWire)])
             ], owner: remote.qualifiedID, sourceGatewayID: remote.gatewayID)
             .first?.0.fromBotID, primary.qualifiedID)
+        XCTAssertEqual(
+            AppModel.inboxMessages(in: [
+                .object(["role": .string("user"), "content": .string(primaryWire)])
+            ], owner: remote.qualifiedID, sourceGatewayID: remote.gatewayID)
+            .first?.0.fromBotRouteKnown, true)
         XCTAssertEqual(
             AppModel.inboxMessages(in: [
                 .object(["role": .string("user"), "content": .string(remoteWire)])
