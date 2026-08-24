@@ -292,7 +292,14 @@ partial until the unchecked certification gates are recorded.
       prepare token, inventory revision, or canonical postcondition. Existing
       server-side duplicate and secret-bearing whole-backup operations are not
       substitutes. See `HERMES-CURRENT-AUDIT.md` for the required portable
-      contract.
+      contract. Learned-memory row management also remains fail-closed after
+      the exact `e400e008` audit: memory ids are global file positions,
+      edit/delete rewrites the whole file without an expected revision, graph
+      and detail responses are unpaginated/unbounded, and no server data
+      import/export exists. Desktop Star Map codes drop prose and are
+      visualization-only. The audit records the immutable-id, pagination,
+      CAS, secret-attestation, and prepare/commit contract required before a
+      phone editor can be implemented.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source
       discovery, explicit bounded/stale/failure state, and conditionally locked
       retained-body reads are implemented. Gateways returning `locked_root: nil`
