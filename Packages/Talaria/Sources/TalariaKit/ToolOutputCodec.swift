@@ -459,18 +459,22 @@ public enum ToolOutputCodec {
             return scalars.count
         }
 
-        func csi(from start: Int) -> (end: Int, final: UInt32?, parameters: String) {
+        func csi(from start: Int) -> (
+            end: Int, final: UInt32?, parameters: String, hasIntermediate: Bool
+        ) {
             var cursor = start
             var parameterScalars = String.UnicodeScalarView()
+            var hasIntermediate = false
             while cursor < scalars.count {
                 let value = scalars[cursor].value
                 if (0x40...0x7E).contains(value) {
-                    return (cursor + 1, value, String(parameterScalars))
+                    return (cursor + 1, value, String(parameterScalars), hasIntermediate)
                 }
                 if (0x30...0x3F).contains(value) { parameterScalars.append(scalars[cursor]) }
+                if (0x20...0x2F).contains(value) { hasIntermediate = true }
                 cursor += 1
             }
-            return (scalars.count, nil, String(parameterScalars))
+            return (scalars.count, nil, String(parameterScalars), hasIntermediate)
         }
 
         func applySGR(_ parameters: String) {
@@ -509,7 +513,9 @@ public enum ToolOutputCodec {
                 let next = scalars[index + 1].value
                 if next == 0x5B {
                     let sequence = csi(from: index + 2)
-                    if sequence.final == 0x6D { applySGR(sequence.parameters) }
+                    if sequence.final == 0x6D, !sequence.hasIntermediate {
+                        applySGR(sequence.parameters)
+                    }
                     index = sequence.end
                     continue
                 }
@@ -523,7 +529,9 @@ public enum ToolOutputCodec {
             }
             if value == 0x9B {
                 let sequence = csi(from: index + 1)
-                if sequence.final == 0x6D { applySGR(sequence.parameters) }
+                if sequence.final == 0x6D, !sequence.hasIntermediate {
+                    applySGR(sequence.parameters)
+                }
                 index = sequence.end
                 continue
             }
