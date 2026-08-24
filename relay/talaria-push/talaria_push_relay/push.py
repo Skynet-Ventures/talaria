@@ -76,6 +76,12 @@ _AVATAR_EDGE_PX = 40
 _AVATAR_MIME_ALLOWLIST = {"image/png", "image/jpeg"}
 _PROFILE_META_MAX_BYTES = 128 * 1024
 
+# Only sessions with a native Talaria/Desktop owner can truthfully route a
+# response or duration-based completion back to the app. Keep this one exact,
+# case-sensitive allowlist shared by hook and sidecar admission. Messaging,
+# cron, CLI, webhook, relay and future/unknown surfaces fail closed.
+TRUSTED_TURN_PLATFORMS = frozenset({"talaria", "desktop"})
+
 # APNs category per event kind (the iOS client registers matching
 # UNNotificationCategory actions — TALARIA_APPROVAL carries the
 # actionable Approve / Later buttons).
@@ -168,6 +174,13 @@ class ProfilePresentation:
     avatar: Optional[ProfileAvatar] = None
 
 
+def admit_turn_platform(value: Any) -> Optional[str]:
+    """Admit an exact Talaria-addressable originating platform."""
+    if not isinstance(value, str) or value not in TRUSTED_TURN_PLATFORMS:
+        return None
+    return value
+
+
 def response_display_name(bot: Any, configured_display_name: Any = "") -> str:
     """Return a truthful response title without inventing a friendly alias."""
     configured = _truncate(configured_display_name, _TITLE_MAX)
@@ -177,15 +190,28 @@ def response_display_name(bot: Any, configured_display_name: Any = "") -> str:
     return "Hermes" if raw == "default" or not raw else raw
 
 
-def _current_profile_home() -> Optional[Path]:
-    """Resolve the hook's context-local profile home, never another roster row."""
+def _profile_name_for_home(home: Path) -> str:
+    return home.name if home.parent.name == "profiles" else "default"
+
+
+def _current_profile_home(expected_bot: str) -> Optional[Path]:
+    """Resolve only the context-local home that owns ``expected_bot``.
+
+    Display metadata is decoration, never routing authority. A process-level
+    home, stale context, explicit bot override, or profile collision therefore
+    fails closed to the bounded raw-profile fallback instead of borrowing a
+    different profile's title or portrait.
+    """
     try:
         from hermes_constants import get_hermes_home  # type: ignore
 
-        return Path(get_hermes_home()).expanduser().resolve()
+        home = Path(get_hermes_home()).expanduser().resolve()
     except Exception:
         raw = os.environ.get("HERMES_HOME", "").strip()
-        return Path(raw).expanduser().resolve() if raw else None
+        if not raw:
+            return None
+        home = Path(raw).expanduser().resolve()
+    return home if _profile_name_for_home(home) == expected_bot else None
 
 
 def _read_current_profile_meta(home: Path) -> Dict[str, Any]:
@@ -325,18 +351,35 @@ def _bounded_profile_avatar(home: Path) -> Optional[ProfileAvatar]:
 
 
 def current_profile_presentation(bot: str) -> ProfilePresentation:
-    """Resolve display_name/avatar from the exact context-local profile."""
-    home = _current_profile_home()
-    configured = ""
-    avatar: Optional[ProfileAvatar] = None
-    if home is not None:
+    """Resolve display-only identity without ever affecting raw routing."""
+    raw_bot = _safe_text(bot).strip()
+    fallback = ProfilePresentation(response_display_name(raw_bot))
+    try:
+        home = _current_profile_home(raw_bot)
+        if home is None:
+            return fallback
         meta = _read_current_profile_meta(home)
-        configured = _configured_profile_display_name(meta)
-        avatar = _bounded_profile_avatar(home)
-    return ProfilePresentation(
-        display_name=response_display_name(bot, configured),
-        avatar=avatar,
-    )
+        return ProfilePresentation(
+            display_name=response_display_name(
+                raw_bot, _configured_profile_display_name(meta)),
+            avatar=_bounded_profile_avatar(home),
+        )
+    except Exception:
+        return fallback
+
+
+def _presentation_extra(
+    display_name: str, avatar: Optional[ProfileAvatar],
+) -> Dict[str, Any]:
+    """Build bounded display-only fields shared by bot-owned push kinds."""
+    extra: Dict[str, Any] = {BOT_DISPLAY_NAME_KEY: display_name}
+    if isinstance(avatar, ProfileAvatar) and avatar.mime in _AVATAR_MIME_ALLOWLIST \
+            and 0 < len(avatar.data) <= _AVATAR_PAYLOAD_MAX_BYTES:
+        extra[BOT_AVATAR_KEY] = {
+            BOT_AVATAR_MIME_KEY: avatar.mime,
+            BOT_AVATAR_DATA_KEY: base64.b64encode(avatar.data).decode("ascii"),
+        }
+    return extra
 
 
 def _payload_size(payload: Dict[str, Any]) -> int:
@@ -829,42 +872,52 @@ def approval_event(
     command: str = "",
     approval_request_id: str = "",
     pattern_key: str = "",
+    display_name: str = "",
+    avatar: Optional[ProfileAvatar] = None,
 ) -> PushEvent:
+    bot_route = bot
+    display_title = response_display_name(bot_route, display_name)
+    title = f"{display_title} needs approval"
     body = description or command or "A command is waiting for your approval."
     if description and command and command not in description:
         body = f"{description}\n{command}"
     return PushEvent(
         kind="approval",
-        bot=bot,
-        title=f"{bot} needs approval",
+        bot=bot_route,
+        title=title,
         body=body,
         session_id=session_id,
         approval_request_id=approval_request_id,
-        collapse_id=f"approval-{stable_hash(bot, session_id)}",
+        collapse_id=f"approval-{stable_hash(bot_route, session_id)}",
         dedupe_key=(
             f"approval:{approval_request_id}"
             if approval_request_id
-            else f"approval:{stable_hash(bot, session_id, pattern_key, command)}"
+            else f"approval:{stable_hash(bot_route, session_id, pattern_key, command)}"
         ),
         dedupe_window_s=relay_settings().approval_dedupe_window_s,
+        extra=_presentation_extra(display_title, avatar),
     )
 
 
 def long_task_event(
     *, bot: str, session_id: str, duration_s: float,
-    ok: bool = True, summary: str = "",
+    ok: bool = True, summary: str = "", display_name: str = "",
+    avatar: Optional[ProfileAvatar] = None,
 ) -> PushEvent:
+    bot_route = bot
+    display_title = response_display_name(bot_route, display_name)
     minutes = max(1, int(duration_s // 60))
     verdict = "finished" if ok else "stopped"
     body = summary or f"A {minutes}-minute task just {verdict}."
     return PushEvent(
         kind="long_task",
-        bot=bot,
-        title=f"{bot}: long task {verdict}",
+        bot=bot_route,
+        title=f"{display_title}: long task {verdict}",
         body=body,
         session_id=session_id,
-        collapse_id=f"task-{stable_hash(bot, session_id)}",
-        dedupe_key=f"long_task:{stable_hash(bot, session_id, str(int(duration_s)))}",
+        collapse_id=f"task-{stable_hash(bot_route, session_id)}",
+        dedupe_key=f"long_task:{stable_hash(bot_route, session_id, str(int(duration_s)))}",
+        extra=_presentation_extra(display_title, avatar),
     )
 
 
@@ -904,14 +957,8 @@ def response_event(
     extra: Dict[str, Any] = {
         "task_id": task_text,
         "turn_id": turn_text,
-        BOT_DISPLAY_NAME_KEY: title,
     }
-    if avatar is not None and avatar.mime in _AVATAR_MIME_ALLOWLIST \
-            and 0 < len(avatar.data) <= _AVATAR_PAYLOAD_MAX_BYTES:
-        extra[BOT_AVATAR_KEY] = {
-            BOT_AVATAR_MIME_KEY: avatar.mime,
-            BOT_AVATAR_DATA_KEY: base64.b64encode(avatar.data).decode("ascii"),
-        }
+    extra.update(_presentation_extra(title, avatar))
     return PushEvent(
         kind="response",
         bot=bot_text,

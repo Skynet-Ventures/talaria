@@ -28,6 +28,8 @@ from talaria_push_relay.push import (
     ProfilePresentation,
     PushDispatcher,
     PushEvent,
+    approval_event,
+    long_task_event,
     payload_for_device,
     response_event,
     routine_event,
@@ -90,6 +92,14 @@ class _ProfileStore:
 
 
 class SourceQualifiedPushTests(unittest.TestCase):
+    def setUp(self):
+        with events._turn_lock:
+            events._turn_starts.clear()
+
+    def tearDown(self):
+        with events._turn_lock:
+            events._turn_starts.clear()
+
     def test_response_payload_byte_budget_handles_ascii_cjk_and_emoji(self):
         for text in (
             "ascii response " * 1_000,
@@ -443,7 +453,8 @@ class SourceQualifiedPushTests(unittest.TestCase):
 
     def test_bot_mode_title_precedes_core_display_name_and_bad_yaml_falls_back(self):
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root)
+            home = Path(root) / "profiles" / "raw"
+            home.mkdir(parents=True)
             profile = home / "profile.yaml"
             safe_yaml = types.SimpleNamespace(safe_load=json.loads)
             with patch.dict(sys.modules, {"yaml": safe_yaml}), \
@@ -477,7 +488,8 @@ class SourceQualifiedPushTests(unittest.TestCase):
 
     def test_missing_or_malformed_context_avatar_falls_back_without_payload_bytes(self):
         with tempfile.TemporaryDirectory() as root:
-            home = Path(root)
+            home = Path(root) / "profiles" / "raw-profile"
+            home.mkdir(parents=True)
             (home / "assets").mkdir()
             (home / "assets" / "avatar.png").write_bytes(b"not-an-image")
             with patch.object(push_module, "_current_profile_home", return_value=home), \
@@ -624,42 +636,192 @@ class SourceQualifiedPushTests(unittest.TestCase):
     def test_response_filter_leaves_long_task_available_when_response_disabled(self):
         dispatcher = _Dispatcher()
         settings = RelaySettings(enabled_events=["long_task"], long_task_min_s=1)
-        key = ("session", "turn")
-        with events._turn_lock:
-            events._turn_starts[key] = events.time.monotonic() - 2
         with patch.object(events, "current_bot", return_value="ops-bot"), \
              patch.object(events, "relay_settings", return_value=settings), \
+             patch.object(events.push_mod, "current_profile_presentation",
+                          return_value=ProfilePresentation("Operations")), \
              patch.object(events.push_mod, "get_dispatcher", return_value=dispatcher):
+            events.on_pre_llm_call(
+                session_id="session", turn_id="turn", platform="talaria")
+            with events._turn_lock:
+                events._turn_starts[("ops-bot", "talaria", "session", "turn")] \
+                    = events.time.monotonic() - 2
             events.on_session_end(
                 session_id="session",
                 turn_id="turn",
                 completed=True,
                 failed=False,
                 interrupted=False,
-                platform="cli",
+                platform="talaria",
             )
 
         self.assertEqual([event.kind for event in dispatcher.events], ["long_task"])
+        self.assertEqual(dispatcher.events[0].title, "Operations: long task finished")
+        self.assertEqual(dispatcher.events[0].extra[BOT_DISPLAY_NAME_KEY], "Operations")
 
     def test_response_enabled_suppresses_long_task_duplicate(self):
         dispatcher = _Dispatcher()
         settings = RelaySettings(enabled_events=list(ALL_EVENT_KINDS), long_task_min_s=1)
-        key = ("session", "turn")
-        with events._turn_lock:
-            events._turn_starts[key] = events.time.monotonic() - 2
         with patch.object(events, "current_bot", return_value="ops-bot"), \
              patch.object(events, "relay_settings", return_value=settings), \
              patch.object(events.push_mod, "get_dispatcher", return_value=dispatcher):
+            events.on_pre_llm_call(
+                session_id="session", turn_id="turn", platform="talaria")
             events.on_session_end(
                 session_id="session",
                 turn_id="turn",
                 completed=True,
                 failed=False,
                 interrupted=False,
-                platform="cli",
+                platform="talaria",
             )
 
         self.assertEqual(dispatcher.events, [])
+        self.assertEqual(events._turn_starts, {})
+
+    def test_long_task_platform_policy_rejects_every_non_app_source_before_timing(self):
+        settings = RelaySettings(enabled_events=["long_task"], long_task_min_s=0.001)
+        blocked = (
+            None, "", " ", 123, [], "cli", "tui", "api_server", "webui",
+            "tool", "subagent", "relay", "slack", "webhook", "telegram",
+            "discord", "whatsapp", "signal", "cron", "unknown", "TALARIA",
+            "tui_gateway",
+        )
+        for platform in blocked:
+            with self.subTest(platform=platform):
+                dispatcher = _Dispatcher()
+                with patch.object(events, "current_bot", return_value="worker"), \
+                     patch.object(events, "relay_settings", return_value=settings), \
+                     patch.object(events.push_mod, "get_dispatcher",
+                                  return_value=dispatcher):
+                    events.on_pre_llm_call(
+                        session_id="same-session", turn_id="same-turn",
+                        platform=platform)
+                    events.on_session_end(
+                        session_id="same-session", turn_id="same-turn",
+                        completed=True, failed=False, interrupted=False,
+                        platform=platform)
+                self.assertEqual(events._turn_starts, {})
+                self.assertEqual(dispatcher.events, [])
+
+    def test_long_task_allows_exact_talaria_and_desktop_and_keys_source(self):
+        settings = RelaySettings(enabled_events=["long_task"], long_task_min_s=0.001)
+        dispatcher = _Dispatcher()
+        presentation = ProfilePresentation("Worker")
+        with patch.object(events, "current_bot", return_value="worker"), \
+             patch.object(events, "relay_settings", return_value=settings), \
+             patch.object(events.push_mod, "current_profile_presentation",
+                          return_value=presentation), \
+             patch.object(events.push_mod, "get_dispatcher", return_value=dispatcher):
+            for platform in ("talaria", "desktop"):
+                events.on_pre_llm_call(
+                    session_id="same-session", turn_id="same-turn",
+                    platform=platform)
+                with events._turn_lock:
+                    events._turn_starts[
+                        ("worker", platform, "same-session", "same-turn")
+                    ] = events.time.monotonic() - 1
+
+            # A spoofed source cannot consume either admitted stopwatch.
+            events.on_session_end(
+                session_id="same-session", turn_id="same-turn", completed=True,
+                failed=False, interrupted=False, platform="slack")
+            self.assertEqual(len(events._turn_starts), 2)
+
+            for platform in ("talaria", "desktop"):
+                events.on_session_end(
+                    session_id="same-session", turn_id="same-turn", completed=True,
+                    failed=False, interrupted=False, platform=platform)
+
+        self.assertEqual(
+            [(event.kind, event.bot, event.session_id) for event in dispatcher.events],
+            [("long_task", "worker", "same-session")] * 2,
+        )
+        self.assertEqual(events._turn_starts, {})
+
+    def test_long_task_setting_matrix_creates_stopwatch_only_when_unsuperseded(self):
+        cases = (
+            ([], False),
+            (["response"], False),
+            (["response", "long_task"], False),
+            (["long_task"], True),
+        )
+        for enabled, should_time in cases:
+            with self.subTest(enabled=enabled):
+                settings = RelaySettings(enabled_events=enabled, long_task_min_s=1)
+                with patch.object(events, "current_bot", return_value="worker"), \
+                     patch.object(events, "relay_settings", return_value=settings):
+                    events.on_pre_llm_call(
+                        session_id="session", turn_id="turn", platform="talaria")
+                self.assertEqual(bool(events._turn_starts), should_time)
+                events._turn_starts.clear()
+
+    def test_approval_and_long_task_share_configured_presentation_without_rekeying(self):
+        avatar = ProfileAvatar("image/png", b"\x89PNG\r\n\x1a\nbot")
+        for event in (
+            approval_event(
+                bot="default", session_id="stored-approval",
+                description="Approve command", display_name="Skynet", avatar=avatar),
+            long_task_event(
+                bot="default", session_id="stored-task", duration_s=300,
+                display_name="Skynet", avatar=avatar),
+        ):
+            with self.subTest(kind=event.kind):
+                payload = payload_for_device(event, {"gateway_id": "mini"})
+                expected_title = (
+                    "Skynet needs approval" if event.kind == "approval"
+                    else "Skynet: long task finished"
+                )
+                self.assertEqual(payload["aps"]["alert"]["title"], expected_title)
+                self.assertEqual(payload[BOT_DISPLAY_NAME_KEY], "Skynet")
+                self.assertIn(BOT_AVATAR_KEY, payload)
+                self.assertEqual(payload["bot"], "default")
+                self.assertEqual(payload["gateway_id"], "mini")
+                if event.kind == "long_task":
+                    self.assertIn("/default?", payload["deeplink"])
+
+    def test_presentation_collision_and_malformed_avatar_fail_to_safe_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            default_home = Path(root)
+            (default_home / "profile.yaml").write_text(
+                json.dumps({"display_name": "Wrong Profile"}), encoding="utf-8")
+            with patch.object(push_module, "_current_profile_home",
+                              wraps=push_module._current_profile_home), \
+                 patch.dict(os.environ, {"HERMES_HOME": str(default_home)}, clear=False), \
+                 patch.dict(sys.modules, {"hermes_constants": None}):
+                presentation = push_module.current_profile_presentation("worker")
+
+        self.assertEqual(presentation, ProfilePresentation("worker"))
+        event = approval_event(
+            bot="default", session_id="stored", display_name="",
+            avatar={"url": "https://attacker.invalid/avatar.png"})
+        payload = payload_for_device(event, {"gateway_id": "gateway-a"})
+        self.assertEqual(payload["title"], "Hermes needs approval")
+        self.assertEqual(payload[BOT_DISPLAY_NAME_KEY], "Hermes")
+        self.assertEqual(payload["bot"], "default")
+        self.assertNotIn(BOT_AVATAR_KEY, payload)
+
+        with patch.object(push_module, "_current_profile_home",
+                          side_effect=RuntimeError("presentation unavailable")):
+            failed = push_module.current_profile_presentation("default")
+        self.assertEqual(failed, ProfilePresentation("Hermes"))
+
+    def test_approval_hook_uses_exact_profile_presentation_but_raw_route(self):
+        dispatcher = _Dispatcher()
+        avatar = ProfileAvatar("image/png", b"\x89PNG\r\n\x1a\nbot")
+        with patch.object(events, "current_bot", return_value="default"), \
+             patch.object(events, "_approval_surfaces", return_value={"gateway"}), \
+             patch.object(events.push_mod, "current_profile_presentation",
+                          return_value=ProfilePresentation("Skynet", avatar)), \
+             patch.object(events.push_mod, "get_dispatcher", return_value=dispatcher):
+            events.on_pre_approval_request(
+                surface="gateway", session_key="durable", description="Approve")
+
+        event = dispatcher.events[0]
+        self.assertEqual(event.bot, "default")
+        self.assertEqual(event.title, "Skynet needs approval")
+        self.assertEqual(event.extra[BOT_DISPLAY_NAME_KEY], "Skynet")
+        self.assertIn(BOT_AVATAR_KEY, event.extra)
 
     def test_cron_completion_never_enters_talaria_push_without_provenance(self):
         settings = RelaySettings(enabled_events=list(ALL_EVENT_KINDS))
@@ -688,6 +850,86 @@ class SourceQualifiedPushTests(unittest.TestCase):
 
         self.assertFalse(hasattr(sidecar, "scan_cron"))
         self.assertFalse(hasattr(sidecar, "_cron_fp"))
+
+    def test_sidecar_long_task_requires_exact_origin_platform_before_stopwatch(self):
+        dispatcher = _Dispatcher()
+        settings = RelaySettings(enabled_events=["long_task"], long_task_min_s=0.001)
+
+        class _WS:
+            def __init__(self):
+                self.sessions = []
+
+            async def rpc(self, method, _params, timeout):
+                if method == "session.active_list":
+                    return {"sessions": self.sessions}
+                if method == "approval.pending":
+                    return {"approvals": []}
+                raise AssertionError(method)
+
+        with patch("talaria_push_relay.sidecar.push_mod.get_dispatcher",
+                   return_value=dispatcher):
+            sidecar = Sidecar(SidecarSettings(token="token"))
+        ws = _WS()
+        common = {"id": "runtime", "session_key": "stored", "status": "streaming"}
+
+        with patch("talaria_push_relay.sidecar.relay_settings",
+                   return_value=settings), \
+             patch.object(sidecar, "_bot_name", return_value="default"), \
+             patch("talaria_push_relay.sidecar.push_mod.current_profile_presentation",
+                   return_value=ProfilePresentation("Skynet")):
+            for blocked in (None, "slack", "telegram", "discord", "webhook", "cron"):
+                ws.sessions = [{**common, "platform": blocked}]
+                asyncio.run(sidecar.poll_sessions(ws))
+                self.assertEqual(sidecar._streaming_since, {})
+
+            ws.sessions = [
+                {**common, "platform": "desktop", "title": "Trusted task"},
+                {**common, "platform": "slack", "title": "Hostile Slack title"},
+            ]
+            asyncio.run(sidecar.poll_sessions(ws))
+            timer_key = ("default", "desktop", "stored")
+            self.assertIn(timer_key, sidecar._streaming_since)
+            sidecar._streaming_since[timer_key] -= 1
+            ws.sessions = [{**common, "platform": "desktop", "status": "idle"}]
+            asyncio.run(sidecar.poll_sessions(ws))
+
+        self.assertEqual(len(dispatcher.events), 1)
+        self.assertEqual(dispatcher.events[0].kind, "long_task")
+        self.assertEqual(dispatcher.events[0].bot, "default")
+        self.assertEqual(dispatcher.events[0].title, "Skynet: long task finished")
+        self.assertEqual(dispatcher.events[0].extra[BOT_DISPLAY_NAME_KEY], "Skynet")
+        self.assertIn("Trusted task", dispatcher.events[0].body)
+        self.assertNotIn("Hostile Slack title", dispatcher.events[0].body)
+
+    def test_sidecar_approval_uses_safe_presentation_without_changing_route(self):
+        dispatcher = _Dispatcher()
+        avatar = ProfileAvatar("image/png", b"\x89PNG\r\n\x1a\nbot")
+
+        class _WS:
+            async def rpc(self, method, params, timeout):
+                self.call = (method, params, timeout)
+                return {"approvals": [{
+                    "request_id": "request-a",
+                    "description": "Approve command",
+                    "command": "echo safe",
+                    "pattern_key": "shell",
+                }]}
+
+        with patch("talaria_push_relay.sidecar.push_mod.get_dispatcher",
+                   return_value=dispatcher):
+            sidecar = Sidecar(SidecarSettings(token="token"))
+        ws = _WS()
+        with patch.object(sidecar, "_bot_name", return_value="default"), \
+             patch("talaria_push_relay.sidecar.push_mod.current_profile_presentation",
+                   return_value=ProfilePresentation("Skynet", avatar)):
+            asyncio.run(sidecar._poll_approvals(ws, "runtime", "durable"))
+
+        event = dispatcher.events[0]
+        self.assertEqual(event.bot, "default")
+        self.assertEqual(event.session_id, "durable")
+        self.assertEqual(event.title, "Skynet needs approval")
+        self.assertEqual(event.extra[BOT_DISPLAY_NAME_KEY], "Skynet")
+        self.assertIn(BOT_AVATAR_KEY, event.extra)
 
     def test_routine_builder_never_exposes_raw_default_or_status_in_title(self):
         configured = routine_event(
