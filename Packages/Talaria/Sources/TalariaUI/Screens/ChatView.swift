@@ -1,6 +1,9 @@
 import SwiftUI
 import TalariaKit
 import TalariaTheme
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // Per-bot chat, pushed from the roster. Header with back / avatar / themed
 // state line / routines button (header tap opens the bot sheet); the message
@@ -77,6 +80,8 @@ public struct ChatView: View {
     @ScaledMetric(relativeTo: .body) private var inkComposerSize = 15
     @ScaledMetric(relativeTo: .body) private var queuePromptTextSize = 13
     @ScaledMetric(relativeTo: .caption) private var queuePromptStateSize = 9.5
+    @ScaledMetric(relativeTo: .body) private var transcriptFindTextSize = 15
+    @ScaledMetric(relativeTo: .caption) private var transcriptFindStatusSize = 12
     @State private var showModelSheet = false
     @State private var showCommands = false
     @State private var showQueuePanel = false
@@ -91,7 +96,22 @@ public struct ChatView: View {
     @State private var followingLatest = true
     @State private var jumpToLatestToken = 0
     @State private var transcriptGeometry = TranscriptGeometryReadiness()
+    @State private var transcriptFindPresented = false
+    @State private var transcriptFindQuery = ""
+    @State private var transcriptFindIndex = TranscriptFindIndex()
+    @State private var transcriptFindIndexRevision = 0
+    @State private var transcriptFindIndexMessageGeneration = -1
+    @State private var transcriptFindIndexSource = TranscriptFindSourceIdentity(
+        botID: "", storedSessionID: "", liveSessionID: "")
+    @State private var transcriptFindMessageGeneration = 0
+    @State private var transcriptFindResult = TranscriptFindResult()
+    @State private var transcriptFindResultIndexRevision = -1
+    @State private var transcriptFindResultMessageGeneration = -1
+    @State private var transcriptFindResultSource = TranscriptFindSourceIdentity(
+        botID: "", storedSessionID: "", liveSessionID: "")
+    @State private var transcriptFindOrdinal = 0
     @FocusState private var composerFocused: Bool
+    @FocusState private var transcriptFindFocused: Bool
 
     /// Tapback set, matching desktop's reaction picker.
     private static let reactionEmojis = ["👍", "❤️", "🎉", "🙏", "🤔", "👎"]
@@ -163,6 +183,11 @@ public struct ChatView: View {
     public var body: some View {
         VStack(spacing: 0) {
             header
+            if transcriptFindPresented {
+                transcriptFindBar
+                    .transition(reducedMotion ? .opacity
+                        : .move(edge: .top).combined(with: .opacity))
+            }
             ZStack(alignment: .bottomTrailing) {
                 messageList
                 if showsJumpToLatest {
@@ -191,8 +216,98 @@ public struct ChatView: View {
         }
         .onChange(of: pendingSlashPrefill) { _, _ in consumeSlashPrefillIfSafe() }
         .onChange(of: draft) { _, _ in consumeSlashPrefillIfSafe() }
+        .onChange(of: messages) { transcriptFindMessageGeneration &+= 1 }
+        .onChange(of: botID) { closeTranscriptFind() }
+        .onChange(of: transcriptFindSource) { closeTranscriptFind() }
+        .onChange(of: transcriptFindAccessibilityStatus) { announceTranscriptFindStatus() }
+        .onChange(of: transcriptFindOwnsScroll) {
+            guard transcriptFindOwnsScroll else { return }
+            _ = initialTranscriptAnchor.userDeparted(botID: botID,
+                                                     messageCount: messages.count)
+            followingLatest = false
+        }
+        .task(id: transcriptFindIndexKey) {
+            guard transcriptFindPresented else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(
+                    TranscriptFindPolicy.indexDebounceMilliseconds))
+            } catch { return }
+            let generation = transcriptFindMessageGeneration
+            let source = transcriptFindSource
+            let snapshot = messages
+            let worker = Task.detached(priority: .utility) {
+                try TranscriptFindPolicy.makeIndex(messages: snapshot)
+            }
+            let next: TranscriptFindIndex
+            do {
+                next = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: {
+                    worker.cancel()
+                }
+            } catch { return }
+            guard !Task.isCancelled, transcriptFindPresented,
+                  generation == transcriptFindMessageGeneration,
+                  source == transcriptFindSource else { return }
+            transcriptFindIndex = next
+            transcriptFindIndexMessageGeneration = generation
+            transcriptFindIndexSource = source
+            transcriptFindIndexRevision &+= 1
+        }
+        .task(id: transcriptFindSearchKey) {
+            guard transcriptFindPresented else { return }
+            let query = transcriptFindQuery
+            let index = transcriptFindIndex
+            let revision = transcriptFindIndexRevision
+            let generation = transcriptFindMessageGeneration
+            let source = transcriptFindSource
+            guard TranscriptFindPolicy.isIndexReady(
+                indexMessageGeneration: transcriptFindIndexMessageGeneration,
+                currentMessageGeneration: generation,
+                indexSource: transcriptFindIndexSource,
+                currentSource: source) else { return }
+            let previousResult = transcriptFindResult
+            let previousOrdinal = transcriptFindOrdinal
+            let previousSelection = TranscriptFindPolicy.selection(
+                in: previousResult, ordinal: previousOrdinal)
+            if !TranscriptFindPolicy.boundedQuery(query).isEmpty {
+                do {
+                    try await Task.sleep(for: .milliseconds(
+                        TranscriptFindPolicy.debounceMilliseconds))
+                } catch { return }
+            }
+            let worker = Task.detached(priority: .utility) {
+                try TranscriptFindPolicy.search(query, in: index)
+            }
+            let result: TranscriptFindResult
+            do {
+                result = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: {
+                    worker.cancel()
+                }
+            } catch { return }
+            guard !Task.isCancelled, transcriptFindPresented,
+                  revision == transcriptFindIndexRevision,
+                  generation == transcriptFindMessageGeneration,
+                  source == transcriptFindSource,
+                  TranscriptFindPolicy.boundedQuery(transcriptFindQuery) == result.query
+            else { return }
+            transcriptFindResult = result
+            transcriptFindResultIndexRevision = revision
+            transcriptFindResultMessageGeneration = generation
+            transcriptFindResultSource = source
+            if result.query == previousResult.query, let previousSelection {
+                transcriptFindOrdinal = TranscriptFindPolicy.ordinal(
+                    of: previousSelection, in: result)
+                    ?? min(previousOrdinal, max(0, result.total - 1))
+            } else {
+                transcriptFindOrdinal = 0
+            }
+        }
         .onDisappear {
             cancelQueuedPromptEdit()
+            closeTranscriptFind()
         }
         .sheet(isPresented: $showQueuePanel) {
             queuedPromptPanel
@@ -315,6 +430,17 @@ public struct ChatView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            HeaderIconButton(
+                theme: theme, size: 31,
+                hitTargetSize: TranscriptFindPolicy.minimumInteractiveDimension,
+                action: openTranscriptFind
+            ) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(theme.id == .ink ? theme.ink : theme.accent)
+            }
+            .accessibilityLabel("Find in conversation")
+            .keyboardShortcut("f", modifiers: .command)
             routinesButton
         }
         .padding(.horizontal, 16)
@@ -381,6 +507,217 @@ public struct ChatView: View {
 
     // MARK: - Message list
 
+    private var transcriptFindBar: some View {
+        VStack(spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(theme.faint)
+                    .accessibilityHidden(true)
+                TextField("Find in conversation", text: transcriptFindQueryBinding)
+                    .focused($transcriptFindFocused)
+                    .font(theme.body(transcriptFindTextSize))
+                    .submitLabel(.search)
+                    .autocorrectionDisabled()
+                    .accessibilityLabel("Find in conversation")
+                if !transcriptFindQuery.isEmpty {
+                    Button(action: clearTranscriptFind) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(theme.faint)
+                            .frame(minWidth: TranscriptFindPolicy.minimumInteractiveDimension,
+                                   minHeight: TranscriptFindPolicy.minimumInteractiveDimension)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                }
+                Button(action: closeTranscriptFind) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.ink)
+                        .frame(minWidth: TranscriptFindPolicy.minimumInteractiveDimension,
+                               minHeight: TranscriptFindPolicy.minimumInteractiveDimension)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close find")
+            }
+            HStack(spacing: 4) {
+                Text(transcriptFindStatus)
+                    .font(theme.body(transcriptFindStatusSize, weight: .medium))
+                    .foregroundStyle(theme.faint)
+                    .lineLimit(2)
+                    .accessibilityLabel(transcriptFindAccessibilityStatus)
+                Spacer(minLength: 4)
+                findNavigationButton(
+                    systemName: "chevron.up", label: "Previous match", delta: -1)
+                findNavigationButton(
+                    systemName: "chevron.down", label: "Next match", delta: 1)
+            }
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 2)
+        .background(theme.panel)
+        .overlay(alignment: .bottom) { Rectangle().fill(theme.line).frame(height: 1) }
+        .task {
+            await Task.yield()
+            guard transcriptFindPresented else { return }
+            transcriptFindFocused = true
+        }
+    }
+
+    private func findNavigationButton(systemName: String, label: String,
+                                      delta: Int) -> some View {
+        Button { moveTranscriptFind(by: delta) } label: {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(effectiveTranscriptFindResult.total == 0
+                    ? theme.faint : theme.ink)
+                .frame(minWidth: TranscriptFindPolicy.minimumInteractiveDimension,
+                       minHeight: TranscriptFindPolicy.minimumInteractiveDimension)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(effectiveTranscriptFindResult.total == 0)
+        .accessibilityLabel(label)
+        .accessibilityValue(transcriptFindAccessibilityStatus)
+    }
+
+    private var transcriptFindStatus: String {
+        guard !TranscriptFindPolicy.boundedQuery(transcriptFindQuery).isEmpty else {
+            return "Type to find"
+        }
+        guard hasCurrentTranscriptFindResult else { return "Searching…" }
+        return TranscriptFindStatusPolicy.resolved(
+            result: effectiveTranscriptFindResult,
+            ordinal: transcriptFindOrdinal).visual
+    }
+
+    private var transcriptFindAccessibilityStatus: String {
+        guard hasCurrentTranscriptFindResult else { return transcriptFindStatus }
+        return TranscriptFindStatusPolicy.resolved(
+            result: effectiveTranscriptFindResult,
+            ordinal: transcriptFindOrdinal).accessibility
+    }
+
+    private var transcriptFindSource: TranscriptFindSourceIdentity {
+        let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID)
+        return TranscriptFindSourceIdentity(
+            botID: botID,
+            storedSessionID: chat?.storedSessionID ?? "",
+            liveSessionID: chat?.sessionID ?? "",
+            gatewayID: route?.gatewayID ?? "",
+            profile: route?.profile ?? "")
+    }
+
+    private var transcriptFindIndexKey: String {
+        "\(transcriptFindPresented)|\(transcriptFindSource)|\(transcriptFindMessageGeneration)"
+    }
+
+    private var transcriptFindSearchKey: String {
+        "\(transcriptFindPresented)|\(transcriptFindQuery)|\(transcriptFindIndexRevision)|\(transcriptFindIndexMessageGeneration)|\(transcriptFindSource)"
+    }
+
+    private var transcriptFindQueryBinding: Binding<String> {
+        Binding(
+            get: { transcriptFindQuery },
+            set: { transcriptFindQuery = TranscriptFindPolicy.admittedQueryInput($0) }
+        )
+    }
+
+    private var hasCurrentTranscriptFindResult: Bool {
+        TranscriptFindPolicy.isIndexReady(
+            indexMessageGeneration: transcriptFindIndexMessageGeneration,
+            currentMessageGeneration: transcriptFindMessageGeneration,
+            indexSource: transcriptFindIndexSource,
+            currentSource: transcriptFindSource)
+            && TranscriptFindPolicy.isCurrent(
+                transcriptFindResult, query: transcriptFindQuery,
+                resultIndexRevision: transcriptFindResultIndexRevision,
+                currentIndexRevision: transcriptFindIndexRevision,
+                resultMessageGeneration: transcriptFindResultMessageGeneration,
+                currentMessageGeneration: transcriptFindMessageGeneration,
+                resultSource: transcriptFindResultSource,
+                currentSource: transcriptFindSource)
+    }
+
+    private var effectiveTranscriptFindResult: TranscriptFindResult {
+        hasCurrentTranscriptFindResult ? transcriptFindResult : TranscriptFindResult()
+    }
+
+    private var transcriptFindOwnsScroll: Bool {
+        transcriptFindPresented
+            && !TranscriptFindPolicy.boundedQuery(transcriptFindQuery).isEmpty
+    }
+
+    private var activeTranscriptFindSelection: TranscriptFindSelection? {
+        TranscriptFindPolicy.selection(
+            in: effectiveTranscriptFindResult, ordinal: transcriptFindOrdinal)
+    }
+
+    private var activeTranscriptFindMessageID: UUID? {
+        guard let selection = activeTranscriptFindSelection else { return nil }
+        return messages.first(where: selection.address.identifies)?.id
+    }
+
+    private var activeTranscriptFindKey: String {
+        "\(activeTranscriptFindMessageID?.uuidString ?? "")|\(transcriptFindOrdinal)"
+    }
+
+    private func openTranscriptFind() {
+        composerFocused = false
+        transcriptFindIndex = TranscriptFindIndex()
+        transcriptFindIndexMessageGeneration = -1
+        transcriptFindIndexRevision &+= 1
+        withAnimation(ChatComposerLayoutPolicy.animation(
+            reducedMotion: reducedMotion, duration: 0.18)) {
+            transcriptFindPresented = true
+        }
+    }
+
+    private func closeTranscriptFind() {
+        transcriptFindFocused = false
+        withAnimation(ChatComposerLayoutPolicy.animation(
+            reducedMotion: reducedMotion, duration: 0.18)) {
+            transcriptFindPresented = false
+        }
+        transcriptFindQuery = ""
+        transcriptFindIndex = TranscriptFindIndex()
+        transcriptFindIndexMessageGeneration = -1
+        transcriptFindResult = TranscriptFindResult()
+        transcriptFindResultIndexRevision = -1
+        transcriptFindResultMessageGeneration = -1
+        transcriptFindOrdinal = 0
+    }
+
+    private func clearTranscriptFind() {
+        transcriptFindQuery = ""
+        transcriptFindResult = TranscriptFindResult()
+        transcriptFindResultIndexRevision = -1
+        transcriptFindResultMessageGeneration = -1
+        transcriptFindOrdinal = 0
+        transcriptFindFocused = true
+    }
+
+    private func moveTranscriptFind(by delta: Int) {
+        let count = effectiveTranscriptFindResult.total
+        guard count > 0 else { return }
+        transcriptFindOrdinal = TranscriptFindPolicy.movedOrdinal(
+            current: transcriptFindOrdinal, delta: delta, total: count)
+        _ = initialTranscriptAnchor.userDeparted(botID: botID,
+                                                 messageCount: messages.count)
+        followingLatest = false
+    }
+
+    private func announceTranscriptFindStatus() {
+        guard transcriptFindPresented,
+              !TranscriptFindPolicy.boundedQuery(transcriptFindQuery).isEmpty else { return }
+        #if canImport(UIKit)
+        UIAccessibility.post(notification: .announcement,
+                             argument: transcriptFindAccessibilityStatus)
+        #endif
+    }
+
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -403,7 +740,10 @@ public struct ChatView: View {
                 // taps where a bubble actually is, and the gaps between them
                 // are exactly where a thumb lands when it means "dismiss".
                 .contentShape(Rectangle())
-                .onTapGesture { composerFocused = false }
+                .onTapGesture {
+                    composerFocused = false
+                    transcriptFindFocused = false
+                }
             }
             // Drag the transcript down and the keyboard follows the finger,
             // rather than vanishing at some threshold.
@@ -426,6 +766,8 @@ public struct ChatView: View {
                 refreshFollowingLatest()
             }
             .task(id: initialTranscriptAnchorKey) {
+                guard TranscriptFindPolicy.allowsInitialAnchor(
+                    isFindOwningScroll: transcriptFindOwnsScroll) else { return }
                 guard let attempt = initialTranscriptAnchor.begin(
                     botID: botID, messageCount: messages.count
                 ) else { return }
@@ -439,7 +781,9 @@ public struct ChatView: View {
                 followingLatest = true
             }
             .onChange(of: messages.count) {
-                guard initialTranscriptAnchor.isSettled(for: botID), followingLatest else { return }
+                guard TranscriptFindPolicy.allowsAutomaticFollow(
+                    hasSelection: transcriptFindOwnsScroll),
+                    initialTranscriptAnchor.isSettled(for: botID), followingLatest else { return }
                 withAnimation(ChatComposerLayoutPolicy.animation(
                     reducedMotion: reducedMotion, duration: 0.25
                 )) {
@@ -447,7 +791,8 @@ public struct ChatView: View {
                 }
             }
             .onChange(of: chat?.isTyping ?? false) {
-                guard followingLatest else { return }
+                guard TranscriptFindPolicy.allowsAutomaticFollow(
+                    hasSelection: transcriptFindOwnsScroll), followingLatest else { return }
                 withAnimation(ChatComposerLayoutPolicy.animation(
                     reducedMotion: reducedMotion, duration: 0.25
                 )) {
@@ -462,6 +807,16 @@ public struct ChatView: View {
                     reducedMotion: reducedMotion, duration: 0.25
                 )) {
                     proxy.scrollTo(transcriptAnchorID, anchor: .bottom)
+                }
+            }
+            .onChange(of: activeTranscriptFindKey) {
+                guard let target = activeTranscriptFindMessageID else { return }
+                _ = initialTranscriptAnchor.userDeparted(
+                    botID: botID, messageCount: messages.count)
+                followingLatest = false
+                withAnimation(ChatComposerLayoutPolicy.animation(
+                    reducedMotion: reducedMotion, duration: 0.2)) {
+                    proxy.scrollTo(target.uuidString, anchor: .center)
                 }
             }
             .simultaneousGesture(
@@ -502,7 +857,7 @@ public struct ChatView: View {
     }
 
     private var initialTranscriptAnchorKey: String {
-        "\(botID)\u{1f}\(messages.count)\u{1f}\(String(describing: messages.last?.id))"
+        "\(botID)\u{1f}\(messages.count)\u{1f}\(String(describing: messages.last?.id))\u{1f}\(transcriptFindOwnsScroll)"
     }
 
     private var showingWorkingAvatar: Bool {
@@ -542,6 +897,11 @@ public struct ChatView: View {
     }
 
     private func refreshFollowingLatest() {
+        guard TranscriptFindPolicy.allowsAutomaticFollow(
+            hasSelection: transcriptFindOwnsScroll) else {
+            followingLatest = false
+            return
+        }
         guard let distance = transcriptGeometry.distanceFromBottom else { return }
         followingLatest = ChatTranscriptLayoutPolicy.isFollowingLatest(
             distanceFromBottom: distance)
@@ -550,7 +910,9 @@ public struct ChatView: View {
     private func anchorTranscript(_ proxy: ScrollViewProxy,
                                   attempt: InitialTranscriptAnchorState.Attempt) async -> Bool {
         for delay in ChatTranscriptLayoutPolicy.layoutPassesMs {
-            guard initialTranscriptAnchor.shouldContinue(
+            guard TranscriptFindPolicy.allowsInitialAnchor(
+                    isFindOwningScroll: transcriptFindOwnsScroll),
+                  initialTranscriptAnchor.shouldContinue(
                 attempt, currentBotID: botID, isCancelled: Task.isCancelled
             ) else { return false }
             if delay > 0 {
@@ -562,7 +924,9 @@ public struct ChatView: View {
             } else {
                 await Task.yield()
             }
-            guard initialTranscriptAnchor.shouldContinue(
+            guard TranscriptFindPolicy.allowsInitialAnchor(
+                    isFindOwningScroll: transcriptFindOwnsScroll),
+                  initialTranscriptAnchor.shouldContinue(
                 attempt, currentBotID: botID, isCancelled: Task.isCancelled
             ) else { return false }
             proxy.scrollTo(transcriptAnchorID, anchor: .bottom)
@@ -576,6 +940,14 @@ public struct ChatView: View {
         case .bot: botRow(message)
         case .user: userRow(message)
         }
+    }
+
+    private func findHighlight(for message: ChatMessage) -> TranscriptFindSelection? {
+        guard message.author == .user || message.author == .bot,
+              transcriptFindPresented,
+              let selection = activeTranscriptFindSelection,
+              selection.address.identifies(message) else { return nil }
+        return selection
     }
 
     // MARK: System rows
@@ -646,7 +1018,7 @@ public struct ChatView: View {
                         .padding(.bottom, message.text.isEmpty ? 0 : 5)
                 }
                 if !message.text.isEmpty {
-                    botBubble(message.text)
+                    botBubble(message.text, findHighlight: findHighlight(for: message))
                         .contextMenu { messageMenu(message) }
                 }
                 let visibleToolCalls = transcriptPolicy.visibleToolCalls(message.toolCalls)
@@ -692,11 +1064,14 @@ public struct ChatView: View {
         return { _ = model.preparePrivateDiagnosticsShare(for: message, in: botID) }
     }
 
-    @ViewBuilder private func botBubble(_ text: String) -> some View {
+    @ViewBuilder private func botBubble(
+        _ text: String, findHighlight: TranscriptFindSelection?
+    ) -> some View {
         switch theme.id {
         case .soft:
             MarkdownText(text, theme: theme, size: 14.5,
-                         color: theme.ink.opacity(0.94), lineSpacing: 3)
+                         color: theme.ink.opacity(0.94), lineSpacing: 3,
+                         findHighlight: findHighlight)
                 .padding(.vertical, 11)
                 .padding(.horizontal, 14)
                 .background(theme.panel,
@@ -708,7 +1083,8 @@ public struct ChatView: View {
                 .shadow(color: theme.ink.opacity(0.04), radius: 1, y: 1)
         case .control:
             MarkdownText(text, theme: theme, size: 14,
-                         color: theme.ink.opacity(0.88), lineSpacing: 3.5)
+                         color: theme.ink.opacity(0.88), lineSpacing: 3.5,
+                         findHighlight: findHighlight)
                 .padding(.vertical, 11)
                 .padding(.horizontal, 13)
                 .background(theme.panel,
@@ -719,7 +1095,8 @@ public struct ChatView: View {
                     .strokeBorder(theme.line, lineWidth: 1))
         case .ink:
             // Flat manuscript text with a colored left rule — no bubble.
-            MarkdownText(text, theme: theme, size: 16.5, color: theme.ink, lineSpacing: 4)
+            MarkdownText(text, theme: theme, size: 16.5, color: theme.ink, lineSpacing: 4,
+                         findHighlight: findHighlight)
                 .padding(.vertical, 2)
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) {
@@ -918,7 +1295,7 @@ public struct ChatView: View {
         return HStack(spacing: 0) {
             Spacer(minLength: 70) // ≈ the prototype's 78% max width
             VStack(alignment: .trailing, spacing: 3) {
-                userBubble(message.text)
+                userBubble(message.text, findHighlight: findHighlight(for: message))
                     .contextMenu { messageMenu(message) }
                 if queued {
                     Text(copy.queued)
@@ -931,11 +1308,13 @@ public struct ChatView: View {
         .modifier(ChatEntrance())
     }
 
-    @ViewBuilder private func userBubble(_ text: String) -> some View {
+    @ViewBuilder private func userBubble(
+        _ text: String, findHighlight: TranscriptFindSelection?
+    ) -> some View {
         switch theme.id {
         case .soft:
             MarkdownText(text, theme: theme, size: 14.5, color: theme.accentFg,
-                         lineSpacing: 3, onAccent: true)
+                         lineSpacing: 3, onAccent: true, findHighlight: findHighlight)
                 .padding(.vertical, 11)
                 .padding(.horizontal, 14)
                 .background(LinearGradient(colors: [theme.color(for: .violet), theme.accent],
@@ -944,7 +1323,8 @@ public struct ChatView: View {
                                                        bottomTrailingRadius: 6, topTrailingRadius: 20))
                 .shadow(color: theme.accent.opacity(0.24), radius: 6, y: 4)
         case .control:
-            MarkdownText(text, theme: theme, size: 14, color: theme.ink, lineSpacing: 3.5)
+            MarkdownText(text, theme: theme, size: 14, color: theme.ink, lineSpacing: 3.5,
+                         findHighlight: findHighlight)
                 .padding(.vertical, 11)
                 .padding(.horizontal, 13)
                 .background(theme.accent.opacity(0.12),
@@ -955,7 +1335,7 @@ public struct ChatView: View {
                     .strokeBorder(theme.accent.opacity(0.25), lineWidth: 1))
         case .ink:
             MarkdownText(text, theme: theme, size: 15.5, color: theme.bg,
-                         lineSpacing: 3, onAccent: true)
+                         lineSpacing: 3, onAccent: true, findHighlight: findHighlight)
                 .padding(.vertical, 11)
                 .padding(.horizontal, 15)
                 .background(theme.ink,

@@ -97,20 +97,25 @@ public struct ScreenHeader<Trailing: View>: View {
 public struct HeaderIconButton<Glyph: View>: View {
     public var theme: ThemePack
     public var size: CGFloat
+    public var hitTargetSize: CGFloat?
     public var showsChrome: Bool
     public var action: () -> Void
     @ViewBuilder public var glyph: () -> Glyph
 
-    public init(theme: ThemePack, size: CGFloat = 32, action: @escaping () -> Void,
+    public init(theme: ThemePack, size: CGFloat = 32, hitTargetSize: CGFloat? = nil,
+                action: @escaping () -> Void,
                 @ViewBuilder glyph: @escaping () -> Glyph) {
-        self.init(theme: theme, size: size, showsChrome: true, action: action, glyph: glyph)
+        self.init(theme: theme, size: size, showsChrome: true,
+                  hitTargetSize: hitTargetSize, action: action, glyph: glyph)
     }
 
     public init(theme: ThemePack, size: CGFloat = 32, showsChrome: Bool,
+                hitTargetSize: CGFloat? = nil,
                 action: @escaping () -> Void, @ViewBuilder glyph: @escaping () -> Glyph) {
         self.theme = theme
         self.size = size
         self.showsChrome = showsChrome
+        self.hitTargetSize = hitTargetSize
         self.action = action
         self.glyph = glyph
     }
@@ -126,6 +131,8 @@ public struct HeaderIconButton<Glyph: View>: View {
                         shape.strokeBorder(borderColor, lineWidth: 1)
                     }
                 }
+                .frame(minWidth: hitTargetSize ?? size,
+                       minHeight: hitTargetSize ?? size)
                 .contentShape(shape)
         }
         .buttonStyle(.plain)
