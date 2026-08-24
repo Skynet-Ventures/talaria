@@ -527,6 +527,7 @@ public struct ToolStartPayload: Sendable {
     /// ≤80-char argument preview.
     public var context: String
     public var arguments: ToolPayload?
+    public var webSearchQuery: String?
 
     public init(_ v: JSONValue?) {
         toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
@@ -540,8 +541,10 @@ public struct ToolStartPayload: Sendable {
         let preview = v?["preview"]?.stringValue
         context = ToolPayloadCodec.boundedText(
             (supplied?.isEmpty == false ? supplied : preview) ?? "", maximum: 80)
-        arguments = ToolPayloadCodec.directArguments(
-            from: v?["args"] ?? v?["arguments"] ?? v?["input"])
+        let rawArguments = v?["args"] ?? v?["arguments"] ?? v?["input"]
+        arguments = ToolPayloadCodec.directArguments(from: rawArguments)
+        webSearchQuery = ToolWebSearchCodec.isWebSearchTool(name)
+            ? ToolWebSearchCodec.query(from: rawArguments) : nil
     }
 }
 
@@ -557,6 +560,10 @@ public struct ToolCompletePayload: Sendable {
     public var structuredOutput: ToolStructuredOutput?
     public var deferredStructuredOutput: ToolStructuredOutput?
     public var deferredFileDiff: ToolFileDiff?
+    public var webSearchOutput: ToolWebSearchOutput?
+    public var deferredWebSearchOutput: ToolWebSearchOutput?
+    public var deferredWebSearchHasExplicitError: Bool
+    public var webSearchHasExplicitError: Bool
 
     public init(_ v: JSONValue?) {
         toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
@@ -588,6 +595,18 @@ public struct ToolCompletePayload: Sendable {
         deferredStructuredOutput = name.isEmpty
             ? ToolOutputCodec.candidate(result: rawResult) : nil
         deferredFileDiff = fileDiff == nil ? candidate : nil
+        let searchCandidate = name.isEmpty || ToolWebSearchCodec.isWebSearchTool(name)
+            ? ToolWebSearchCodec.candidateAdmission(
+                arguments: v?["args"] ?? v?["arguments"] ?? v?["input"],
+                result: rawResult) : ToolWebSearchAdmission(
+                    output: nil, hasExplicitError: false)
+        let searchAdmission = ToolWebSearchCodec.isWebSearchTool(name)
+            ? searchCandidate : ToolWebSearchAdmission(output: nil, hasExplicitError: false)
+        webSearchOutput = searchAdmission.output
+        deferredWebSearchOutput = name.isEmpty ? searchCandidate.output : nil
+        deferredWebSearchHasExplicitError = name.isEmpty
+            && searchCandidate.hasExplicitError
+        webSearchHasExplicitError = searchAdmission.hasExplicitError
     }
 }
 

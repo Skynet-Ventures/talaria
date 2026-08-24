@@ -1432,6 +1432,8 @@ extension AppModel {
                 arguments: arguments,
                 result: ToolPayloadCodec.unavailable(
                     "Hermes retained this tool call without a matching result row."),
+                webSearchQuery: ToolWebSearchCodec.isWebSearchTool(name)
+                    ? ToolWebSearchCodec.query(from: arguments) : nil,
                 provenance: missingIdentity || ambiguousIdentity ? .malformed : .stored,
                 diagnostic: missingIdentity
                     ? "The saved call has no stable tool-call id; Talaria will not guess its result."
@@ -1458,6 +1460,14 @@ extension AppModel {
         let raw = row["content"] ?? row["result"]
         let hasRaw = raw != nil && raw != .null
         let outputAdmission = ToolOutputCodec.admit(toolName: name, result: raw)
+        let searchCandidateAdmission = ToolWebSearchCodec.candidateAdmission(
+            arguments: row["args"] ?? row["arguments"] ?? row["input"],
+            result: raw)
+        let searchAdmission = ToolWebSearchCodec.isWebSearchTool(name)
+            ? searchCandidateAdmission
+            : ToolWebSearchAdmission(output: nil, hasExplicitError: false)
+        let deferredSearch = (name.isEmpty || name == "Tool")
+            ? searchCandidateAdmission.output : nil
         let deferredOutput = (name.isEmpty || name == "Tool")
             ? ToolOutputCodec.candidate(result: raw) : nil
         let result = outputAdmission.output != nil
@@ -1469,7 +1479,8 @@ extension AppModel {
         return ToolCall(
             id: "stored-result:\(rowID.map(String.init) ?? "unknown"):\(index)",
             name: name, context: context,
-            state: outputAdmission.hasExplicitError ? .failed : .done,
+            state: (outputAdmission.hasExplicitError || searchAdmission.hasExplicitError)
+                ? .failed : .done,
             summary: context.isEmpty ? ToolPayloadCodec.preview(result) : context,
             resultText: result?.displayText, gatewayToolID: wireID,
             arguments: arguments, result: result,
@@ -1482,6 +1493,12 @@ extension AppModel {
                 : ToolDiffCodec.candidate(
                     arguments: row["args"] ?? row["arguments"] ?? row["input"],
                     result: raw),
+            webSearchOutput: searchAdmission.output,
+            deferredWebSearchOutput: deferredSearch,
+            deferredWebSearchHasExplicitError: (name.isEmpty || name == "Tool")
+                && searchCandidateAdmission.hasExplicitError,
+            webSearchQuery: ToolWebSearchCodec.isWebSearchTool(name)
+                ? ToolWebSearchCodec.query(from: arguments) : nil,
             provenance: hasRaw
                 ? (wireID == nil ? .unmatchedResult : (ambiguousIdentity ? .malformed : .stored))
                 : .projection,
@@ -1497,7 +1514,8 @@ extension AppModel {
         call.state = preservesFailedEvidence ? .failed : result.state
         call.context = call.context.isEmpty ? result.context : call.context
         call.arguments = call.arguments ?? result.arguments
-        call.result = result.result
+        call.result = preservesFailedEvidence
+            ? (call.result ?? result.result) : result.result
         if ToolDiffCodec.isFileEditTool(call.name),
            var diff = result.fileDiff ?? result.deferredFileDiff {
             if diff.path == nil { diff.path = ToolDiffCodec.path(from: call.arguments) }
@@ -1525,8 +1543,40 @@ extension AppModel {
         } else {
             call.deferredStructuredOutput = nil
         }
-        call.summary = result.summary ?? call.summary
-        call.resultText = result.resultText ?? call.resultText
+        if ToolWebSearchCodec.isWebSearchTool(call.name) {
+            let resultEvidence = ToolWebSearchOutput.merging(
+                newer: result.webSearchOutput,
+                preserving: result.deferredWebSearchOutput)
+            call.webSearchOutput = preservesFailedEvidence
+                ? ToolWebSearchOutput.merging(
+                    newer: call.webSearchOutput, preserving: resultEvidence)
+                : ToolWebSearchOutput.merging(
+                    newer: resultEvidence, preserving: call.webSearchOutput)
+            call.deferredWebSearchOutput = nil
+            if result.deferredWebSearchHasExplicitError {
+                call.state = .failed
+            }
+            call.deferredWebSearchHasExplicitError = false
+            if call.webSearchOutput?.query == nil {
+                let query = call.webSearchQuery
+                    ?? ToolWebSearchCodec.query(from: call.arguments)
+                call.webSearchOutput?.query = query
+            }
+        } else if call.name.isEmpty || call.name == "Tool" {
+            call.deferredWebSearchOutput = ToolWebSearchOutput.merging(
+                newer: result.deferredWebSearchOutput,
+                preserving: call.deferredWebSearchOutput)
+            call.deferredWebSearchHasExplicitError =
+                call.deferredWebSearchHasExplicitError
+                || result.deferredWebSearchHasExplicitError
+        } else {
+            call.deferredWebSearchOutput = nil
+            call.deferredWebSearchHasExplicitError = false
+        }
+        call.summary = preservesFailedEvidence
+            ? (call.summary ?? result.summary) : (result.summary ?? call.summary)
+        call.resultText = preservesFailedEvidence
+            ? (call.resultText ?? result.resultText) : (result.resultText ?? call.resultText)
         call.diagnostic = result.provenance == .projection ? call.diagnostic : result.diagnostic
     }
 

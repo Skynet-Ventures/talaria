@@ -86,6 +86,32 @@ public enum ToolOutputPresentationPolicy {
     }
 }
 
+public enum WebSearchPresentationPolicy {
+    public static let minimumInteractiveDimension: CGFloat = 44
+    public static let maximumAccessibilityScalars = 320
+    public static let titleTextStyle: Font.TextStyle = .subheadline
+    public static let hostTextStyle: Font.TextStyle = .caption
+    public static let snippetTextStyle: Font.TextStyle = .caption
+    public static let snippetsAreSelectable = true
+    public static let disclosureHonorsReducedMotion = true
+
+    public static func visibleDestinationHost(_ hit: ToolWebSearchHit) -> String? {
+        hit.destinationHost
+    }
+
+    public static func accessibilityLabel(_ hit: ToolWebSearchHit) -> String {
+        let title = hit.title.isEmpty ? "Search result" : hit.title
+        let host = visibleDestinationHost(hit).map { "Destination host, \($0)" }
+        let source = [title, host].compactMap { $0 }.joined(separator: ", ")
+        var iterator = source.unicodeScalars.makeIterator()
+        var output = String.UnicodeScalarView()
+        while output.count < maximumAccessibilityScalars, let scalar = iterator.next() {
+            output.append(scalar)
+        }
+        return String(output) + (iterator.next() == nil ? "" : " …")
+    }
+}
+
 public enum ChatComposerAction: Sendable, Equatable {
     case disabled
     case palette

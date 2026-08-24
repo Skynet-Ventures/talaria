@@ -1220,6 +1220,9 @@ extension AppModel {
                     || calls[existing].fileDiff != nil
                     || calls[existing].structuredOutput != nil
                     || calls[existing].deferredStructuredOutput != nil
+                    || calls[existing].webSearchOutput != nil
+                    || calls[existing].deferredWebSearchOutput != nil
+                    || calls[existing].deferredWebSearchHasExplicitError
                     || calls[existing].result != nil)
             if completionBeforeStart {
                 admitsStartMetadata = true
@@ -1250,6 +1253,8 @@ extension AppModel {
                 }
                 calls[exact].gatewayToolID = tool.toolID.isEmpty ? nil : tool.toolID
                 calls[exact].arguments = tool.arguments ?? calls[exact].arguments
+                calls[exact].webSearchQuery = tool.webSearchQuery
+                    ?? calls[exact].webSearchQuery
                 calls[exact].provenance = .live
             }
         } else if let pending = calls.firstIndex(where: {
@@ -1262,12 +1267,14 @@ extension AppModel {
             if !tool.name.isEmpty { calls[pending].name = tool.name }
             calls[pending].context = tool.context
             calls[pending].arguments = tool.arguments
+            calls[pending].webSearchQuery = tool.webSearchQuery
         } else {
             admitsStartMetadata = true
             calls.append(ToolCall(
                 id: id, name: tool.name, context: tool.context,
                 gatewayToolID: tool.toolID.isEmpty ? nil : tool.toolID,
-                arguments: tool.arguments))
+                arguments: tool.arguments,
+                webSearchQuery: tool.webSearchQuery))
         }
         // A completion can arrive before its start frame. Enrich only the
         // exact invocation's missing path; never replace its retained diff.
@@ -1296,6 +1303,24 @@ extension AppModel {
             } else if !establishedName.isEmpty, establishedName != "Tool" {
                 calls[exact].deferredStructuredOutput = nil
             }
+            if ToolWebSearchCodec.isWebSearchTool(establishedName) {
+                calls[exact].webSearchOutput = ToolWebSearchOutput.merging(
+                    newer: calls[exact].deferredWebSearchOutput,
+                    preserving: calls[exact].webSearchOutput)
+                calls[exact].deferredWebSearchOutput = nil
+                if calls[exact].deferredWebSearchHasExplicitError {
+                    calls[exact].state = .failed
+                }
+                calls[exact].deferredWebSearchHasExplicitError = false
+                if calls[exact].webSearchOutput?.query == nil {
+                    let query = calls[exact].webSearchQuery
+                        ?? ToolWebSearchCodec.query(from: calls[exact].arguments)
+                    calls[exact].webSearchOutput?.query = query
+                }
+            } else if !establishedName.isEmpty, establishedName != "Tool" {
+                calls[exact].deferredWebSearchOutput = nil
+                calls[exact].deferredWebSearchHasExplicitError = false
+            }
         }
         chat.messages[index].toolCalls = calls
     }
@@ -1322,11 +1347,16 @@ extension AppModel {
             let rawResult = payload?["result"] ?? payload?["result_text"]
             let outputAdmission = ToolOutputCodec.admit(
                 toolName: establishedName, result: rawResult)
+            let searchAdmission = ToolWebSearchCodec.admit(
+                toolName: establishedName,
+                arguments: payload?["args"] ?? payload?["arguments"] ?? payload?["input"],
+                result: rawResult)
             let completionOutput = outputAdmission.output ?? tool.structuredOutput
             let completionResult = completionOutput == nil
                 ? tool.result : (outputAdmission.genericResult ?? tool.result)
             let completionFailed = Self.toolFailed(
                 payload: payload, summary: tool.summary, resultText: tool.resultText)
+                || searchAdmission.hasExplicitError
             let preservesFailedEvidence = calls[hit].state == .failed && !completionFailed
             calls[hit].state = completionFailed ? .failed
                 : (preservesFailedEvidence ? .failed : .done)
@@ -1347,6 +1377,39 @@ extension AppModel {
                     newer: calls[hit].structuredOutput, preserving: completionOutput)
                 : ToolStructuredOutput.merging(
                     newer: completionOutput, preserving: calls[hit].structuredOutput)
+            let completionSearch = searchAdmission.output ?? tool.webSearchOutput
+            calls[hit].webSearchOutput = preservesFailedEvidence
+                ? ToolWebSearchOutput.merging(
+                    newer: calls[hit].webSearchOutput, preserving: completionSearch)
+                : ToolWebSearchOutput.merging(
+                    newer: completionSearch, preserving: calls[hit].webSearchOutput)
+            let deferredSearch = tool.deferredWebSearchOutput
+            if ToolWebSearchCodec.isWebSearchTool(establishedName) {
+                calls[hit].webSearchOutput = preservesFailedEvidence
+                    ? ToolWebSearchOutput.merging(
+                        newer: calls[hit].webSearchOutput, preserving: deferredSearch)
+                    : ToolWebSearchOutput.merging(
+                        newer: deferredSearch, preserving: calls[hit].webSearchOutput)
+                calls[hit].deferredWebSearchOutput = nil
+                if tool.deferredWebSearchHasExplicitError {
+                    calls[hit].state = .failed
+                }
+                calls[hit].deferredWebSearchHasExplicitError = false
+                if calls[hit].webSearchOutput?.query == nil {
+                    let query = calls[hit].webSearchQuery
+                        ?? ToolWebSearchCodec.query(from: tool.arguments ?? calls[hit].arguments)
+                    calls[hit].webSearchOutput?.query = query
+                }
+            } else if establishedName.isEmpty || establishedName == "Tool" {
+                calls[hit].deferredWebSearchOutput = ToolWebSearchOutput.merging(
+                    newer: deferredSearch, preserving: calls[hit].deferredWebSearchOutput)
+                calls[hit].deferredWebSearchHasExplicitError =
+                    calls[hit].deferredWebSearchHasExplicitError
+                    || tool.deferredWebSearchHasExplicitError
+            } else {
+                calls[hit].deferredWebSearchOutput = nil
+                calls[hit].deferredWebSearchHasExplicitError = false
+            }
             let deferredOutput = tool.deferredStructuredOutput
             if ToolOutputCodec.isStructuredTool(establishedName) {
                 calls[hit].structuredOutput = preservesFailedEvidence
@@ -1390,7 +1453,8 @@ extension AppModel {
             name: tool.name.isEmpty ? "Tool" : tool.name,
             context: "",
             state: Self.toolFailed(payload: payload, summary: tool.summary,
-                                   resultText: tool.resultText) ? .failed : .done,
+                                   resultText: tool.resultText)
+                || tool.webSearchHasExplicitError ? .failed : .done,
             summary: tool.summary, resultText: result.displayText,
             durationSeconds: tool.durationSeconds,
             gatewayToolID: tool.toolID.isEmpty ? nil : tool.toolID,
@@ -1399,6 +1463,12 @@ extension AppModel {
             structuredOutput: tool.structuredOutput,
             deferredStructuredOutput: tool.deferredStructuredOutput,
             deferredFileDiff: tool.fileDiff == nil ? tool.deferredFileDiff : nil,
+            webSearchOutput: tool.webSearchOutput,
+            deferredWebSearchOutput: tool.webSearchOutput == nil
+                ? tool.deferredWebSearchOutput : nil,
+            deferredWebSearchHasExplicitError: tool.webSearchOutput == nil
+                && tool.deferredWebSearchHasExplicitError,
+            webSearchQuery: tool.webSearchOutput?.query,
             provenance: .unmatchedResult,
             diagnostic: "No exact live tool-call id matched this completion; Talaria did not pair it by name."))
     }
