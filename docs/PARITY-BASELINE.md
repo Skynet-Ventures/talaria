@@ -277,7 +277,13 @@ partial until the unchecked certification gates are recorded.
       MCP, plugins, learned-memory curation/import/export, auxiliary slots, and
       subagent depth. The profile-scoped messaging-platform lifecycle is now
       implemented with write-only credential handling and exact-source live
-      refresh; webhook/relay deployment and real-gateway certification remain.
+      refresh; relay deployment and real-gateway certification remain. Webhook
+      lifecycle stays fail-closed after the exact `e400e008` audit: its store
+      is profile-home scoped, but the admin routes accept/echo no profile or
+      revision, create overwrites collisions and returns the HMAC secret, and
+      enable automatically restarts the gateway. The upstream authority
+      contract required to resume mobile work is recorded in
+      `HERMES-CURRENT-AUDIT.md`.
       Routine per-job reasoning effort is implemented but remains
       live-certification pending.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source

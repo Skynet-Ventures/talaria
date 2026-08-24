@@ -22,6 +22,77 @@ change or a material portable-contract delta creates a parity blocker;
 metadata, test-only, or non-portable drift can be recorded without chasing the
 moving head.
 
+## Targeted webhook lifecycle audit at `e400e008`
+
+Webhook administration was audited directly against exact Hermes source
+`e400e0088767a596ee21985d661a924cb087775a`, with Talaria based beside the
+final messaging-platform lifecycle head
+`d38835ced5192fe2de314667a2a613e6713a7b38`. That is the correct dependency:
+webhooks appear beside messaging in Desktop, but they use a separate admin
+contract and must not inherit the safer profile-scoped messaging API by
+association. The current webhook contract is **blocked for remote mobile
+management**, so no phone transport, cache, polling loop, or mutation UI is
+added.
+
+Webhook subscriptions are profile-home scoped, not one process-global shared
+store. `hermes_cli.webhook._subscriptions_path()` resolves
+`webhook_subscriptions.json` beneath the active `get_hermes_home()`, and the
+platform configuration is read and written through that active backend's
+config. Desktop preserves this truth indirectly: its Electron main process
+routes `/api/webhooks` requests to a retained or spawned backend for the
+selected profile. That is a local process-routing mechanism, not a portable
+remote gateway contract. The inbound receiver's
+`/p/<profile>/webhooks/<route>` URL selects the agent profile for an incoming
+event; it does not profile-scope the dashboard administration endpoints or
+select a different subscription store.
+
+All five admin operations in `hermes_cli/web_server.py` are unscoped:
+`GET /api/webhooks`, `POST /api/webhooks/enable`, `POST /api/webhooks`,
+`DELETE /api/webhooks/{name}`, and
+`PUT /api/webhooks/{name}/enabled`. None accepts or echoes a resolved profile,
+store revision, or route revision. A Talaria request therefore cannot prove
+that the selected gateway/profile/client/generation still owns the returned
+snapshot or mutation after an await. Adding an ignored `profile` query or body
+field would not create authority.
+
+The remaining safety gaps are independently blocking:
+
+- the list and its nested events, skills, prompt, description, script, URL,
+  target, and timestamp fields have no explicit collection, wire, or text
+  bounds;
+- create normalizes a caller-supplied name and unconditionally assigns
+  `subs[name] = route`, silently replacing a concurrent/existing route and its
+  secret instead of returning a conflict or requiring an expected revision;
+- delivery targets and chat ids are free-form caller strings rather than ids
+  admitted from an authoritative bounded target snapshot;
+- create accepts executable `script` and external-delivery configuration in
+  the same unfenced write, without a server-declared risk/capability contract;
+- create returns the full HMAC secret. Reads redact it, but a safe phone flow
+  requires a transient write-only credential and must never place a secret in
+  model state, a toast, logs, retry state, or a response-derived display; and
+- enabling calls `_restart_gateway_after_webhook_enable()` automatically.
+  Its response reports restart initiation or failure only after the side
+  effect, so Talaria cannot offer the required explicit, separately fenced
+  maintenance decision and must not call it.
+
+Toggle and delete do require a name that could be taken from a prior snapshot,
+and subscription file replacement is atomic on disk, but neither fact closes
+the missing profile/revision fence. There is also no exact-source
+`webhooks.changed` event. Manual refresh would be the correct mobile freshness
+model after a safe API exists; Desktop cache invalidation is not authority for
+polling.
+
+This row can resume only after Hermes provides bounded responses that echo the
+canonical resolved profile and a store/route revision; exact profile-bearing
+mutation bodies; conditional create/toggle/delete with conflict semantics;
+server-declared delivery target ids and allowed fields; write-only secret
+input with only `secret_set` returned; and enablement that reports
+`pending_restart` without restarting. Talaria can then hold its captured pool
+and profile-lifecycle leases across every REST await, revalidate the exact
+gateway/profile/client/generation/route/revision, require confirmations for
+delete or external delivery, and direct any restart through the existing
+explicit maintenance fence.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit
@@ -193,7 +264,7 @@ therefore never inferred as removal.
 | Unknown explicit Project profile | Hermes currently falls back to the launch profile. Talaria revalidates the selected route immediately before writes and fails closed, but Hermes should reject an explicit unknown profile. |
 | Cron per-job reasoning effort | Implemented as an explicitly authorized mobile REST mutation. Talaria decodes and displays the raw field, preserves unknown values on unrelated edits, and sends only canonical/clear values through the exact REST PUT normalizer, which delegates to Hermes' canonical `cron.jobs.update_job` validation. The model tool remains read-only and cannot set this job-owned field. Live certification remains open. |
 | Rich transcript parity | Partial: markdown, tables, code, working avatar, transcript actions, jump-to-bottom, exact-source message-level child creation, and bounded typed tool-history hydration now exist. The mobile generic fallback groups larger runs and discloses status, arguments, result, provenance, and diagnostics without name/prose pairing. Explicit file-edit diffs now hydrate and overlay only by exact tool id, then render as bounded, sanitized, selectable mobile disclosures with +/- counts; live gateway/device proof remains open. Persistent multimodal parts, generated images/lightbox, specialist ANSI/search/math/diagram renderers, per-message TTS, whole-turn timing, the N/M alternative-branch picker, lineage presentation, and tour/activity remain. |
-| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Webhook/relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, profile import/export, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. |
+| Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator and messaging-platform lifecycle surfaces exist. Relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, profile import/export, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. Webhook lifecycle is explicitly blocked by the exact `e400e008` audit above: the profile-home-scoped store is exposed through profile-unscoped, revisionless admin routes; create overwrites collisions and returns the secret; enable automatically restarts the gateway. |
 | Git/System depth | Partial: core review and guarded mutations exist. Base/commit/ship context, dirty-worktree recovery, worktree-session integration, usage periods/daily/model/skill detail, and multi-gateway backend update orchestration remain. |
 | Artifact completeness | Exact retained-source discovery is implemented with atomic no-dial snapshots, sequential reads, compacted rows, collision isolation, and explicit bounded/stale/failure state. Retained bodies use the exact captured client only after `/api/files` proves one canonical locked root; root and body responses are wire-bounded, authority is rechecked after awaits, and sign-out purges source-owned bytes. Hermes `session.list` still has no global continuation, transcript offsets remain informational under Talaria's 150-item cap, and gateways returning `locked_root: nil` remain fail-closed. Live certification remains open. |
 
