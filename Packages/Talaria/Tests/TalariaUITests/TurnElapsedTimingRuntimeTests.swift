@@ -5,6 +5,26 @@ import XCTest
 
 @MainActor
 final class TurnElapsedTimingRuntimeTests: XCTestCase {
+    func testTranscriptActivityUsesFastCadenceOnlyForDraftingReveal() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var activity = TurnTranscriptActivity()
+        activity.begin(at: start, replacingExisting: true)
+        XCTAssertEqual(TurnTranscriptActivityRefreshPolicy.interval(for: activity), 1)
+
+        activity.namePhase(.providerWait, label: "Waiting on provider", startedAt: start)
+        XCTAssertEqual(TurnTranscriptActivityRefreshPolicy.interval(for: activity), 1)
+
+        activity.namePhase(.compacting, label: "Summarizing thread", startedAt: start)
+        XCTAssertEqual(TurnTranscriptActivityRefreshPolicy.interval(for: activity), 1)
+
+        activity.namePhase(.draftingTool, label: "Preparing browser", startedAt: start)
+        XCTAssertEqual(TurnTranscriptActivityRefreshPolicy.interval(for: activity),
+                       TurnTranscriptActivityPolicy.draftingRevealDelay)
+
+        activity.recordVisibleProgress(at: start.addingTimeInterval(1))
+        XCTAssertEqual(TurnTranscriptActivityRefreshPolicy.interval(for: activity), 1)
+    }
+
     func testSettlementAnnotatesOnlyNewestAssistantOwnedByCurrentTurn() {
         let model = AppModel()
         let chat = model.chat(for: "worker")
@@ -72,6 +92,73 @@ final class TurnElapsedTimingRuntimeTests: XCTestCase {
             priorLocalStart: local, now: now)
         XCTAssertEqual(chat.turnStartedAt, local,
                        "first-submit bind preserves the locally observed origin")
+        XCTAssertTrue(chat.turnTranscriptActivity.isActive)
+    }
+
+    func testRetainedOutputSeedsFreshQuietBoundaryWithoutHistoricalGuess() {
+        let model = AppModel()
+        let chat = model.chat(for: "worker")
+        let now = Date(timeIntervalSince1970: 2_000)
+        let live = LiveSession(.object([
+            "session_id": .string("runtime"),
+            "running": .bool(true),
+            "inflight": .object([
+                "assistant": .string("already streamed"),
+                "streaming": .bool(true),
+            ]),
+        ]))
+
+        model.adoptTurnTiming(from: live, in: chat,
+                              priorRuntimeSessionID: "old",
+                              priorLocalStart: nil, now: now)
+
+        XCTAssertNil(chat.turnStartedAt)
+        XCTAssertTrue(chat.turnTranscriptActivity.hasVisibleProgress)
+        XCTAssertEqual(chat.turnTranscriptActivity.lastVisibleProgressAt, now)
+        XCTAssertNil(TurnTranscriptActivityPolicy.presentation(
+            activity: chat.turnTranscriptActivity, turnStartedAt: nil,
+            now: now, isTurnRunning: true, isAwaitingInput: false,
+            toolNarratesWait: false))
+    }
+
+    func testExactSourceEventsOwnAndTerminallyClearActivity() {
+        let model = AppModel()
+        model.mode = .live
+        let runtime = LiveRuntime.shared
+        let sessionID = "activity-\(UUID().uuidString)"
+        let botID = "remote::activity"
+        let route = GatewaySessionRoute(gatewayID: "remote", sessionID: sessionID)
+        let oldGateway = runtime.gatewayID
+        defer {
+            runtime.gatewayID = oldGateway
+            runtime.routedSessionToBot[route] = nil
+            ChatRuntime.shared.turnFloor[botID] = nil
+            model.chats[botID] = nil
+        }
+        runtime.gatewayID = "primary"
+        runtime.routedSessionToBot[route] = botID
+        let chat = model.chat(for: botID)
+        chat.sessionID = sessionID
+
+        model.handle(event: GatewayEvent(type: "message.start", sessionID: sessionID,
+                                         payload: nil), sourceGatewayID: "remote")
+        XCTAssertTrue(chat.turnTranscriptActivity.isActive)
+
+        model.handle(event: GatewayEvent(type: "message.delta", sessionID: sessionID,
+                                         payload: ["text": "hello"]),
+                     sourceGatewayID: "primary")
+        XCTAssertFalse(chat.turnTranscriptActivity.hasVisibleProgress,
+                       "a colliding source cannot mutate the qualified turn")
+
+        model.handle(event: GatewayEvent(type: "message.delta", sessionID: sessionID,
+                                         payload: ["text": "hello"]),
+                     sourceGatewayID: "remote")
+        XCTAssertTrue(chat.turnTranscriptActivity.hasVisibleProgress)
+
+        model.handle(event: GatewayEvent(type: "message.complete", sessionID: sessionID,
+                                         payload: ["status": "complete", "text": "hello"]),
+                     sourceGatewayID: "remote")
+        XCTAssertFalse(chat.turnTranscriptActivity.isActive)
     }
 
     func testSessionInfoPreservesLocalOriginAndStartsAtLiveObservationWhenMissing() {
@@ -91,6 +178,25 @@ final class TurnElapsedTimingRuntimeTests: XCTestCase {
             "running": .bool(true),
         ])), in: chat, now: now)
         XCTAssertEqual(chat.turnStartedAt, now)
+    }
+
+    func testEstablishedSessionReplacementClearsLiveActivity() {
+        let model = AppModel()
+        let chat = model.chat(for: "worker")
+        chat.sessionID = "old-runtime"
+        chat.storedSessionID = "old-stored"
+        chat.beginTurnTiming(at: Date(timeIntervalSince1970: 1_000),
+                             replacingExisting: true)
+
+        chat.sessionID = "new-runtime"
+        XCTAssertNil(chat.turnStartedAt)
+        XCTAssertFalse(chat.turnTranscriptActivity.isActive)
+
+        chat.beginTurnTiming(at: Date(timeIntervalSince1970: 2_000),
+                             replacingExisting: true)
+        chat.storedSessionID = "new-stored"
+        XCTAssertNil(chat.turnStartedAt)
+        XCTAssertFalse(chat.turnTranscriptActivity.isActive)
     }
 }
 #endif

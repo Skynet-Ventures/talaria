@@ -1942,6 +1942,7 @@ extension AppModel {
                   currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
                                               sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
+            chat.turnTranscriptActivity.recordVisibleProgress(at: Date())
             chat.isTyping = false
             if let last = chat.messages.last, last.isStreaming {
                 chat.messages[chat.messages.count - 1].text += text
@@ -1950,13 +1951,34 @@ extension AppModel {
                                                  text: text, isStreaming: true))
             }
 
-        case .thinkingDelta(let text), .reasoningDelta(let text):
+        case .thinkingDelta(let text):
+            guard let botID, !text.isEmpty,
+                  currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
+                                              sourceGatewayID: sourceGatewayID) else { return }
+            let chat = chat(for: botID)
+            if let wait = TurnTranscriptActivityPolicy.providerWaitLabel(text) {
+                chat.turnTranscriptActivity.namePhase(
+                    .providerWait, label: wait, startedAt: Date())
+                return
+            }
+            chat.turnTranscriptActivity.recordVisibleProgress(at: Date())
+            chat.isTyping = false
+            if let last = chat.messages.last, last.isStreaming {
+                chat.messages[chat.messages.count - 1].reasoning =
+                    (last.reasoning ?? "") + text
+            } else {
+                chat.messages.append(ChatMessage(author: .bot, time: AppModel.clock(),
+                                                 text: "", isStreaming: true, reasoning: text))
+            }
+
+        case .reasoningDelta(let text):
             // Reasoning usually precedes the first visible token — open the
             // streaming bubble early so the "Thought" block has a home.
             guard let botID, !text.isEmpty,
                   currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
                                               sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
+            chat.turnTranscriptActivity.recordVisibleProgress(at: Date())
             chat.isTyping = false
             if let last = chat.messages.last, last.isStreaming {
                 chat.messages[chat.messages.count - 1].reasoning =
@@ -1973,6 +1995,7 @@ extension AppModel {
                   currentChatOwnsMessageEvent(botID: botID, sessionID: event.sessionID,
                                               sourceGatewayID: sourceGatewayID) else { return }
             let chat = chat(for: botID)
+            chat.turnTranscriptActivity.recordVisibleProgress(at: Date())
             if let last = chat.messages.last, last.isStreaming {
                 chat.messages[chat.messages.count - 1].text = text
                 chat.messages[chat.messages.count - 1].isStreaming = false
@@ -2114,6 +2137,14 @@ extension AppModel {
             }
 
         case .toolGenerating(let name):
+            if let botID,
+               currentChatOwnsMessageEvent(
+                    botID: botID, sessionID: event.sessionID,
+                    sourceGatewayID: sourceGatewayID),
+               let label = TurnTranscriptActivityPolicy.draftingLabel(toolName: name) {
+                chat(for: botID).turnTranscriptActivity.namePhase(
+                    .draftingTool, label: label, startedAt: Date())
+            }
             if let botID, let idx = bots.firstIndex(where: { $0.id == botID }) {
                 bots[idx].task = name
             }
@@ -2123,7 +2154,20 @@ extension AppModel {
                 bots[idx].task = tool.context.isEmpty ? tool.name : "\(tool.name) · \(tool.context)"
             }
 
-        case .statusUpdate(_, let text):
+        case .statusUpdate(let kind, let text):
+            if let botID,
+               currentChatOwnsMessageEvent(
+                    botID: botID, sessionID: event.sessionID,
+                    sourceGatewayID: sourceGatewayID) {
+                let chat = chat(for: botID)
+                if kind == "compacting" {
+                    chat.turnTranscriptActivity.namePhase(
+                        .compacting, label: "Summarizing thread",
+                        startedAt: chat.turnStartedAt ?? Date())
+                } else if kind == "compacted" {
+                    chat.turnTranscriptActivity.recordVisibleProgress(at: Date())
+                }
+            }
             if let botID, !text.isEmpty,
                LiveRuntime.shared.workingBotIDs.contains(botID),
                let idx = bots.firstIndex(where: { $0.id == botID }) {

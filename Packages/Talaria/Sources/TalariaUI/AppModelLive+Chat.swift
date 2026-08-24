@@ -1218,12 +1218,14 @@ extension AppModel {
 
         case .toolStart(let tool):
             guard !tool.name.isEmpty || !tool.toolID.isEmpty else { return }
+            chat.turnTranscriptActivity.recordVisibleProgress(at: Date())
             startTool(tool, in: chat, botID: botID)
             LiveActivityController.shared.beginOperationalWork(
                 botID: botID,
                 operationID: tool.toolID.isEmpty ? "tool:\(tool.name)" : tool.toolID)
 
         case .toolComplete(let tool):
+            chat.turnTranscriptActivity.recordVisibleProgress(at: Date())
             completeTool(tool, payload: event.payload, in: chat, botID: botID)
             LiveActivityController.shared.endOperationalWork(
                 botID: botID,

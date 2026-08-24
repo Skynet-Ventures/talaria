@@ -31,7 +31,10 @@ public final class ChatState {
                 // nil -> concrete is the normal first-submit bind and keeps
                 // its locally observed origin. Any established binding moving
                 // elsewhere must wait for new live/resume timing evidence.
-                if oldValue != nil { turnStartedAt = nil }
+                if oldValue != nil {
+                    turnStartedAt = nil
+                    turnTranscriptActivity.clear()
+                }
             }
         }
     }
@@ -40,7 +43,10 @@ public final class ChatState {
         didSet {
             if oldValue != storedSessionID {
                 clearAssistantResponseAlternatives()
-                if oldValue != nil { turnStartedAt = nil }
+                if oldValue != nil {
+                    turnStartedAt = nil
+                    turnTranscriptActivity.clear()
+                }
             }
         }
     }
@@ -54,6 +60,9 @@ public final class ChatState {
     /// historical transcript row; a current Hermes resume may seed it from
     /// `turn_started_at` after bounded clock validation.
     public var turnStartedAt: Date?
+    /// Live-only activity across text/reasoning/tool gaps. Stored transcript
+    /// rows cannot reconstruct this clock and never hydrate it.
+    public var turnTranscriptActivity = TurnTranscriptActivity()
     /// A failed-turn retry owns this chat's composer, including while its
     /// authoritative preflight is suspended before any turn is running.
     public var hasUnresolvedRetry: Bool = false

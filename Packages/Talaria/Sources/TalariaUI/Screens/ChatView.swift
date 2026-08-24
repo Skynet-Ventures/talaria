@@ -166,9 +166,21 @@ public struct ChatView: View {
         (chat?.isRunning ?? false) || (chat?.isTyping ?? false)
     }
 
-    private var activeTurnStartedAt: Date? {
+    private var activeTurnActivity: TurnTranscriptActivity? {
         guard turnRunning else { return nil }
-        return chat?.turnStartedAt
+        guard let activity = chat?.turnTranscriptActivity, activity.isActive else { return nil }
+        return activity
+    }
+
+    private var turnAwaitingInput: Bool {
+        model.approvals.contains(where: { $0.botID == botID })
+            || ApprovalBridges.shared.prompts.contains(where: { $0.botID == botID })
+    }
+
+    private var visibleToolNarratesTurnWait: Bool {
+        guard transcriptPolicy.detail == .advanced else { return false }
+        return transcriptMessages.last(where: { $0.author == .bot })?
+            .toolCalls.contains(where: { $0.state == .running }) == true
     }
 
     private var hasUnresolvedFailedTurnRetry: Bool {
@@ -958,7 +970,7 @@ public struct ChatView: View {
     }
 
     private var transcriptAnchorID: String {
-        if activeTurnStartedAt != nil {
+        if activeTurnActivity != nil {
             return TurnElapsedTimingPresentation.liveAnchorID
         }
         return ChatTranscriptLayoutPolicy.anchorID(
@@ -984,8 +996,14 @@ public struct ChatView: View {
                 .modifier(ChatEntrance())
                 .id(ChatTranscriptLayoutPolicy.workingAnchorID)
         }
-        if let activeTurnStartedAt {
-            LiveTurnElapsedTimingView(startedAt: activeTurnStartedAt, theme: theme)
+        if let activeTurnActivity {
+            TurnTranscriptActivityView(
+                activity: activeTurnActivity,
+                turnStartedAt: chat?.turnStartedAt,
+                isTurnRunning: turnRunning,
+                isAwaitingInput: turnAwaitingInput,
+                toolNarratesWait: visibleToolNarratesTurnWait,
+                theme: theme)
         }
         Color.clear.frame(height: 1).id(ChatTranscriptLayoutPolicy.emptyAnchorID)
             .background(

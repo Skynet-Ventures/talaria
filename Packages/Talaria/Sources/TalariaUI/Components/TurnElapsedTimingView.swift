@@ -6,29 +6,54 @@ enum TurnElapsedTimingPresentation {
     static let liveAnchorID = "chat-turn-elapsed"
 }
 
-/// In-transcript whole-turn clock. It exists only while the current chat owns
-/// live start evidence; the one-second timeline is therefore never mounted
-/// for idle or historical conversations.
-struct LiveTurnElapsedTimingView: View {
-    let startedAt: Date
+enum TurnTranscriptActivityRefreshPolicy {
+    static let ordinaryInterval: TimeInterval = 1
+    static let draftingInterval = TurnTranscriptActivityPolicy.draftingRevealDelay
+
+    static func interval(for activity: TurnTranscriptActivity) -> TimeInterval {
+        activity.phase?.kind == .draftingTool ? draftingInterval : ordinaryInterval
+    }
+}
+
+/// Tail-only activity across text, reasoning, interim and tool gaps. The pure
+/// policy decides when a wait deserves a row; TimelineView supplies only the
+/// local display clock and never invokes an iOS Live Activity.
+struct TurnTranscriptActivityView: View {
+    let activity: TurnTranscriptActivity
+    let turnStartedAt: Date?
+    let isTurnRunning: Bool
+    let isAwaitingInput: Bool
+    let toolNarratesWait: Bool
     let theme: ThemePack
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let seconds = TurnElapsedTimingPolicy.liveSeconds(
-                startedAt: startedAt, now: context.date)
-            HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .font(.caption2.weight(.semibold))
-                    .accessibilityHidden(true)
-                Text("Working · \(TurnElapsedTimingPolicy.formatted(seconds: seconds))")
-                    .font(.caption.monospacedDigit())
+        TimelineView(.periodic(
+            from: .now,
+            by: TurnTranscriptActivityRefreshPolicy.interval(for: activity)
+        )) { context in
+            if let presentation = TurnTranscriptActivityPolicy.presentation(
+                activity: activity, turnStartedAt: turnStartedAt,
+                now: context.date, isTurnRunning: isTurnRunning,
+                isAwaitingInput: isAwaitingInput,
+                toolNarratesWait: toolNarratesWait
+            ) {
+                let seconds = TurnElapsedTimingPolicy.liveSeconds(
+                    startedAt: presentation.startedAt, now: context.date)
+                let label = presentation.label ?? "Working"
+                HStack(spacing: 6) {
+                    Image(systemName: "clock")
+                        .font(.caption2.weight(.semibold))
+                        .accessibilityHidden(true)
+                    Text("\(label) · \(TurnElapsedTimingPolicy.formatted(seconds: seconds))")
+                        .font(.caption.monospacedDigit())
+                        .lineLimit(2)
+                }
+                .foregroundStyle(theme.sub)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(
+                    "Assistant activity. \(label). Elapsed \(TurnElapsedTimingPolicy.formatted(seconds: seconds))"))
             }
-            .foregroundStyle(theme.sub)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text(
-                "Assistant working. Elapsed \(TurnElapsedTimingPolicy.formatted(seconds: seconds))"))
         }
         .id(TurnElapsedTimingPresentation.liveAnchorID)
     }

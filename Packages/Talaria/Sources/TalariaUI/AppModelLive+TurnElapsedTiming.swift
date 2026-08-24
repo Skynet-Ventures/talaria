@@ -7,10 +7,12 @@ extension ChatState {
     /// turn and only fills an absent value.
     func beginTurnTiming(at date: Date, replacingExisting: Bool) {
         if replacingExisting || turnStartedAt == nil { turnStartedAt = date }
+        turnTranscriptActivity.begin(at: date, replacingExisting: replacingExisting)
     }
 
     func clearTurnTiming() {
         turnStartedAt = nil
+        turnTranscriptActivity.clear()
     }
 }
 
@@ -39,6 +41,17 @@ extension AppModel {
         } else {
             chat.clearTurnTiming()
         }
+        // Resume cannot reconstruct the prior quiet boundary. Begin activity
+        // at this live observation while retaining any first-submit state.
+        chat.turnTranscriptActivity.begin(at: now, replacingExisting: false)
+        if let retained = live.retainedInflight,
+           retained.assistant?.isEmpty == false || !retained.corrections.isEmpty {
+            // Retained output proves this live turn already crossed its first
+            // visible boundary, but supplies no timestamp for that boundary.
+            // Start a fresh quiet observation rather than presenting the turn
+            // as awaiting its first response or inventing historical timing.
+            chat.turnTranscriptActivity.recordVisibleProgress(at: now)
+        }
     }
 
     /// `session.info` may arrive after submit but before message.start. Keep a
@@ -53,9 +66,11 @@ extension AppModel {
             if chat.messages.last?.isStreaming != true { chat.clearTurnTiming() }
             return
         }
-        guard chat.turnStartedAt == nil else { return }
-        chat.turnStartedAt = TurnElapsedTimingPolicy.admittedStartDate(
-            epochSeconds: info.turnStartedAtEpochSeconds, now: now) ?? now
+        if chat.turnStartedAt == nil {
+            chat.turnStartedAt = TurnElapsedTimingPolicy.admittedStartDate(
+                epochSeconds: info.turnStartedAtEpochSeconds, now: now) ?? now
+        }
+        chat.turnTranscriptActivity.begin(at: now, replacingExisting: false)
     }
 
     /// Close the observed clock and attach it only to the newest assistant row
