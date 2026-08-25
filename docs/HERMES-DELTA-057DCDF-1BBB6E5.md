@@ -180,7 +180,7 @@ dependency order, and certified against the exact gateway:
 
 | Slice | Review PR | Current implementation head |
 |---|---:|---|
-| Lossless gateway event replay | #100 | `39e602238d33e6ddb5743038e1274969aaa38494` |
+| Lossless gateway event replay | #100 | `f3c6a3f76ca08e30a59a61cadd692dcf2180773d` |
 | Checkpoint-v2 management compatibility | #101 | `15a4b5f14690c723ff1bbdf5ef5ee965c9bb1c04` |
 | MCP include/exclude semantics | #102 | `9dd943dd5cf5578d454a59540dffac8930e7ea22` |
 | Web/browser cache management | #103 | `60f808c20ca4f278c00d92578498f775006e933c` |
