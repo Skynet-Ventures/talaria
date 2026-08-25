@@ -38,6 +38,27 @@ final class WebCacheManagementTests: XCTestCase {
         ])
     }
 
+    func testOmittedLeavesUseExactHermesDefaultsButExplicitNullStaysRaw() {
+        let defaults = WebCacheConfiguration(["web": [:], "browser": [:]])
+        XCTAssertEqual(defaults.cacheEnabled.value, true)
+        XCTAssertEqual(defaults.cacheTTLMinutes.value, 20)
+        XCTAssertEqual(defaults.cacheExemptHosts.values, [])
+        XCTAssertEqual(defaults.snapshotThreshold.value, 15_000)
+
+        let explicitNulls = WebCacheConfiguration([
+            "web": [
+                "cache_enabled": JSONValue.null,
+                "cache_ttl_minutes": JSONValue.null,
+                "cache_exempt_hosts": JSONValue.null,
+            ],
+            "browser": ["snapshot_threshold": JSONValue.null],
+        ])
+        XCTAssertFalse(explicitNulls.cacheEnabled.isManaged)
+        XCTAssertFalse(explicitNulls.cacheTTLMinutes.isManaged)
+        XCTAssertFalse(explicitNulls.cacheExemptHosts.isManaged)
+        XCTAssertFalse(explicitNulls.snapshotThreshold.isManaged)
+    }
+
     func testTypedProjectionRetainsUnknownWebAndBrowserSiblingsAcrossLeafUpdate() {
         let response: JSONValue = [
             "web": [

@@ -49,7 +49,11 @@ enum WebCacheBooleanValue: Equatable, Sendable {
     case raw(JSONValue?)
 
     init(rawValue: JSONValue?) {
-        if let value = rawValue?.boolValue {
+        guard let rawValue else {
+            self = .managed(true)
+            return
+        }
+        if let value = rawValue.boolValue {
             self = .managed(value)
         } else {
             self = .raw(rawValue)
@@ -67,12 +71,17 @@ enum WebCacheBooleanValue: Equatable, Sendable {
 enum WebCacheTTLMinutesValue: Equatable, Sendable {
     static let minimum = 1.0
     static let maximum = 1_440.0
+    static let defaultValue = 20.0
 
     case managed(Double)
     case raw(JSONValue?)
 
     init(rawValue: JSONValue?) {
-        guard let value = rawValue?.doubleValue,
+        guard let rawValue else {
+            self = .managed(Self.defaultValue)
+            return
+        }
+        guard let value = rawValue.doubleValue,
               value.isFinite,
               (Self.minimum...Self.maximum).contains(value) else {
             self = .raw(rawValue)
@@ -109,13 +118,18 @@ enum BrowserSnapshotThresholdValue: Equatable, Sendable {
     /// ceiling; the wire guard below is only the largest integer JSONValue can
     /// carry exactly from Swift's Double-backed representation.
     static let minimum = 1_000
+    static let defaultValue = 15_000
     static let maximumExactlyRepresentableOnWire = 9_007_199_254_740_991
 
     case managed(Int)
     case raw(JSONValue?)
 
     init(rawValue: JSONValue?) {
-        guard let value = rawValue?.doubleValue,
+        guard let rawValue else {
+            self = .managed(Self.defaultValue)
+            return
+        }
+        guard let value = rawValue.doubleValue,
               value.isFinite,
               value.rounded(.towardZero) == value,
               value >= Double(Self.minimum),
@@ -202,7 +216,11 @@ enum WebCacheExemptHostsValue: Equatable, Sendable {
     case raw(JSONValue?)
 
     init(rawValue: JSONValue?) {
-        guard let values = rawValue?.arrayValue,
+        guard let rawValue else {
+            self = .managed([])
+            return
+        }
+        guard let values = rawValue.arrayValue,
               values.count <= WebCacheHostPattern.maximumEntries else {
             self = .raw(rawValue)
             return
