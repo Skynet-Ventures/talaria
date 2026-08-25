@@ -39,8 +39,6 @@ public struct BotSheetView: View {
 
     /// profiles.describe snapshot — skills/toolsets counts and the pin.
     @State private var snapshot: ProfileSnapshot?
-    @State private var modelChoices: [ModelChoice] = []
-    @State private var pinWarning = false
     @State private var duplicating = false
     @State private var duplicateFailed = false
     @State private var deletingProfile = false
@@ -167,7 +165,6 @@ public struct BotSheetView: View {
     /// its own: a gateway that cannot answer one of them just leaves that card
     /// on its themed empty state.
     private func hydrate() async {
-        async let choices = model.modelChoices(botID: botID)
         async let described = model.profileSnapshot(botID: botID)
         // session.list + session.context_breakdown live in AppModelLive+Sessions.
         await model.refreshSessions(botID: botID)
@@ -176,7 +173,6 @@ public struct BotSheetView: View {
         // all; a gateway without one answers {enabled:false} / -32601 and the
         // row simply never appears.
         await model.probePets(profile: botID)
-        modelChoices = await choices
         snapshot = await described
         hydrated = true
     }
@@ -365,21 +361,14 @@ public struct BotSheetView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Model, \(pinnedModel ?? CopyPack.noModels(theme.id))")
             .accessibilityHint("Opens the model picker")
-            .sheet(isPresented: $showModels) {
-                ProfileModelPicker(choices: modelChoices, selected: pinnedModel,
-                                   theme: theme) { choice in
-                    pinModel(choice)
-                    showModels = false
-                }
-            }
-            if pinWarning {
-                divider
-                Text(CopyPack.modelProviderUnknown(theme.id))
-                    .font(style.aSubFont)
-                    .foregroundStyle(theme.warn)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(EdgeInsets(top: 9, leading: 13, bottom: 9, trailing: 13))
-                    .accessibilityLabel(CopyPack.modelProviderUnknown(theme.id))
+            .sheet(isPresented: $showModels, onDismiss: {
+                // The shared model control switches the live Bot Chat and
+                // persists the profile default. Re-read profiles.describe so
+                // this sheet's fallback agrees even if the roster refresh is
+                // still in flight.
+                Task { snapshot = await model.profileSnapshot(botID: botID) }
+            }) {
+                ModelEffortSheet(model: model, botID: botID)
             }
             divider
             VStack(alignment: .leading, spacing: 7) {
@@ -585,50 +574,10 @@ public struct BotSheetView: View {
 
     // MARK: - Model pin
 
-    @ViewBuilder private var modelChips: some View {
-        if modelChoices.isEmpty {
-            Text(emptyLine(CopyPack.noModels(theme.id)))
-                .font(style.aSubFont)
-                .foregroundStyle(theme.faint)
-        } else {
-            DetailChipFlow(spacing: 7) {
-                ForEach(modelChoices) { choice in
-                    DetailChip(text: choice.model,
-                               selected: pinnedModel == choice.model,
-                               theme: theme) {
-                        pinModel(choice)
-                    }
-                }
-            }
-            if pinWarning {
-                Text(CopyPack.modelProviderUnknown(theme.id))
-                    .font(style.aSubFont)
-                    .foregroundStyle(theme.warn)
-            }
-        }
-    }
-
     /// The profile's pin, falling back to the gateway's current model so the
     /// row never renders with nothing selected.
     private var pinnedModel: String? {
         bot.pinnedModel ?? snapshot?.model.nilIfEmpty
-            ?? modelChoices.first(where: \.isCurrent)?.model
-    }
-
-    /// profiles.configure {model, provider} — both halves or the gateway
-    /// silently ignores the write (methods_profiles.py:751).
-    private func pinModel(_ choice: ModelChoice) {
-        let provider = choice.provider.isEmpty ? (snapshot?.provider ?? "") : choice.provider
-        guard !isLive || !provider.isEmpty else {
-            pinWarning = true
-            return
-        }
-        pinWarning = false
-        Task {
-            await model.saveProfileEditWithFeedback(
-                botID: botID,
-                edit: ProfileEdit(model: choice.model, provider: provider))
-        }
     }
 
     // MARK: - Memory (star map)
@@ -747,88 +696,6 @@ public struct BotSheetView: View {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
-}
-
-@MainActor
-private struct ProfileModelPicker: View {
-    let choices: [ModelChoice]
-    let selected: String?
-    let theme: ThemePack
-    let choose: (ModelChoice) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var query = ""
-
-    private var filtered: [ModelChoice] {
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return choices }
-        return choices.filter {
-            $0.model.lowercased().contains(needle)
-                || $0.provider.lowercased().contains(needle)
-                || $0.providerName.lowercased().contains(needle)
-        }
-    }
-
-    private var groups: [(String, [ModelChoice])] {
-        Dictionary(grouping: filtered) {
-            $0.providerName.nilIfEmpty ?? $0.provider.nilIfEmpty ?? "Other"
-        }
-        .map { ($0.key, $0.value.sorted { $0.model < $1.model }) }
-        .sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
-    }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                ForEach(groups, id: \.0) { group in
-                    Section(group.0) {
-                        ForEach(group.1) { choice in
-                            Button {
-                                choose(choice)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(choice.model)
-                                            .font(theme.body(13.5, weight: .semibold))
-                                            .foregroundStyle(theme.ink)
-                                        if !choice.provider.isEmpty {
-                                            Text(choice.provider)
-                                                .font(theme.mono(9.5))
-                                                .foregroundStyle(theme.faint)
-                                        }
-                                    }
-                                    Spacer()
-                                    if selected == choice.model {
-                                        Text("✓").foregroundStyle(theme.accent)
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(
-                                choice.providerName.isEmpty
-                                    ? choice.model
-                                    : "\(choice.model), \(choice.providerName)"
-                            )
-                            .accessibilityValue(selected == choice.model ? "Selected" : "")
-                            .accessibilityHint("Pins this model to the bot profile")
-                        }
-                    }
-                }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .searchable(text: $query, prompt: "Search models")
-            .navigationTitle("Model")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .presentationBackground(theme.bg)
-        .presentationDetents([.large])
-    }
 }
 
 // MARK: - Bot-sheet copy (the three voices)
