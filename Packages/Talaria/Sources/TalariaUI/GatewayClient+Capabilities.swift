@@ -44,6 +44,165 @@ public struct SkillEntry: Identifiable, Sendable, Equatable {
     }
 }
 
+/// The configured filter for one MCP server's discovered tools.
+///
+/// Hermes treats an `include` key as a whitelist even when it is explicitly
+/// empty. An `exclude` key is a denylist, so it deliberately stays dynamic as
+/// the server grows its surface. Keeping those states distinct is important:
+/// deriving an include list from a probe would freeze an exclude-mode catalog
+/// entry to whatever tools happened to be visible at that moment.
+public enum MCPToolFilterMode: String, Sendable, Equatable {
+    /// No include/exclude key: Hermes registers the whole server surface.
+    case all
+    /// `tools.include`, including the meaningful explicit empty whitelist.
+    case include
+    /// `tools.exclude`, whose entries may be exact names or glob patterns.
+    case exclude
+    /// A malformed or future wire shape which the mobile editor must not
+    /// rewrite, so a newer gateway's values survive untouched.
+    case unavailable
+}
+
+public struct MCPToolFilter: Sendable, Equatable {
+    public var mode: MCPToolFilterMode
+    /// Exact configured strings. In exclude mode these can be glob patterns;
+    /// their spelling and order are intentionally not normalized.
+    public var patterns: [String]
+
+    public init(mode: MCPToolFilterMode = .all, patterns: [String] = []) {
+        self.mode = mode
+        self.patterns = patterns
+    }
+
+    /// Decode the raw `tools` object emitted by `mcp.servers.list`.
+    ///
+    /// Do not compact-map arrays here: discarding a future/non-string value
+    /// would make a later save destructive. A malformed filter is exposed as
+    /// unavailable and remains read-only until a gateway that understands it
+    /// can edit it.
+    public init(_ value: JSONValue?) {
+        guard let value else {
+            self.init()
+            return
+        }
+        if case .null = value {
+            self.init()
+            return
+        }
+        // Early gateway summaries exposed a bare string array as an allow
+        // list. Keep reading that legacy shape; an explicit edit upgrades it
+        // to the current `tools.include` object without changing its meaning.
+        if let legacyInclude = Self.stringArray(value) {
+            self.init(mode: .include, patterns: legacyInclude)
+            return
+        }
+        guard let tools = value.objectValue else {
+            self.init(mode: .unavailable)
+            return
+        }
+        let include = tools["include"].flatMap(Self.filterPatterns)
+        let exclude = tools["exclude"].flatMap(Self.filterPatterns)
+        // A conflicting filter key may be ignored by current Hermes (include
+        // wins), but an invalid one can be meaningful to a newer gateway.
+        // Refuse to rewrite either shape rather than dropping it on save.
+        if (tools["include"] != nil && include == nil)
+            || (tools["exclude"] != nil && exclude == nil) {
+            self.init(mode: .unavailable)
+            return
+        }
+        if let include {
+            self.init(mode: .include, patterns: include)
+            return
+        }
+        if let exclude {
+            self.init(mode: .exclude, patterns: exclude)
+            return
+        }
+        self.init()
+    }
+
+    public var isEditable: Bool { mode != .unavailable }
+    public var isExplicit: Bool { mode == .include || mode == .exclude }
+
+    /// Apply this user-authored filter to a fresh raw `tools` object while
+    /// retaining every unrelated (including future) tools key. The caller
+    /// supplies the just-read config value rather than a summary row, because
+    /// the whole-map Hermes REST write must never discard unknown server data.
+    public func applying(to current: JSONValue?) throws -> JSONValue? {
+        guard isEditable else {
+            throw GatewayError(code: -8,
+                               message: "This gateway's tool filter has an unsupported shape.")
+        }
+        guard MCPToolFilter(current).isEditable else {
+            throw GatewayError(code: -8,
+                               message: "The server's tool filter changed to an unsupported shape.")
+        }
+
+        var tools: [String: JSONValue]
+        switch current {
+        case nil, .some(.null):
+            tools = [:]
+        case .some(.object(let value)):
+            tools = value
+        case .some(.array):
+            // Legacy bare allow-list; `MCPToolFilter(current)` above proved
+            // every item is a string, so this explicit user edit can safely
+            // migrate it to the current object shape.
+            tools = [:]
+        default:
+            throw GatewayError(code: -8,
+                               message: "The server's tool filter is not an object.")
+        }
+
+        switch mode {
+        case .all:
+            tools.removeValue(forKey: "include")
+            tools.removeValue(forKey: "exclude")
+        case .include:
+            // Keep [] — it is an explicit empty whitelist, not no filter.
+            tools["include"] = Self.encodedPatterns(
+                patterns, preserving: tools["include"])
+            tools.removeValue(forKey: "exclude")
+        case .exclude:
+            // Keep glob patterns verbatim and never infer an include list from
+            // a transient tools/list probe.
+            tools["exclude"] = Self.encodedPatterns(
+                patterns, preserving: tools["exclude"])
+            tools.removeValue(forKey: "include")
+        case .unavailable:
+            throw GatewayError(code: -8,
+                               message: "This gateway's tool filter has an unsupported shape.")
+        }
+        return tools.isEmpty ? nil : .object(tools)
+    }
+
+    private static func stringArray(_ value: JSONValue) -> [String]? {
+        guard let values = value.arrayValue else { return nil }
+        var names: [String] = []
+        names.reserveCapacity(values.count)
+        for value in values {
+            guard let name = value.stringValue else { return nil }
+            names.append(name)
+        }
+        return names
+    }
+
+    /// Hermes also accepts a legacy single-string include/exclude value. Keep
+    /// it readable and, when it remains one pattern, preserve that wire shape
+    /// across an unrelated edit for older hand-written configurations.
+    private static func filterPatterns(_ value: JSONValue) -> [String]? {
+        value.stringValue.map { [$0] } ?? stringArray(value)
+    }
+
+    private static func encodedPatterns(_ patterns: [String],
+                                        preserving current: JSONValue?) -> JSONValue {
+        if patterns.count == 1, current?.stringValue != nil {
+            return .string(patterns[0])
+        }
+        return .array(patterns.map(JSONValue.string))
+    }
+}
+
 /// One row of `mcp.servers.list` (mcp_rpc_helpers.summarize_server). `env`
 /// carries key names only — the gateway never ships secret values.
 public struct MCPServer: Identifiable, Sendable, Equatable {
@@ -60,8 +219,15 @@ public struct MCPServer: Identifiable, Sendable, Equatable {
     /// Only meaningful for `auth == "oauth"`; nil otherwise.
     public var oauthTokensPresent: Bool?
     public var enabled: Bool
-    /// Explicit tool allow-list from config.yaml, when the server pins one.
-    public var toolAllowList: [String]?
+    /// Lossless include/exclude filter state from config.yaml. `include: []`
+    /// is intentionally distinct from `.all`.
+    public var toolFilter: MCPToolFilter
+
+    /// Compatibility projection for existing callers. Exclude-mode filters
+    /// are deliberately not represented as an allow-list.
+    public var toolAllowList: [String]? {
+        toolFilter.mode == .include ? toolFilter.patterns : nil
+    }
 
     init(_ v: JSONValue) {
         name = v["name"]?.stringValue ?? ""
@@ -73,17 +239,20 @@ public struct MCPServer: Identifiable, Sendable, Equatable {
         auth = v["auth"]?.stringValue
         oauthTokensPresent = v["oauth_tokens_present"]?.boolValue
         enabled = v["enabled"]?.boolValue ?? true
-        toolAllowList = v["tools"]?.arrayValue?.compactMap(\.stringValue)
+        toolFilter = MCPToolFilter(v["tools"])
     }
 
     init(name: String, transport: String, url: String? = nil, command: String? = nil,
          args: [String] = [], envKeys: [String] = [], auth: String? = nil,
          oauthTokensPresent: Bool? = nil, enabled: Bool = true,
-         toolAllowList: [String]? = nil) {
+         toolFilter: MCPToolFilter? = nil, toolAllowList: [String]? = nil) {
         self.name = name; self.transport = transport; self.url = url
         self.command = command; self.args = args; self.envKeys = envKeys
         self.auth = auth; self.oauthTokensPresent = oauthTokensPresent
-        self.enabled = enabled; self.toolAllowList = toolAllowList
+        self.enabled = enabled
+        self.toolFilter = toolFilter
+            ?? toolAllowList.map { MCPToolFilter(mode: .include, patterns: $0) }
+            ?? MCPToolFilter()
     }
 
     /// The one-line "how does this connect" summary for a row.
@@ -351,13 +520,37 @@ extension GatewayClient {
         return result["servers"]?.arrayValue?.map(MCPCatalogEntry.init) ?? []
     }
 
-    /// Install a bundled catalog entry into this profile's config.yaml.
-    /// `_apply_mcp_preset` fills in the transport details from the preset.
+    /// Install a live catalog entry into this profile's config.yaml.
+    ///
+    /// Do not route catalog rows through `mcp.servers.add(preset:)`: that RPC
+    /// only knows its small static preset map. The catalog REST installer owns
+    /// `tools.default_excluded`, glob patterns, prior include/exclude state,
+    /// and the failed-probe fallback, so it is the only path that can preserve
+    /// the server-driven catalog's filter semantics.
     public func mcpAddFromCatalog(profile: String?, name: String) async throws {
-        var params = mcpParams(profile: profile).objectValue ?? [:]
-        params["name"] = .string(name)
-        params["preset"] = .string(name)
-        try await rpc("mcp.servers.add", .object(params), timeout: 120)
+        do {
+            let result = try await restJSON(
+                path: "api/mcp/catalog/install",
+                method: "POST",
+                query: mcpRESTQuery(profile: profile),
+                body: .object([
+                    "name": .string(name),
+                    "enable": .bool(true),
+                ]),
+                timeout: 120)
+            guard result["ok"]?.boolValue == true else {
+                throw GatewayError(code: -8,
+                                   message: "The gateway did not confirm the catalog install.")
+            }
+        } catch let error as GatewayError where error.code == 404 {
+            // Older Hermes gateways predate the REST catalog installer but
+            // retain the historic WebSocket preset path. Keep that narrow
+            // compatibility fallback; current dynamic entries never take it.
+            var params = mcpParams(profile: profile).objectValue ?? [:]
+            params["name"] = .string(name)
+            params["preset"] = .string(name)
+            try await rpc("mcp.servers.add", .object(params), timeout: 120)
+        }
     }
 
     /// Add a hand-configured server. Exactly one of `url` (http/sse) or
@@ -399,6 +592,60 @@ extension GatewayClient {
         var params = mcpParams(profile: profile).objectValue ?? [:]
         params["name"] = .string(name)
         return MCPProbeResult(try await rpc("mcp.servers.test", .object(params), timeout: 120))
+    }
+
+    /// Replace one server's include/exclude filter without losing the rest of
+    /// the raw MCP configuration. Hermes exposes this edit as a whole-map REST
+    /// replacement, so first read the full `mcp_servers` map (not the lossy
+    /// list summary), update only `tools`, then send that fresh map back.
+    ///
+    /// This intentionally does not use `tools.configure`: that RPC appends to
+    /// `tools.exclude` even for an include-mode server and therefore cannot
+    /// preserve an explicit `tools.include: []` whitelist.
+    public func setMCPToolFilter(profile: String?, name: String,
+                                 filter: MCPToolFilter) async throws {
+        guard filter.isEditable else {
+            throw GatewayError(code: -8,
+                               message: "This gateway's tool filter cannot be edited safely.")
+        }
+        let query = mcpRESTQuery(profile: profile)
+        let config = try await restJSON(path: "api/config", query: query, timeout: 120)
+        guard let rawServers = config["mcp_servers"]?.objectValue else {
+            throw GatewayError(code: -8,
+                               message: "The gateway did not return an MCP server configuration.")
+        }
+        guard let rawServer = rawServers[name]?.objectValue else {
+            throw GatewayError(code: -8,
+                               message: "MCP server '\(name)' no longer exists in this profile.")
+        }
+
+        // Refuse to overwrite a concurrently introduced future/malformed
+        // filter. The user can refresh against a gateway that understands it;
+        // silently coercing it would violate the lossless contract.
+        guard MCPToolFilter(rawServer["tools"]).isEditable else {
+            throw GatewayError(code: -8,
+                               message: "The gateway returned an unsupported tool filter shape.")
+        }
+
+        var servers = rawServers
+        var server = rawServer
+        if let tools = try filter.applying(to: rawServer["tools"]) {
+            server["tools"] = tools
+        } else {
+            server.removeValue(forKey: "tools")
+        }
+        servers[name] = .object(server)
+
+        let result = try await restJSON(
+            path: "api/mcp/servers",
+            method: "PUT",
+            query: query,
+            body: .object(["servers": .object(servers)]),
+            timeout: 120)
+        guard result["ok"]?.boolValue == true else {
+            throw GatewayError(code: -8,
+                               message: "The gateway did not confirm the MCP filter update.")
+        }
     }
 
     /// Begin the session-backed OAuth flow. The gateway drives the same
@@ -451,5 +698,10 @@ extension GatewayClient {
     private func mcpParams(profile: String?) -> JSONValue {
         guard let profile, !profile.isEmpty else { return .object([:]) }
         return .object(["profile": .string(profile)])
+    }
+
+    private func mcpRESTQuery(profile: String?) -> [URLQueryItem] {
+        guard let profile, !profile.isEmpty else { return [] }
+        return [URLQueryItem(name: "profile", value: profile)]
     }
 }
