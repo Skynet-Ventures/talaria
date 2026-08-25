@@ -311,13 +311,22 @@ public struct TerminalBackendSettingsSection: View {
 
     // MARK: Shared Docker identity
 
-    private var normalizedSharedContainerKey: String {
-        sharedContainerKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var requestedSharedContainerKey: String { sharedContainerKeyDraft }
+
+    private var sharedContainerKeyIsValid: Bool {
+        let value = requestedSharedContainerKey
+        if value.isEmpty { return true }
+        return value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+            && value.unicodeScalars.count <= 256
+            && !value.unicodeScalars.contains {
+                CharacterSet.controlCharacters.contains($0)
+            }
     }
 
     private var canSaveSharedContainerKey: Bool {
         guard let snapshot, isSnapshotCurrent(snapshot), busyAction == nil else { return false }
-        return normalizedSharedContainerKey != configuredSharedContainerKey
+        return sharedContainerKeyIsValid
+            && requestedSharedContainerKey != configuredSharedContainerKey
     }
 
     private var sharedDockerIdentitySection: some View {
@@ -354,7 +363,7 @@ public struct TerminalBackendSettingsSection: View {
                     .modifier(SettingsRowChrome(theme: theme, isLast: true))
                 }
 
-                if !normalizedSharedContainerKey.isEmpty {
+                if !requestedSharedContainerKey.isEmpty {
                     Text("Trust warning: every profile on this gateway that uses this exact key can reuse one persistent Docker container, workspace, and cache. Use it only for profiles you trust to share execution identity.")
                         .font(theme.mono(10))
                         .foregroundStyle(theme.warn)
@@ -366,10 +375,10 @@ public struct TerminalBackendSettingsSection: View {
                 SettingsGroup(theme: theme) {
                     SettingsActionRow(
                         theme: theme,
-                        title: normalizedSharedContainerKey.isEmpty
+                        title: requestedSharedContainerKey.isEmpty
                             ? "Restore profile isolation"
                             : "Save shared Docker identity",
-                        subtitle: normalizedSharedContainerKey.isEmpty
+                        subtitle: requestedSharedContainerKey.isEmpty
                             ? "Clears the shared key for future Docker containers. Existing containers are not deleted or relabeled."
                             : "Saves this key only for the selected profile.",
                         isBusy: busyAction == "shared-container-key",
@@ -451,7 +460,9 @@ public struct TerminalBackendSettingsSection: View {
                 client: client,
                 catalog: catalog
             )
-            configuredSharedContainerKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The raw key participates in Hermes' collision-resistant digest;
+            // trimming it would silently select a different container.
+            configuredSharedContainerKey = key
             sharedContainerKeyDraft = configuredSharedContainerKey
             setNotice(completionNotice, warning: false)
         } catch {
@@ -536,10 +547,11 @@ public struct TerminalBackendSettingsSection: View {
         guard busyAction == nil,
               let snapshot,
               operationIsCurrent(snapshot),
-              normalizedSharedContainerKey != configuredSharedContainerKey else {
+              sharedContainerKeyIsValid,
+              requestedSharedContainerKey != configuredSharedContainerKey else {
             return
         }
-        let key = normalizedSharedContainerKey
+        let key = requestedSharedContainerKey
         busyAction = "shared-container-key"
         defer {
             if operationIsCurrent(snapshot) { busyAction = nil }

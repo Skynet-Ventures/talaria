@@ -23,10 +23,11 @@ extension GatewayClient {
     /// unknown `terminal.*` configuration survives intact.
     func setTerminalDockerSharedContainerKey(_ value: String,
                                              profile: String? = nil) async throws {
-        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Hermes hashes the raw value into the collision-resistant identity.
+        // Trimming here would silently select a different persistent container.
         try await setGatewayConfigValue(
             path: ["terminal", "docker_shared_container_key"],
-            value: .string(normalized),
+            value: .string(value),
             profile: Self.terminalBackendProfile(profile)
         )
     }

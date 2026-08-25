@@ -121,9 +121,9 @@ final class TerminalBackendManagementTests: XCTestCase {
             try JSONDecoder().decode(JSONValue.self, from: body),
             [
                 "profile": "research",
-                "config": ["terminal": ["docker_shared_container_key": "trusted-team"]],
+                "config": ["terminal": ["docker_shared_container_key": " trusted-team "]],
             ],
-            "The guarded config route receives only the one terminal leaf, preserving all unknown siblings."
+            "The guarded config route receives only the one raw terminal leaf; the key's exact bytes participate in Hermes' identity digest."
         )
     }
 
@@ -159,7 +159,7 @@ final class TerminalBackendManagementTests: XCTestCase {
             }
         )
 
-        try await client.setTerminalDockerSharedContainerKey("   ", profile: "research")
+        try await client.setTerminalDockerSharedContainerKey("", profile: "research")
         let recorded = await recorder.recordedRequest()
         let request = try XCTUnwrap(recorded)
         let body = try XCTUnwrap(request.httpBody)
