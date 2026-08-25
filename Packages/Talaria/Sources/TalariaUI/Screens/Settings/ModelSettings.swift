@@ -331,10 +331,7 @@ public struct ModelSettingsSection: View {
                 }
                 Spacer(minLength: 6)
                 if let price, !price.isEmpty {
-                    Text(price.compact)
-                        .font(theme.mono(9))
-                        .foregroundStyle(price.free ? theme.ok : theme.faint)
-                        .monospacedDigit()
+                    ModelPricePresentation(price: price, theme: theme, copy: copy)
                 }
                 if locked {
                     Text(copy.modelsProBadge(theme.id))

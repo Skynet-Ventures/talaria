@@ -58,7 +58,7 @@ public struct ModelPriceTag: Sendable, Hashable {
         output = v["output"]?.stringValue ?? ""
         cache = v["cache"]?.stringValue
         free = v["free"]?.boolValue ?? false
-        discountPercent = v["discount_percent"]?.intValue
+        discountPercent = Self.decodeDiscountPercent(v["discount_percent"])
         wasInput = v["was_input"]?.stringValue
         wasOutput = v["was_output"]?.stringValue
     }
@@ -73,6 +73,24 @@ public struct ModelPriceTag: Sendable, Hashable {
     /// "$3.00 / $15.00" — the compact in/out pair the desktop row shows.
     public var compact: String {
         free ? "FREE" : "\(input.isEmpty ? "?" : input) / \(output.isEmpty ? "?" : output)"
+    }
+
+    /// A sale badge is only presentation-safe when Hermes supplied an exact,
+    /// bounded percentage. Keep this guard at the view-model boundary as well
+    /// as decode time: callers can construct or mutate this public value in
+    /// tests and previews without accidentally rendering an invented discount.
+    public var boundedDiscountPercent: Int? {
+        guard let discountPercent, (1...100).contains(discountPercent) else { return nil }
+        return discountPercent
+    }
+
+    private static func decodeDiscountPercent(_ value: JSONValue?) -> Int? {
+        guard let value = value?.doubleValue,
+              value.isFinite,
+              value >= 1,
+              value <= 100,
+              let percent = Int(exactly: value) else { return nil }
+        return percent
     }
 }
 
@@ -423,7 +441,13 @@ public enum ModelLabels {
 
     /// Extra search tokens; never changes a wire id. Kept in sync with
     /// model-search-text.ts / hermes_cli/model_search.py.
-    private static let searchAliases: [String: [String]] = ["k3": ["kimi-k3", "kimi"]]
+    private static let searchAliases: [String: [String]] = [
+        "k3": ["kimi-k3", "kimi"],
+        // OpenCode Zen's public Ox Alpha model has an opaque wire id. These
+        // tokens enrich only the local search haystack; display and routing
+        // continue to use the gateway-provided id.
+        "x-preview-f-free": ["ox-alpha", "ox"],
+    ]
 
     /// Trailing id variants rendered as a grayed tag beside the name, so
     /// `…-4.8` and `…-4.8-fast` don't collapse to the same display name.

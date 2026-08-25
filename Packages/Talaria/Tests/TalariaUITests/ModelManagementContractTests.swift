@@ -21,6 +21,60 @@ private actor ModelRequestRecorder {
 }
 
 final class ModelManagementContractTests: XCTestCase {
+    func testModelPriceDiscountAdmitsOnlyFiniteBoundedIntegerPercents() {
+        func price(discountPercent: JSONValue?) -> ModelPriceTag {
+            var value: [String: JSONValue] = [
+                "input": .string("$1.00"),
+                "output": .string("$2.00"),
+            ]
+            if let discountPercent { value["discount_percent"] = discountPercent }
+            return ModelPriceTag(.object(value))
+        }
+
+        XCTAssertEqual(price(discountPercent: .number(1)).boundedDiscountPercent, 1)
+        XCTAssertEqual(price(discountPercent: .number(20)).boundedDiscountPercent, 20)
+        XCTAssertEqual(price(discountPercent: .number(100)).boundedDiscountPercent, 100)
+
+        let invalid: [JSONValue?] = [
+            nil,
+            .null,
+            .bool(true),
+            .string("20"),
+            .number(-1),
+            .number(0),
+            .number(100.5),
+            .number(101),
+            .number(Double.nan),
+            .number(Double.infinity),
+            .number(-Double.infinity),
+        ]
+        for value in invalid {
+            let decoded = price(discountPercent: value)
+            XCTAssertNil(decoded.discountPercent, "must reject \(String(describing: value))")
+            XCTAssertNil(decoded.boundedDiscountPercent,
+                         "must not render \(String(describing: value))")
+        }
+
+        // Presentation has its own fence too, so previews or future callers
+        // cannot bypass the strict decoder by assigning a public stored value.
+        var bypassAttempt = price(discountPercent: .number(20))
+        bypassAttempt.discountPercent = 101
+        XCTAssertNil(bypassAttempt.boundedDiscountPercent)
+    }
+
+    func testCurrentHermesOxAlphaAliasIsSearchOnly() {
+        let wireID = "x-preview-f-free"
+        XCTAssertEqual(ModelLabels.searchText(wireID), "x-preview-f-free ox-alpha ox")
+        XCTAssertEqual(ModelLabels.searchText("X-PREVIEW-F-FREE"),
+                       "X-PREVIEW-F-FREE ox-alpha ox")
+
+        // The opaque wire id remains the catalog identity and display source;
+        // adding the aliases must not create a second routable model entry.
+        XCTAssertEqual(ModelLabels.baseID(wireID), wireID)
+        XCTAssertFalse(ModelLabels.displayName(wireID).localizedCaseInsensitiveContains("ox"))
+        XCTAssertEqual(ModelLabels.searchText("ox-alpha-free"), "ox-alpha-free")
+    }
+
     func testAuxiliaryInventoryIsBoundedAndRejectsMalformedWritableIdentities() {
         var tasks: [JSONValue] = [
             .object(["task": "vision", "provider": "auto", "model": "",
