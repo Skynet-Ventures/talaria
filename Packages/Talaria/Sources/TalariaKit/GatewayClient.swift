@@ -708,6 +708,7 @@ public actor GatewayClient {
     private struct PendingReplayAdoption: Sendable {
         var publication: GatewayReplayPublication
         var targetWatermarks: [String: UInt64]
+        var retiredSessionIDs: Set<String>
         var transportEpoch: UInt64
     }
     /// Replay identity and per-session cursors survive transport replacement
@@ -823,7 +824,7 @@ public actor GatewayClient {
 
     func installPreparedReplayForTesting(
         events: [GatewayEvent], certainty: GatewayReplayCertainty,
-        epoch: String = "test-epoch"
+        epoch: String = "test-epoch", retiredSessionIDs: Set<String> = []
     ) {
         replayEpoch = epoch
         var targets: [String: UInt64] = [:]
@@ -836,6 +837,7 @@ public actor GatewayClient {
                 events: events, certainty: certainty, sourceEpoch: epoch,
                 requestedSessionCount: Set(events.map(\.sessionID)).count),
             targetWatermarks: targets,
+            retiredSessionIDs: retiredSessionIDs,
             transportEpoch: transportEpoch)
     }
 
@@ -884,7 +886,7 @@ public actor GatewayClient {
         // split prepare/apply/commit contract so replay is applied before its
         // post-reconnect snapshots. Other owners still receive replay through
         // their existing handler fan-out.
-        return commitPreparedReplay(
+        return await commitPreparedReplay(
             publication.token, excludingEpochHandler: nil,
             dispatchReplayToHandlers: true)
     }
@@ -926,6 +928,7 @@ public actor GatewayClient {
             requestedSessionCount: 0, eventAuthorityEpoch: eventAuthorityEpoch)
         pendingReplayAdoption = PendingReplayAdoption(
             publication: publication, targetWatermarks: [:],
+            retiredSessionIDs: [],
             transportEpoch: transportEpoch)
         return publication
     }
@@ -938,11 +941,16 @@ public actor GatewayClient {
     public func commitPreparedReplay(
         _ token: UUID, excludingEpochHandler: UUID?,
         dispatchReplayToHandlers: Bool = true
-    ) -> Bool {
+    ) async -> Bool {
         guard let pending = pendingReplayAdoption,
               pending.publication.token == token,
               pending.transportEpoch == transportEpoch,
               adoptedEventAuthorityEpoch == eventAuthorityEpoch else { return false }
+        if let transport, await transport.replayBufferOverflowed {
+            pendingReplayAdoption = nil
+            await transport.close()
+            return false
+        }
 
         if dispatchReplayToHandlers {
             for event in pending.publication.events {
@@ -951,6 +959,10 @@ public actor GatewayClient {
                     handler(event, eventAuthorityEpoch)
                 }
             }
+        }
+        for sessionID in pending.retiredSessionIDs {
+            replayWatermarks[sessionID] = nil
+            replaySessionOrder.removeAll { $0 == sessionID }
         }
         for (sessionID, sequence) in pending.targetWatermarks {
             noteReplayWatermark(sequence, sessionID: sessionID)
@@ -1132,6 +1144,7 @@ public actor GatewayClient {
             replaySessionOrder.removeAll()
             installPendingReplay([], issues: issues, epoch: nil,
                                  requested: plans.count, targets: [:],
+                                 retired: Set(plans.map(\.0)),
                                  installedEpoch: installedEpoch)
             return
         case .restarted(let sourceEpoch):
@@ -1141,6 +1154,7 @@ public actor GatewayClient {
             replaySessionOrder.removeAll()
             installPendingReplay([], issues: issues, epoch: sourceEpoch,
                                  requested: plans.count, targets: [:],
+                                 retired: Set(plans.map(\.0)),
                                  installedEpoch: installedEpoch)
             return
         case .replay(let epoch):
@@ -1181,22 +1195,31 @@ public actor GatewayClient {
 
         var events: [GatewayEvent] = []
         var targets: [String: UInt64] = [:]
+        var retired: Set<String> = []
         for (sessionID, lastSeen) in plans {
             switch answers[sessionID] ?? .failed {
             case .unsupported:
                 issues.insert(.unsupportedGateway)
+                retired.insert(sessionID)
             case .failed:
                 issues.insert(.requestFailed)
+                retired.insert(sessionID)
             case .value(let value):
                 guard let page = GatewayReplayCodec.decode(
                     value, sessionID: sessionID, lastSeen: lastSeen,
                     expectedEpoch: sourceEpoch) else {
                     issues.insert(.malformedResponse)
+                    retired.insert(sessionID)
                     continue
                 }
-                if let issue = page.issue { issues.insert(issue) }
+                if let issue = page.issue {
+                    issues.insert(issue)
+                    retired.insert(sessionID)
+                    continue
+                }
                 if events.count + page.events.count > GatewayReplayCodec.maximumTotalEvents {
                     issues.insert(.bounded)
+                    retired.insert(sessionID)
                     continue
                 }
                 events.append(contentsOf: page.events)
@@ -1213,15 +1236,23 @@ public actor GatewayClient {
             replaySessionOrder.removeAll()
             events.removeAll()
             targets.removeAll()
+            retired = Set(plans.map(\.0))
+        }
+        if await transport.replayBufferOverflowed {
+            pendingReplayAdoption = nil
+            await transport.close()
+            return
         }
         installPendingReplay(events, issues: issues, epoch: sourceEpoch,
                              requested: plans.count, targets: targets,
+                             retired: retired,
                              installedEpoch: installedEpoch)
     }
 
     private func installPendingReplay(
         _ events: [GatewayEvent], issues: Set<GatewayReplayIssue>, epoch: String?,
-        requested: Int, targets: [String: UInt64], installedEpoch: UInt64
+        requested: Int, targets: [String: UInt64],
+        retired: Set<String> = [], installedEpoch: UInt64
     ) {
         let certainty: GatewayReplayCertainty = issues.isEmpty ? .complete : .uncertain(issues)
         pendingReplayAdoption = PendingReplayAdoption(
@@ -1229,6 +1260,7 @@ public actor GatewayClient {
                 events: events, certainty: certainty, sourceEpoch: epoch,
                 requestedSessionCount: requested),
             targetWatermarks: targets,
+            retiredSessionIDs: retired,
             transportEpoch: installedEpoch)
     }
 
@@ -1242,6 +1274,10 @@ public actor GatewayClient {
                 // authority merely because it resumes after that transition.
                 guard installedEpoch == self.transportEpoch,
                       self.transport === transport else { return }
+                if event.type == GatewayTransport.replayOverflowEventType {
+                    self.invalidateReplayTransport()
+                    return
+                }
                 guard self.admitLiveEvent(event) else { continue }
                 let deliveryEpoch = self.eventAuthorityEpoch
                 for handler in self.handlerSnapshot() { handler(event) }

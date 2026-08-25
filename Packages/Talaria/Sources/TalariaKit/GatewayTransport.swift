@@ -43,6 +43,7 @@ public enum TransportState: Sendable, Equatable {
 /// Low-level JSON-RPC WebSocket transport. One instance per live socket;
 /// `GatewayClient` owns reconnect policy and re-creates transports.
 public actor GatewayTransport {
+    static let replayOverflowEventType = "talaria.internal.replay-buffer-overflow"
     public struct SequencedResponse: Sendable {
         public var value: JSONValue
         public var inboundSequence: UInt64
@@ -60,6 +61,7 @@ public actor GatewayTransport {
     /// Process identity advertised by gateway.ready. Sequence numbers may be
     /// compared only while this exact value is unchanged.
     private(set) public var replayEpoch: String?
+    private(set) public var replayBufferOverflowed = false
     private(set) public var state: TransportState = .idle
 
     /// All server events, in arrival order. Single consumer.
@@ -223,7 +225,7 @@ public actor GatewayTransport {
                                      payload: params["payload"],
                                      sequence: Self.admittedSequence(params["seq"]),
                                      inboundSequence: frameSequence)
-            eventsCont.yield(event)
+            enqueueEvent(event)
             return
         }
 
@@ -258,6 +260,24 @@ public actor GatewayTransport {
     }
 
     private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    private func enqueueEvent(_ event: GatewayEvent) {
+        if replayBufferOverflowed {
+            // Once bounded parking overflows, keep an invalidation marker in
+            // the newest buffer slot instead of publishing a partial,
+            // previously-untracked tail as complete.
+            eventsCont.yield(GatewayEvent(
+                type: Self.replayOverflowEventType, sessionID: "", payload: nil))
+            return
+        }
+        if case .dropped = eventsCont.yield(event) {
+            replayBufferOverflowed = true
+            eventsCont.yield(GatewayEvent(
+                type: Self.replayOverflowEventType, sessionID: "", payload: nil))
+        }
+    }
+
+    func enqueueEventForTesting(_ event: GatewayEvent) { enqueueEvent(event) }
 
     static func admittedSequence(_ value: JSONValue?) -> UInt64? {
         guard let number = value?.doubleValue, number.isFinite, number >= 1,

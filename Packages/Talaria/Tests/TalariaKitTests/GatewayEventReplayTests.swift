@@ -213,5 +213,46 @@ final class GatewayEventReplayTests: XCTestCase {
         XCTAssertNil(watermarks["s1"])
         XCTAssertEqual(watermarks["s65"], 1)
     }
+
+    func testUncertainSessionRetiresOldCursorInsteadOfReconnectLoop() async throws {
+        let client = GatewayClient(
+            baseURL: URL(string: "https://replay-failed-page.example")!,
+            credential: .sessionToken("test"))
+        await client.setForegroundReadinessForTesting(true)
+        await client.installPreparedReplayForTesting(events: [GatewayEvent(
+            type: "message.delta", sessionID: "s1", payload: nil, sequence: 5)],
+            certainty: .complete)
+        var prepared = await client.prepareCurrentTransportForEvents()
+        var publication = try XCTUnwrap(prepared)
+        var committed = await client.commitPreparedReplay(
+            publication.token, excludingEpochHandler: nil)
+        XCTAssertTrue(committed)
+
+        await client.installPreparedReplayForTesting(
+            events: [], certainty: .uncertain([.requestFailed]),
+            retiredSessionIDs: ["s1"])
+        prepared = await client.prepareCurrentTransportForEvents()
+        publication = try XCTUnwrap(prepared)
+        committed = await client.commitPreparedReplay(
+            publication.token, excludingEpochHandler: nil)
+        let watermarks = await client.replayWatermarksForTesting()
+        let admitted = await client.admitLiveEventForTesting(GatewayEvent(
+            type: "message.delta", sessionID: "s1", payload: nil, sequence: 100))
+        XCTAssertTrue(committed)
+        XCTAssertTrue(watermarks.isEmpty)
+        XCTAssertTrue(admitted)
+    }
+
+    func testParkingOverflowIsGloballyObservable() async {
+        let transport = GatewayTransport(
+            url: URL(string: "wss://replay-overflow.example/ws")!)
+        for index in 1...(GatewayReplayCodec.maximumTotalEvents + 1) {
+            await transport.enqueueEventForTesting(GatewayEvent(
+                type: "message.delta", sessionID: "new-session",
+                payload: nil, sequence: UInt64(index)))
+        }
+        let overflowed = await transport.replayBufferOverflowed
+        XCTAssertTrue(overflowed)
+    }
 }
 #endif

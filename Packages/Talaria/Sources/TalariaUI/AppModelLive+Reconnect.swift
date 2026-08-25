@@ -658,7 +658,11 @@ extension AppModel {
         guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
         supervisor.reauthGateway = nil
         let adopted = await adoptReconnectedLink(authority: authority, parked: parked)
-        return adopted ? .success : .stale
+        if adopted { return .success }
+        // The source can remain authoritative while the replacement socket
+        // dies during replay preparation. That is another link failure, not a
+        // stale ownership transition; keep the supervised backoff alive.
+        return await reconnectAuthorityIsCurrent(authority) ? .retryable : .stale
     }
 
     /// Post-dial housekeeping, mirroring AppModelLive's own reattach (that one
