@@ -1,0 +1,7 @@
+status	path	classification	disposition
+M	apps/desktop/electron/connection-config.test.ts	desktop-only	Electron managed-SSH profile-alias routing test; Talaria routes exact gateway/profile identities without Electron.
+M	apps/desktop/electron/connection-config.ts	desktop-only	Electron rewrites remote Desktop profile aliases; Talaria GatewayBotRoute already carries the raw owning profile to its source-qualified client.
+M	apps/desktop/src/api/sessions.ts	desktop-only	Desktop stamps ambient profile onto REST helpers; Talaria session RPCs resolve the owning GatewayBotRoute and do not use hermesApi.
+M	apps/desktop/src/hermes.test.ts	desktop-only	Desktop REST routing coverage only; no mobile implementation follows.
+M	tests/test_tui_gateway_server.py	tests-metadata-merge	Upstream server regression proving live model-switch prompt rebuild binds the session cwd.
+M	tui_gateway/server.py	ios-portable	Server-owned correctness fix consumed automatically by Talaria; no RPC shape, event, or client state changes.

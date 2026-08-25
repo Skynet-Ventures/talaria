@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "targetCommit": "1bbb6e5bce56e721ab685af4cd87df21bbff4d35",
+  "auditedAt": "2026-08-25",
+  "talariaAuditBase": "3b38b7bf455f1fd9abf5796d319e43bfefd17966",
+  "range": {
+    "commitCount": 130,
+    "changedPathCount": 324,
+    "additions": 17430,
+    "deletions": 4080,
+    "commitInventory": "parity/hermes-delta-057dcdf-1bbb6e5-commits.tsv",
+    "commitInventorySha256": "c85978f610c693a55ea06fde5d1f29afd94269e324b0e1aebf6bf5de35ce7f9a",
+    "pathInventory": "parity/hermes-delta-057dcdf-1bbb6e5-paths.tsv",
+    "pathInventorySha256": "e5ba1c706826ebd40a8d140e4ef20ccc5cdbe605d7f34028106b279b79c339d4"
+  },
+  "classifications": {
+    "commits": {
+      "ios-portable": 73,
+      "desktop-only": 19,
+      "tests-metadata-merge": 38
+    },
+    "paths": {
+      "ios-portable": 133,
+      "desktop-only": 94,
+      "tests-metadata-merge": 97
+    }
+  },
+  "authorityFiles": [
+    {
+      "path": "apps/desktop/src/plugins/hermes-bots/plugin.js",
+      "baseSha256": "a26cebc5e3b76096f288f0ad2a30f66550894b2c33bcc2a2fca0c5d12b5094b1",
+      "targetSha256": "a26cebc5e3b76096f288f0ad2a30f66550894b2c33bcc2a2fca0c5d12b5094b1",
+      "changed": false
+    },
+    {
+      "path": "website/docs/user-guide/bot-mode.md",
+      "baseSha256": "43136a19bd8ec6766083f6fec49b924d0b42a1c6e9736ebd865cae97017c0915",
+      "targetSha256": "43136a19bd8ec6766083f6fec49b924d0b42a1c6e9736ebd865cae97017c0915",
+      "changed": false
+    },
+    {
+      "path": "website/docs/user-guide/desktop.md",
+      "baseSha256": "889b20baf56abe60ee7dd79e019b2314854a9bb737939e81b51a779d41e1eb3a",
+      "targetSha256": "a32666f9cda18afa0001924d8013ffde98a71d002ca0f9cc23b5a8d9a97ece5a",
+      "changed": true
+    },
+    {
+      "path": "website/docs/user-guide/multi-connection-desktop.md",
+      "baseSha256": "ef5cb45bee0ace82bcad61f8a94db00ea6ec95bc56218b434ed7e28bd09ec422",
+      "targetSha256": "ef5cb45bee0ace82bcad61f8a94db00ea6ec95bc56218b434ed7e28bd09ec422",
+      "changed": false
+    },
+    {
+      "path": "apps/desktop/DESIGN.md",
+      "baseSha256": "5967f00ea0b44928c6f88736658e9d3d2bf6ad9fdd790cb3fa635910c5d1c27d",
+      "targetSha256": "5967f00ea0b44928c6f88736658e9d3d2bf6ad9fdd790cb3fa635910c5d1c27d",
+      "changed": false
+    }
+  ],
+  "portableDeltas": [
+    {
+      "id": "event-replay-wire",
+      "status": "open-client-implementation",
+      "requiredWork": "Decode per-session event seq values and replay_epoch, retain source-qualified watermarks, call session.events.since after reconnect, hold racing live frames, reject duplicate/non-increasing events, reset on epoch change, and fail closed to authoritative transcript/history refresh when truncated is true."
+    },
+    {
+      "id": "pre-compress-checkpoint-v2",
+      "status": "open-mobile-management",
+      "requiredWork": "Expose compression.checkpoint_required only with checkpoint-capable memory-provider evidence, preserve unknown configuration, surface BLOCKED_MISSING_PREREQUISITE without converting it to a generic disconnect, and cover Hermes, native, micro-compaction, and Codex app-server exclusions."
+    },
+    {
+      "id": "terminal-environment-registry",
+      "status": "open-mobile-management",
+      "requiredWork": "Replace any static terminal-backend assumption with the gateway's dynamic backend rows and guarded selection API, and represent profile-scoped/shared Docker container identity without inventing a client-local runtime."
+    },
+    {
+      "id": "mcp-exclude-mode",
+      "status": "open-mobile-management",
+      "requiredWork": "Retain the server-driven expanded catalog, then add lossless tools.include/tools.exclude administration that preserves glob exclusions, explicit empty include lists, reinstall filters, and probe-failure state."
+    },
+    {
+      "id": "web-browser-cache-controls",
+      "status": "open-mobile-management",
+      "requiredWork": "Add bounded validated controls for web.cache_enabled, web.cache_ttl_minutes, web.cache_exempt_hosts, and browser.snapshot_threshold; keep cached/truncate-and-store results compatible with the existing generic tool and artifact renderers."
+    }
+  ],
+  "portableNoClientChange": [
+    "OpenRouter :nitro/:floor model variants are validated by Hermes and remain gateway-catalog driven.",
+    "Signal/Telegram/Teams delivery recovery, computer-use MEDIA repair, fallback transitions, MCP/LSP/process recovery, OpenViking identity fixes, and approval outcome objects are server-owned and retain existing Talaria event/tool envelopes.",
+    "Browser snapshot truncate-and-store, web-result caching, removed FLUX promo tools, expanded MCP presets, and removed auxiliary.web_extract are server catalog/runtime changes; Talaria must not hard-code the removed surfaces.",
+    "Desktop HUD/windowing, keyboard, context-menu, zoom, vibe-heart, embedded-browser-tab, and renderer scrolling changes are true local Desktop behaviors."
+  ],
+  "pinDecision": {
+    "canMoveCanonicalPin": false,
+    "reason": "The range introduces a material client wire contract and four portable management deltas that are not implemented or certified in Talaria at this audit base.",
+    "nextPin": "057dcdf236f8a6a26721c10fcc6ccb72726e272a"
+  }
+}

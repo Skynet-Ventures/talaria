@@ -1,0 +1,325 @@
+status	path	classification	disposition
+M	agent/agent_init.py	ios-portable	OPEN checkpoint-management-or-server-runtime
+M	agent/agent_runtime_helpers.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/auxiliary_client.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/background_review.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/chat_completion_helpers.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/codex_runtime.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/coding_context.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/conversation_compression.py	ios-portable	OPEN checkpoint-management-or-server-runtime
+M	agent/curator.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/deadline.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/gemini_native_adapter.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/lsp/client.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/memory_manager.py	ios-portable	OPEN checkpoint-management-or-server-runtime
+M	agent/memory_provider.py	ios-portable	OPEN checkpoint-management-or-server-runtime
+M	agent/native_compaction.py	ios-portable	OPEN checkpoint-management-or-server-runtime
+M	agent/process_bootstrap.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/prompt_builder.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/skill_utils.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/system_prompt.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+A	agent/terminal_env_provider.py	ios-portable	OPEN terminal-environment-management-or-server-runtime
+A	agent/terminal_env_registry.py	ios-portable	OPEN terminal-environment-management-or-server-runtime
+M	agent/tool_executor.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/tool_guardrails.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	agent/turn_finalizer.py	ios-portable	OPEN checkpoint-management-or-server-runtime
+A	apps/desktop/e2e/zoom-preservation.spec.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/backend-claim.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/backend-claim.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/backend-ready.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/backend-ready.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/hud-hyprland.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/hud-hyprland.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+D	apps/desktop/electron/hud-input-policy.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+D	apps/desktop/electron/hud-input-policy.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/hud-ipc.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/hud-overlay.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/hud-overlay.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/hud-windowing.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/electron/hud-windowing.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/hyprland.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/main.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/preload.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/renderer-bundle.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/window-below.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/window-below.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/zoom.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/electron/zoom.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/artifacts/artifact-utils.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/app/chat/composer/focus-chord.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/app/chat/composer/focus-chord.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/composer/index.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/pane-mirror.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/preview-tile.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/preview-tile.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/right-rail/preview-browser-bar.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/right-rail/preview-browser-bar.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/right-rail/preview-file.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/chat/right-rail/preview-pane.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/context-menu/app-context-menu.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/context-menu/app-context-menu.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/context-menu/store.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/context-menu/target.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/gateway/hooks/use-gateway-boot.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/hooks/use-keybinds.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/hud/composer-drag.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/app/hud/glass.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/hud/glass.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/hud/hud-shell.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/hud/resize-handle.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/hud/resize-handle.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/right-sidebar/files/use-project-tree.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/right-sidebar/files/use-project-tree.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/right-sidebar/index.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/right-sidebar/index.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/right-sidebar/terminal/selection.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/right-sidebar/terminal/use-terminal-session.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/session/hooks/use-message-stream/clarify-hydration.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/session/hooks/use-message-stream/gateway-event/input-requests.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/session/hooks/use-session-actions.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/session/hooks/use-session-actions/index.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/app/session/hooks/use-session-actions/restore-pending-clarify.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/app/session/hooks/use-session-actions/restore-pending-clarify.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/session/workspace-session-target.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/session/workspace-session-target.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/settings/appearance-settings.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/app/settings/model-settings.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/assistant-ui/clarify-tool.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/assistant-ui/clarify-tool.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/assistant-ui/thread/assistant-message.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/assistant-ui/thread/message-parts.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/assistant-ui/thread/streaming.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/chat/diff-lines.test.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/components/chat/vibe-hearts.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/chat/vibe-hearts.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/pane-shell/tree/renderer/track-model.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/pane-shell/tree/renderer/tree-group.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/components/ui/dropdown-menu.tsx	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/global.d.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/i18n/ar.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/i18n/en.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/i18n/ja.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/i18n/types.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/i18n/zh-hant.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/i18n/zh.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/lib/chat-messages.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/lib/chat-messages/index.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/lib/chat-messages/tool-parts.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/lib/json-rpc-gateway-recovery.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/lib/keybinds/actions.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/lib/keybinds/chords.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/store/clarify.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/store/preview-open-browser.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/store/preview.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/store/preview.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/store/vibe-hearts-enabled.test.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/desktop/src/store/vibe-hearts-enabled.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	apps/desktop/src/types/hermes.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+A	apps/shared/src/json-rpc-gateway-replay.test.ts	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	apps/shared/src/json-rpc-gateway.ts	ios-portable	OPEN event-replay-wire
+M	cli-config.yaml.example	ios-portable	OPEN portable-config-delta
+M	cli.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+A	contributors/emails/evanlee99@qq.com	tests-metadata-merge	supporting test/documentation/metadata
+A	contributors/emails/guilherme@artiles.com.br	tests-metadata-merge	supporting test/documentation/metadata
+A	contributors/emails/joshuadavidfairbank@gmail.com	tests-metadata-merge	supporting test/documentation/metadata
+A	contributors/emails/macd@google.com	tests-metadata-merge	supporting test/documentation/metadata
+A	contributors/emails/nathanielcrush51@gmail.com	tests-metadata-merge	supporting test/documentation/metadata
+A	contributors/emails/vignesh@openai.com	tests-metadata-merge	supporting test/documentation/metadata
+M	cron/scheduler.py	ios-portable	server-owned messaging delivery reliability; no new iOS wire
+A	gateway/media_repair.py	ios-portable	server-owned gateway/media reliability; generic client contract
+M	gateway/platforms/base.py	ios-portable	server-owned messaging delivery reliability; no new iOS wire
+M	gateway/platforms/signal.py	ios-portable	server-owned messaging delivery reliability; no new iOS wire
+M	gateway/run.py	ios-portable	server-owned gateway/media reliability; generic client contract
+M	gateway/slash_commands.py	ios-portable	server-owned gateway/media reliability; generic client contract
+M	hermes_cli/_subprocess_compat.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/auth.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/config.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/config_defaults.py	ios-portable	OPEN portable-config-delta
+M	hermes_cli/config_migrations.py	ios-portable	OPEN portable-config-delta
+M	hermes_cli/doctor.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/main.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/mcp_catalog.py	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+M	hermes_cli/mcp_config.py	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+M	hermes_cli/models.py	ios-portable	server-driven model validation/catalog; test :nitro/:floor variants
+M	hermes_cli/plugins.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/profiles.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/setup.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/skills_config.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/status.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/tools_config.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_cli/web_routers/tools.py	ios-portable	OPEN terminal-environment-management-or-server-runtime
+M	hermes_cli/web_server.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_constants.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_state.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	hermes_state_common.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+A	optional-mcps/algolia/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/alltrails/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/amplitude/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/attio/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/aws-knowledge/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/betterstack/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/buildkite/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/calendly/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/canva/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/circleci/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/clickup/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/close/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/cloudflare/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/cloudinary/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/context7/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/craft/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/deepwiki/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/dropbox/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/fireflies/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/gamma/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/gitlab/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/globalping/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/indeed/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/kiwi/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/klaviyo/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/microsoft-learn/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/miro/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/mixpanel/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/monday/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/motherduck/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/neon/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/plaid/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/postman/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/prisma-postgres/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/railway/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/robinhood/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/semgrep/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/strava/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/todoist/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/trivago/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/twelve-data/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/twilio-docs/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/wolfram/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+A	optional-mcps/wordpress-com/manifest.yaml	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+M	plugins/memory/openviking/README.md	tests-metadata-merge	supporting test/documentation/metadata
+M	plugins/memory/openviking/__init__.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	plugins/platforms/teams/adapter.py	ios-portable	server-owned messaging delivery reliability; no new iOS wire
+M	plugins/platforms/telegram/adapter.py	ios-portable	server-owned messaging delivery reliability; no new iOS wire
+M	run_agent.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	skills/autonomous-ai-agents/hermes-agent/references/troubleshooting.md	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/lsp/_mock_lsp_server.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/lsp/test_client_e2e.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/lsp/test_service.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/test_auxiliary_config_bridge.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/test_codex_cloudflare_headers.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/agent/test_codex_happy_eyeballs.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/agent/test_codex_usage_attribution.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/test_curator.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/test_memory_provider.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/agent/test_phantom_tool_references.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/agent/test_pre_compress_checkpoint_contract.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/test_stall_guards.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/agent/test_system_prompt.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/agent/test_terminal_env_registry.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/agent/test_treekill_consolidation.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/conftest.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/cron/test_media_send_timeout.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/e2e/conftest.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/gateway/test_73771_media_resend_dedup.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/gateway/test_media_extraction.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/gateway/test_platform_base.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/gateway/test_signal.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/gateway/test_teams.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/gateway/test_teams_dotenv_isolation.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/gateway/test_telegram_send_reconnect_wait.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/gateway/test_tool_response_drop_recovery.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/hermes_cli/test_mcp_catalog.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/hermes_cli/test_model_validation.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/hermes_cli/test_profiles.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/hermes_cli/test_relay_plugin_cutover.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/hermes_cli/test_serve_port_in_use.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/hermes_cli/test_set_config_value.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/hermes_cli/test_setup_blank_slate.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/hermes_cli/test_tools_config.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/openviking_plugin/test_openviking.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/plugins/memory/test_openviking_provider.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/run_agent/test_pre_compress_memory_context.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/run_agent/test_primary_runtime_restore.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/run_agent/test_provider_fallback.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/run_agent/test_retry_status_buffer.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/run_agent/test_review_prompt_class_first.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/run_agent/test_switch_model_fallback_prune.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/test_hermes_constants.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/test_tui_gateway_event_replay.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/conftest.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/tools/test_approval_outcome_parity.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_browser_content_none_guard.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_browser_hardening.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_browser_npx_warmup.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_browser_secret_exfil.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/tools/test_browser_snapshot_threshold.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_computer_use.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/tools/test_computer_use_fullscreen_capture.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_docker_environment.py	tests-metadata-merge	supporting test/documentation/metadata
+D	tests/tools/test_flux3_video_tool.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/tools/test_local_setsid_descendant_sweep.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_managed_tool_gateway.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_mcp_tool.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_send_message_tool.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_shared_container_task_id.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tests/tools/test_skill_manager_tool.py	tests-metadata-merge	supporting test/documentation/metadata
+A	tests/tools/test_web_result_cache.py	tests-metadata-merge	supporting test/documentation/metadata
+M	tools/approval.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/browser_camofox.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/browser_tool.py	ios-portable	OPEN web/browser cache operator controls; output remains generic-tool compatible
+M	tools/code_execution_tool.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/computer_use/backend.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/computer_use/cua_backend.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/computer_use/schema.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/computer_use/tool.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/credential_files.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/env_probe.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/environments/docker.py	ios-portable	OPEN terminal-environment-management-or-server-runtime
+M	tools/environments/local.py	ios-portable	OPEN terminal-environment-management-or-server-runtime
+M	tools/file_tools.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+D	tools/flux3_video_tool.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/lazy_deps.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/mcp_oauth.py	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+M	tools/mcp_tool.py	ios-portable	MCP catalog/filter delta; catalog is server-driven, tool-filter administration follow-up
+M	tools/send_message_tool.py	ios-portable	server-owned gateway/media reliability; generic client contract
+M	tools/skill_manager_tool.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/skills_sync.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/skills_tool.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tools/terminal_tool.py	ios-portable	OPEN terminal-environment-management-or-server-runtime
+A	tools/web_result_cache.py	ios-portable	OPEN web/browser cache operator controls; output remains generic-tool compatible
+M	tools/web_tools.py	ios-portable	OPEN web/browser cache operator controls; output remains generic-tool compatible
+M	toolsets.py	ios-portable	portable server/runtime behavior; no new iOS wire unless named OPEN above
+M	tui_gateway/entry.py	ios-portable	OPEN event-replay-wire
+A	tui_gateway/event_replay.py	ios-portable	OPEN event-replay-wire
+M	tui_gateway/methods_session.py	ios-portable	OPEN event-replay-wire
+M	tui_gateway/server.py	ios-portable	OPEN event-replay-wire
+M	tui_gateway/ws.py	ios-portable	OPEN event-replay-wire
+M	ui-tui/src/__tests__/gatewayClient.test.ts	tests-metadata-merge	desktop/web renderer-local; no literal iOS port
+M	ui-tui/src/gatewayClient.ts	desktop-only	desktop/web renderer-local; no literal iOS port
+M	web/src/pages/ModelsPage.tsx	desktop-only	server-driven model validation/catalog; test :nitro/:floor variants
+M	website/docs/developer-guide/memory-provider-plugin.md	tests-metadata-merge	supporting test/documentation/metadata
+A	website/docs/developer-guide/terminal-environment-plugin.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/getting-started/quickstart.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/guides/google-gemini.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/integrations/providers.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/reference/cli-commands.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/reference/environment-variables.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/configuration.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/desktop.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/docker.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/features/browser.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/features/computer-use.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/features/fallback-providers.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/features/mcp.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/features/plugins.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/features/web-dashboard.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/features/web-search.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/docs/user-guide/messaging/signal.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/reference/environment-variables.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/reference/tools-reference.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/configuration.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/browser.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/fallback-providers.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/web-search.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/messaging/signal.md	tests-metadata-merge	supporting test/documentation/metadata
+M	website/sidebars.ts	tests-metadata-merge	supporting test/documentation/metadata

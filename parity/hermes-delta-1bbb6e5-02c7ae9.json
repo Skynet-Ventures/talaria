@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "1bbb6e5bce56e721ab685af4cd87df21bbff4d35",
+  "targetCommit": "02c7ae956e42891d5e337a921b45de0a6067146d",
+  "auditedAt": "2026-08-25",
+  "range": {
+    "commitCount": 3,
+    "changedPathCount": 6,
+    "additions": 180,
+    "deletions": 9,
+    "commitInventory": "parity/hermes-delta-1bbb6e5-02c7ae9-commits.tsv",
+    "commitInventorySha256": "bd7035d986749acc775139cfbc7a2e0da834034502df25a590ab4c889db2a0e2",
+    "pathInventory": "parity/hermes-delta-1bbb6e5-02c7ae9-paths.tsv",
+    "pathInventorySha256": "4546e5b95054d43d12091f44fdfb7dd9ef4237301bf0285d5a9592bc8a26abee"
+  },
+  "classifications": {
+    "commits": {"ios-portable": 1, "desktop-only": 2, "tests-metadata-merge": 0},
+    "paths": {"ios-portable": 1, "desktop-only": 4, "tests-metadata-merge": 1}
+  },
+  "authorityFiles": [
+    {"path": "apps/desktop/src/plugins/hermes-bots/plugin.js", "baseSha256": "a26cebc5e3b76096f288f0ad2a30f66550894b2c33bcc2a2fca0c5d12b5094b1", "targetSha256": "a26cebc5e3b76096f288f0ad2a30f66550894b2c33bcc2a2fca0c5d12b5094b1", "changed": false},
+    {"path": "website/docs/user-guide/bot-mode.md", "baseSha256": "43136a19bd8ec6766083f6fec49b924d0b42a1c6e9736ebd865cae97017c0915", "targetSha256": "43136a19bd8ec6766083f6fec49b924d0b42a1c6e9736ebd865cae97017c0915", "changed": false},
+    {"path": "website/docs/user-guide/desktop.md", "baseSha256": "a32666f9cda18afa0001924d8013ffde98a71d002ca0f9cc23b5a8d9a97ece5a", "targetSha256": "a32666f9cda18afa0001924d8013ffde98a71d002ca0f9cc23b5a8d9a97ece5a", "changed": false},
+    {"path": "website/docs/user-guide/multi-connection-desktop.md", "baseSha256": "ef5cb45bee0ace82bcad61f8a94db00ea6ec95bc56218b434ed7e28bd09ec422", "targetSha256": "ef5cb45bee0ace82bcad61f8a94db00ea6ec95bc56218b434ed7e28bd09ec422", "changed": false},
+    {"path": "apps/desktop/DESIGN.md", "baseSha256": "5967f00ea0b44928c6f88736658e9d3d2bf6ad9fdd790cb3fa635910c5d1c27d", "targetSha256": "5967f00ea0b44928c6f88736658e9d3d2bf6ad9fdd790cb3fa635910c5d1c27d", "changed": false}
+  ],
+  "portableDeltas": [],
+  "portableNoClientChange": [
+    "The gateway now rebuilds a live session system prompt under that session's cwd after a model switch. This corrects server-owned persisted prompt bytes without changing config.set, model.switch, session, or event wire shapes.",
+    "Desktop session-list helpers now stamp the active profile and translate managed-SSH recents_profile aliases. Talaria already resolves every session operation through the owning source-qualified GatewayBotRoute and has no Electron alias layer."
+  ],
+  "pinDecision": {
+    "canMoveCanonicalPin": false,
+    "reason": "This successor range adds no Talaria client work, but the preceding five portable deltas remain unmerged and an exact target gateway has not been certified.",
+    "nextPin": "057dcdf236f8a6a26721c10fcc6ccb72726e272a"
+  }
+}
