@@ -157,6 +157,7 @@ enum CompressionCheckpointGateState: Equatable, Sendable {
         case activeProviderNotReady(String)
         case checkpointAPINotAdvertised(String)
         case checkpointAPIVersionTooOld(provider: String, version: Int)
+        case scopedProviderReadinessUnavailable(String)
     }
 
     case controllable(enabled: Bool, provider: String, apiVersion: Int)
@@ -165,7 +166,11 @@ enum CompressionCheckpointGateState: Equatable, Sendable {
 
     static func resolve(requirement: CompressionCheckpointRequirement,
                         activeProvider: String,
-                        inventory: MemoryProviderInventory) -> Self {
+                        inventory: MemoryProviderInventory,
+                        readinessIsAuthoritative: Bool = true) -> Self {
+        if !readinessIsAuthoritative {
+            return .unavailable(.scopedProviderReadinessUnavailable(activeProvider))
+        }
         let prerequisite = providerPrerequisite(activeProvider: activeProvider, inventory: inventory)
         switch requirement.rawState {
         case .absent:

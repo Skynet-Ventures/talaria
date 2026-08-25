@@ -351,7 +351,8 @@ public struct MemoryProviderSettingsSection: View {
     private var checkpointGateState: CompressionCheckpointGateState {
         CompressionCheckpointGateState.resolve(requirement: checkpointRequirement,
                                                 activeProvider: scopedActive,
-                                                inventory: inventory)
+                                                inventory: inventory,
+                                                readinessIsAuthoritative: targetProfile == nil)
     }
 
     private var checkpointSection: some View {
@@ -407,6 +408,9 @@ public struct MemoryProviderSettingsSection: View {
         case .checkpointAPIVersionTooOld(let provider, let version):
             reason = copy.settingsMemoryCheckpointAPIVersionTooOld(theme.id, provider: provider,
                                                                       version: version)
+        case .scopedProviderReadinessUnavailable(let provider):
+            reason = copy.settingsMemoryCheckpointScopedReadinessUnavailable(
+                theme.id, provider: provider)
         }
         return prefix + reason
     }
@@ -976,6 +980,13 @@ public extension CopyPack {
         t == .control
             ? "\(provider.uppercased()) REPORTS CHECKPOINT API V\(version); V2 OR LATER IS REQUIRED."
             : "\(provider) reports checkpoint API v\(version); API v2 or later is required."
+    }
+    func settingsMemoryCheckpointScopedReadinessUnavailable(_ t: ThemeID,
+                                                             provider: String) -> String {
+        let name = provider.isEmpty ? "the selected provider" : provider
+        return t == .control
+            ? "PROFILE-SCOPED READINESS FOR \(name.uppercased()) IS NOT EXPOSED BY THIS GATEWAY. TALARIA LEAVES THE CHECKPOINT SETTING UNCHANGED."
+            : "This gateway does not expose profile-scoped readiness for \(name), so Talaria leaves the checkpoint setting unchanged."
     }
     func settingsMemoryCheckpointSaved(_ t: ThemeID, enabled: Bool) -> String {
         if t == .control {

@@ -141,6 +141,18 @@ final class MemoryProviderManagementTests: XCTestCase {
         XCTAssertFalse(wrongProvider.toggleIsVisible)
     }
 
+    func testCheckpointToggleStaysUnavailableWithoutScopedReadinessProof() {
+        let state = CompressionCheckpointGateState.resolve(
+            requirement: CompressionCheckpointRequirement(rawValue: .bool(false)),
+            activeProvider: "durable",
+            inventory: checkpointInventory(apiVersion: 2),
+            readinessIsAuthoritative: false)
+
+        XCTAssertEqual(
+            state, .unavailable(.scopedProviderReadinessUnavailable("durable")))
+        XCTAssertFalse(state.toggleIsVisible)
+    }
+
     func testCheckpointGateBlocksEnabledRequirementRecoverablyWithoutV2Proof() {
         let requirement = CompressionCheckpointRequirement(rawValue: .bool(true))
         let state = CompressionCheckpointGateState.resolve(
