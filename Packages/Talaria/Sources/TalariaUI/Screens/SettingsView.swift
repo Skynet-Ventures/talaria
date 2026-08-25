@@ -58,7 +58,7 @@ enum SettingsDestination: String, CaseIterable, Hashable, Identifiable {
         case .connections: "gateway cloud tailscale push apns approval mention notification"
         case .appearance: "theme color font text size motion reduce tools reasoning transcript avatar"
         case .intelligence: "model provider oauth endpoint api key voice speech memory stt tts"
-        case .agents: "bot profile rename delete lifecycle"
+        case .agents: "bot profile rename delete lifecycle terminal backend docker sandbox"
         case .operations: "operator config logs debug level"
         case .workspace: "command center projects files git review commands system workspace directory preview pty terminal"
         case .localData: "solo offline storage cache privacy export delete reset"
@@ -255,6 +255,7 @@ private struct SettingsDetailPage: View {
                     MemoryProviderSettingsSection(model: model)
                 case .agents:
                     ProfileLifecycleSettingsSection(model: model)
+                    TerminalBackendSettingsSection(model: model)
                 case .operations:
                     OperatorSettingsSection(model: model)
                 case .workspace:
