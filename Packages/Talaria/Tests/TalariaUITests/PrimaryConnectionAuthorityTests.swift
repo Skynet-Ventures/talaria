@@ -348,27 +348,42 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         await pool.disconnectAll()
     }
 
-    func testDisconnectMonitorArmsOnlyAfterInitialAdoptionTransactionFinishes() async throws {
+    func testDisconnectDuringInitialAdoptionRevokesTransactionAndStartsRecovery() async throws {
         let model = AppModel()
         let baseURL = url("monitor-order")
-        defer { removeSavedRows(for: [baseURL]) }
+        defer {
+            LiveRuntime.shared.reconnectTask?.cancel()
+            LiveRuntime.shared.reconnectTask = nil
+            ConnectionSupervisor.shared.resetTestingSeams()
+            removeSavedRows(for: [baseURL])
+        }
         let gate = ConnectionSuspensionGate()
+        let pumpGate = ConnectionSuspensionGate()
         LiveRuntime.shared.monitorTask?.cancel()
         LiveRuntime.shared.monitorTask = nil
+        ConnectionSupervisor.shared.sleep = { _ in throw CancellationError() }
 
         let task = Task { @MainActor in
             try await model.connectGateway(
                 baseURL: baseURL, credential: credential,
                 connectionOperation: { client in
                     await client.setForegroundReadinessForTesting(true)
+                    await client.setEventsTaskForTesting(Task {
+                        await pumpGate.suspend()
+                    })
                 },
                 adoptionOperations: operations(roster: { await gate.suspend() }))
         }
         await gate.waitUntilEntered()
-        XCTAssertNil(LiveRuntime.shared.monitorTask)
+        XCTAssertNotNil(LiveRuntime.shared.monitorTask)
+
+        await pumpGate.release()
+        await waitUntil {
+            LiveRuntime.shared.connectionAttemptToken == nil && model.isOffline
+        }
 
         await gate.release()
-        try await task.value
+        await assertCancelled(task)
         XCTAssertNotNil(LiveRuntime.shared.monitorTask)
         await model.disconnectGateway()
     }

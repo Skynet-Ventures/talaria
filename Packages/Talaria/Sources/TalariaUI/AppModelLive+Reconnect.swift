@@ -738,7 +738,17 @@ extension AppModel {
             await pump.value
             guard !Task.isCancelled, let self,
                   LiveRuntime.shared.generation == generation else { return }
-            guard self.mode == .live, self.client != nil else { return }
+            guard self.mode == .live, self.client === client else { return }
+
+            // A socket can die while the initial adoption transaction is
+            // awaiting an ancillary refresh. Revoke that exact transaction
+            // before reconnecting so its next source-authority check cancels
+            // instead of publishing late state or CAS-removing the successor.
+            // Generation + client identity prove this token cannot belong to a
+            // newer primary attempt.
+            if LiveRuntime.shared.connectionAttemptToken != nil {
+                LiveRuntime.shared.connectionAttemptToken = nil
+            }
             self.isOffline = true
             if let base = LiveRuntime.shared.baseURL {
                 ConnectionRegistry.shared.noteState(.offline, forURL: base)

@@ -804,6 +804,12 @@ public actor GatewayClient {
         foregroundReadinessForTesting = ready
     }
 
+    /// Install a deterministic pump lifetime for connection-monitor tests.
+    /// Production owns this task exclusively through `connect()`.
+    func setEventsTaskForTesting(_ task: Task<Void, Never>?) {
+        eventsTask = task
+    }
+
     /// Install the owning app's source-qualified lifecycle admission. The
     /// check lives on the client rather than only in route resolution so a
     /// mutation that begins after a caller obtains this actor still wins the

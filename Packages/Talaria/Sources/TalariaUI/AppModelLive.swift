@@ -566,6 +566,14 @@ extension AppModel {
                 code: -3,
                 message: "connected gateway transport was not ready for adoption")
         }
+        // Socket ownership is established at publication, not after the
+        // ancillary roster/routine/session/room refreshes below. Those calls
+        // can legitimately take seconds on a phone. If iOS suspends and drops
+        // the socket inside that window, an end-of-transaction monitor leaves
+        // no observer to start recovery and the offline banner can remain
+        // stuck indefinitely. Arm now; the monitor source-fences the exact
+        // generation/client and invalidates this transaction before it dials.
+        startSupervisedMonitor(for: client, generation: authority.generation)
         retryExactStoredSessionNavigation()
         registry.noteState(.connected, forURL: baseURL)
 
@@ -592,9 +600,6 @@ extension AppModel {
         await operations.reseedRoomProjection(savedGateway.id)
         try await requireCurrentConnectionAttempt(
             authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        // Arm socket-loss recovery only after the initial adoption transaction
-        // can no longer resume and CAS-remove this same pooled client.
-        startSupervisedMonitor(for: client, generation: authority.generation)
     }
 
     private func isCurrentConnectionAttempt(_ authority: PrimaryConnectionAttemptAuthority) -> Bool {
