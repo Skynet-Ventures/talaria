@@ -1,0 +1,131 @@
+commit	parents	classification	subject
+de07bd5fab23c6fd76c5b988598ae5c1221fd091	057dcdf236f8a6a26721c10fcc6ccb72726e272a	ios-portable	fix(serve): emit BACKEND_PORT_IN_USE sentinel + exit 75 on port bind conflict (#93608)
+c0ce7473bd1bdac7cdcf38369ec82ac32e75efc1	de07bd5fab23c6fd76c5b988598ae5c1221fd091	ios-portable	fix(serve): Windows conflict probe uses SO_EXCLUSIVEADDRUSE (SO_REUSEADDR binds over live listeners on WinSock)
+d08f9e14f606724a370bbfb14ed3ebdc6ff009d9	c0ce7473bd1bdac7cdcf38369ec82ac32e75efc1	desktop-only	fix(desktop): never kill a healthy backend on a claim probe failure; surface real stderr (#93608)
+7e500d2ead2251aa10f745bfdb32975dd81e1dba	d08f9e14f606724a370bbfb14ed3ebdc6ff009d9	desktop-only	fix(desktop): float and pin the HUD on Hyprland
+74ad422d50e6d76e26ba5ce3b4d2a4d520e923dd	7e500d2ead2251aa10f745bfdb32975dd81e1dba	tests-metadata-merge	fmt(js): `npm run fix` on merge (#94046)
+a0795acc831210970586a99f2263de5486eab245	74ad422d50e6d76e26ba5ce3b4d2a4d520e923dd	ios-portable	fix(codex): identify Hermes requests
+28b758d5caa48020f0f4eb1bcdbb0b51d2d58d53	a0795acc831210970586a99f2263de5486eab245	desktop-only	feat(desktop): make Cmd/Ctrl+L focus the composer from anywhere
+d7202d64ef078602fe7212e348766c913697e722	28b758d5caa48020f0f4eb1bcdbb0b51d2d58d53	desktop-only	refactor(desktop): derive HUD OS behavior from one windowing profile
+652f5d740cb79008a42de8c18786623f0f8d1f0e	d7202d64ef078602fe7212e348766c913697e722	desktop-only	fix(desktop): sort HUD windowing imports for eslint
+a251e87d826f4ef7c75a8927d5304e24cf43ef54	652f5d740cb79008a42de8c18786623f0f8d1f0e	tests-metadata-merge	fmt(js): `npm run fix` on merge (#94140)
+8a8f74e789bc98bc8798748fec5a25637576c260	a251e87d826f4ef7c75a8927d5304e24cf43ef54	desktop-only	feat(desktop): let the in-app browser hold more than one tab
+84758ed19dd0d7214bfc4677e6042e2d03d4f205	8a8f74e789bc98bc8798748fec5a25637576c260	desktop-only	fix(desktop): hold the typed address in the browser bar until the page moves
+cd297653fa4fac85f45f7d3ad8e361db0f14e9be	84758ed19dd0d7214bfc4677e6042e2d03d4f205	desktop-only	refactor(desktop): mint browser tab ids at random rather than by slot
+f3e0cf098b974fb603257a38d276f7dfafef822d	cd297653fa4fac85f45f7d3ad8e361db0f14e9be	desktop-only	fix(desktop): keep Home new sessions detached from the last project
+85a55e2b30fa979cae61753319155bc62f544a1e	f3e0cf098b974fb603257a38d276f7dfafef822d	tests-metadata-merge	test(desktop): lock Home new-session detach against stale project cwd
+b9eb37e5ebb66a7b920b47a85597490a0ef4dca1	85a55e2b30fa979cae61753319155bc62f544a1e	tests-metadata-merge	fmt(js): `npm run fix` on merge (#94176)
+ead9d8e3d4f0cf6e890d4cf499247964417b8532	b9eb37e5ebb66a7b920b47a85597490a0ef4dca1	desktop-only	fix(desktop): stop transcript jumps when a turn settles
+e4dac8415f44c3c15540e941d94f9fdb7c2364ca	ead9d8e3d4f0cf6e890d4cf499247964417b8532	desktop-only	fix(desktop): demote unanswered clarify cards on Stop
+dc998a2d59f6a50a44e567a188be0f999608fc39	e4dac8415f44c3c15540e941d94f9fdb7c2364ca	desktop-only	fix(desktop): re-arm pending clarify cards in place
+53c4693004435db585b6b9fc4354e1713219b676	dc998a2d59f6a50a44e567a188be0f999608fc39	desktop-only	fix(desktop): restore pending_clarify snapshots on activate and resume
+a99001c3b36fc574b0837708f222ac32096b54ce	53c4693004435db585b6b9fc4354e1713219b676	tests-metadata-merge	style(desktop): space sibling restore import for eslint
+c73d721b1d650a8cda3c588e003612e395d2ec84	a99001c3b36fc574b0837708f222ac32096b54ce	ios-portable	fix(computer-use): recreate CUA session suspect after MCP timeout (#74799)
+547f98528697113fa70397b887594c8dea737026	b9eb37e5ebb66a7b920b47a85597490a0ef4dca1	ios-portable	refactor(deadline): consolidate site-local tree-kills onto agent.deadline.kill_process_tree (#85125 4d)
+8d29a55bedef2f178aa234f356e917ff6a85ace0	c73d721b1d650a8cda3c588e003612e395d2ec84 547f98528697113fa70397b887594c8dea737026	tests-metadata-merge	Merge pull request #94188 from kshitijk4poor/fix/85125-4d-treekill-consolidation
+2f506c2023e1c4042d11a0eceb6af4ea7195acc3	8d29a55bedef2f178aa234f356e917ff6a85ace0	ios-portable	fix(lsp): retire clients when the protocol reader exits
+1420176393295dfb0dfb55ceb4b1cbab8d1965de	2f506c2023e1c4042d11a0eceb6af4ea7195acc3	ios-portable	fix(lsp): abort diagnostics waits after transport death
+f14059fad20e17acf2512785114791566e70bd06	1420176393295dfb0dfb55ceb4b1cbab8d1965de	ios-portable	fix(models): OpenRouter :nitro/:floor routing variants no longer rejected by /model validation
+87631bd8aeb1f54df1a8f81945c8744d48bbaabf	f14059fad20e17acf2512785114791566e70bd06	ios-portable	feat(tui-gateway): seq-stamped event replay for lossless desktop reconnect
+c7577403f8b7a158908c522bd750d272f5412108	87631bd8aeb1f54df1a8f81945c8744d48bbaabf	tests-metadata-merge	test: drop unused afterEach import (CI eslint)
+b106a09b9731331430c675a39d0044531903dc46	f14059fad20e17acf2512785114791566e70bd06 c7577403f8b7a158908c522bd750d272f5412108	tests-metadata-merge	Merge pull request #94219 from kshitijk4poor/feat/gw-event-replay
+03b87d666d7082e820c2605b32005da664955975	b106a09b9731331430c675a39d0044531903dc46	tests-metadata-merge	fmt(js): `npm run fix` on merge (#94230)
+e2e8d7e59a7b47baaf339e1d687396e77ac927cb	03b87d666d7082e820c2605b32005da664955975	tests-metadata-merge	fix(web): keyword-align titles of six high-impression docs pages
+ab0d9841450b0ead5e3d3116fbd1f1e1dfb7c462	03b87d666d7082e820c2605b32005da664955975 e2e8d7e59a7b47baaf339e1d687396e77ac927cb	tests-metadata-merge	Merge pull request #94240 from NousResearch/shl0ms/docs-seo-titles
+2f33833de868a56a45201b4e1da2922589fd9035	b9eb37e5ebb66a7b920b47a85597490a0ef4dca1	ios-portable	fix(mcp): recover poisoned connections + fail fast on dead stdio transports (#85125 3b)
+786f37071a16136ab7a4f5b3a5c0e433b621b81a	2f33833de868a56a45201b4e1da2922589fd9035	ios-portable	fix(mcp): psutil.pid_exists for stdio children liveness — Windows footgun (#85125 CI)
+d2a095df41c7fcff335ffe022ceb546ab62bf0f7	ab0d9841450b0ead5e3d3116fbd1f1e1dfb7c462 786f37071a16136ab7a4f5b3a5c0e433b621b81a	tests-metadata-merge	Merge pull request #94184 from kshitijk4poor/fix/85125-3b-mcp-recovery
+9990bcb8ceb39e17517d9f8e81e4a789e5d034e3	b9eb37e5ebb66a7b920b47a85597490a0ef4dca1	ios-portable	fix(terminal): sweep setsid descendants after local timeout group-kill (#85125 4b)
+457e9b8d73515f7ac6374435851d3b4e7885244c	9990bcb8ceb39e17517d9f8e81e4a789e5d034e3	ios-portable	fix(terminal): annotate sweep as POSIX-only for the killpg guard lint (#85125 CI)
+41447a6d7063b2772b0c2f26a5b22d9bd444fb43	d2a095df41c7fcff335ffe022ceb546ab62bf0f7 457e9b8d73515f7ac6374435851d3b4e7885244c	tests-metadata-merge	Merge pull request #94187 from kshitijk4poor/fix/85125-4b-terminal-treekill
+321d5c76bbb1fad54b3e33437846ec5cd8c07b46	41447a6d7063b2772b0c2f26a5b22d9bd444fb43	desktop-only	fix(desktop): stop the HUD frosting the window while a turn runs
+5ef1409f50484dddc38c9665b32a837ff1b191af	321d5c76bbb1fad54b3e33437846ec5cd8c07b46	desktop-only	fix(desktop): say why window enumeration failed instead of swallowing it
+93acc22a9f29bc3d25698f74559627d3d650b309	5ef1409f50484dddc38c9665b32a837ff1b191af	desktop-only	feat(desktop): add Settings toggle for vibe hearts
+b85032fc7dd11bd5afb8bb010b5398349d9b1dc3	93acc22a9f29bc3d25698f74559627d3d650b309	tests-metadata-merge	test(desktop): pin vibe-hearts toggle across the pet-overlay forward path
+c86612ef8285bf2b0db2505d3083398487df72be	b85032fc7dd11bd5afb8bb010b5398349d9b1dc3	tests-metadata-merge	fmt(js): `npm run fix` on merge (#94346)
+7ef0e9832845eaa8bb8bea09a6d9c965087d3277	41447a6d7063b2772b0c2f26a5b22d9bd444fb43	tests-metadata-merge	test: pin that install-root siblings still get parent-dir hardening
+8b48f621c5ddad516962b1ee063f7f2ac3b455dd	7ef0e9832845eaa8bb8bea09a6d9c965087d3277	ios-portable	fix: log a warning when parent-dir hardening is skipped for the install tree
+98f0e0df07c8d2217e70d7f78b0838cf859c5401	8b48f621c5ddad516962b1ee063f7f2ac3b455dd	tests-metadata-merge	docs: update secure_parent_dir docstring and caller comments for the install-tree exclusion
+e26e25d61889f3482fea3467ec812ef514d10fe5	98f0e0df07c8d2217e70d7f78b0838cf859c5401	tests-metadata-merge	docs: add operator remediation for install dirs locked to 0700 by older images
+a08dfab30201abe562953ba3de1e182a355e2465	c86612ef8285bf2b0db2505d3083398487df72be e26e25d61889f3482fea3467ec812ef514d10fe5	tests-metadata-merge	Merge pull request #94351 from NousResearch/fix/secure-parent-dir-followups
+e3b5512b7b3f6cbcb23ba5fffdc66d5015eca246	a08dfab30201abe562953ba3de1e182a355e2465	desktop-only	fix(desktop): keep modal context menus inside dialogs
+5400fb88e5bd235598b8681447ed70576480b79e	e3b5512b7b3f6cbcb23ba5fffdc66d5015eca246	desktop-only	fix(desktop): stop gating edit-menu Paste on the clipboard probe (#91553)
+b637ee0fc6831f5300a6c4418dfc3b3587b6890d	5400fb88e5bd235598b8681447ed70576480b79e	desktop-only	fix(desktop): keep UI scale across in-page route navigation
+f8b52e4d80422dbb941e5111b31dd871c5a1ef56	b637ee0fc6831f5300a6c4418dfc3b3587b6890d	tests-metadata-merge	test(desktop): cover UI scale across recordless hash routes
+cbc8d1804dc8baec07d659fe391186371a80671c	f8b52e4d80422dbb941e5111b31dd871c5a1ef56	ios-portable	fix(signal): chunk long cron deliveries instead of truncating
+48f69e51d373f45bbed6f00457807528c5946c0c	cbc8d1804dc8baec07d659fe391186371a80671c	ios-portable	fix(signal): chunk long standalone sends and cover both delivery paths (salvage #57929 + #67279)
+0484910787df66ee5527d67d102ade80020b54f3	48f69e51d373f45bbed6f00457807528c5946c0c	ios-portable	feat(terminal): pluggable terminal environment backends via plugin registry
+a75ea37dc5a8ddec5c3212953a3b7d2eb36d40ce	0484910787df66ee5527d67d102ade80020b54f3	ios-portable	feat: browser snapshots drop LLM summarization — truncate-and-store like web_extract; auxiliary.web_extract slot removed
+beb794123618c997e82791316df643fc61347665	a75ea37dc5a8ddec5c3212953a3b7d2eb36d40ce	ios-portable	fix(tui-gateway): make WS reconnect replay actually deliver events (follow-up to #94219)
+7c97343950d05a6c8aba2be931fa9284da4f6c2e	beb794123618c997e82791316df643fc61347665	tests-metadata-merge	fmt(js): `npm run fix` on merge (#94410)
+3733e4aff52d19d110eb415a3809e1b5ae07384a	7c97343950d05a6c8aba2be931fa9284da4f6c2e	ios-portable	fix: system prompt no longer references tools/skills the session can't use; hermes-agent skill is always kept
+64a6f42cb38def7ad6524bdfe640a16997c88760	3733e4aff52d19d110eb415a3809e1b5ae07384a	tests-metadata-merge	test: opted-out profile seeding now exercises the essential-only sync subprocess
+bc47fcd3f927abcd1ec281078bc56348e37a2ec0	64a6f42cb38def7ad6524bdfe640a16997c88760	tests-metadata-merge	fix(tests): e2e group-restart test no longer flakes on cold SessionDB init
+b45b02857370c3a604e95187512ac3f1b3514e41	bc47fcd3f927abcd1ec281078bc56348e37a2ec0	ios-portable	fix(agent): gate memory provider system_prompt_block on toolset config (#81014)
+8172be0e8e64e60562494bbeb09252f2c3772b62	b45b02857370c3a604e95187512ac3f1b3514e41	ios-portable	fix(memory): log when a configured provider's tools are gated off by toolset config
+c1b295d003f63f2ec7f524a74f9e464ec0fc4cd3	8172be0e8e64e60562494bbeb09252f2c3772b62	tests-metadata-merge	test(desktop): stop the syntax-diff mock factory from leaking unhandled rejections (#94415)
+bf8b28f27ad94166dae7fafe27abb1030e298ab8	c1b295d003f63f2ec7f524a74f9e464ec0fc4cd3	ios-portable	fix(tools): route browser snapshot storage through the symlink-safe writer
+d934bbd4d5145ebf46b1d433c1a6066cc3b2a729	bf8b28f27ad94166dae7fafe27abb1030e298ab8	ios-portable	fix(agent): race Codex IPv6 and IPv4 connections
+9cce872505175265e296444a9b0d3f70e5c394dc	d934bbd4d5145ebf46b1d433c1a6066cc3b2a729	tests-metadata-merge	docs: note httpcore pin dependency in _enable_happy_eyeballs
+6ce7ab8bfb3fce3ba116f52a11a438d6c7e4c03d	9cce872505175265e296444a9b0d3f70e5c394dc	ios-portable	feat(browser): make snapshot threshold configurable
+f84f94b4943b397149bc0f5a7af4f5e692727a24	6ce7ab8bfb3fce3ba116f52a11a438d6c7e4c03d	ios-portable	fix(teams): do not call App() when the SDK was never bound
+27640c5844256068b7259984b19e6041ab06c8d0	f84f94b4943b397149bc0f5a7af4f5e692727a24	tests-metadata-merge	test(teams): cover connect when the namespace exists but App is unbound
+6c1bfff65ccea09d2f7ffbd8e429b5ff8be18576	27640c5844256068b7259984b19e6041ab06c8d0	ios-portable	fix(telegram): wait for reconnect before failing send as Not connected
+fcda325cd4e60cbfac1c1a7e464a17a72548e165	6c1bfff65ccea09d2f7ffbd8e429b5ff8be18576	tests-metadata-merge	test(telegram): cover send() waiting for reconnect after a network blip
+1fac44086519112fc7f346ffa1c8b41de0556ee1	fcda325cd4e60cbfac1c1a7e464a17a72548e165	ios-portable	fix(gateway): recover explicit computer-use media paths
+5908c577f9048a0adcdd80fc467501b0f1e60b1b	1fac44086519112fc7f346ffa1c8b41de0556ee1	ios-portable	fix(fallback): surface provider transitions and primary recovery
+d4f31a8f3627fe1d0c7ea5b23a77838280692c4a	5908c577f9048a0adcdd80fc467501b0f1e60b1b	ios-portable	fix(gateway): resolve session-scoped Docker sandboxes for MEDIA delivery (#93950)
+a15533b64635b82e9c8b427260e605bd86472e77	d4f31a8f3627fe1d0c7ea5b23a77838280692c4a	ios-portable	feat(gateway): warn when a Docker sandbox MEDIA path fails translation
+34041faea81d7fed8898edbe144eb7ac14e2d074	a15533b64635b82e9c8b427260e605bd86472e77	tests-metadata-merge	test(gateway): accept session_key kwarg in media resend dedup stubs
+335c60ecdd76a7b8b9d6fa0332ac15e58059963b	34041faea81d7fed8898edbe144eb7ac14e2d074	ios-portable	fix(skills): preserve review marks across contexts
+fc4c2f456ba2c64e060f7101a126828bd109187a	335c60ecdd76a7b8b9d6fa0332ac15e58059963b	ios-portable	fix(memory): migrate OpenViking URIs to the viking://~ home alias
+7cd43cdf52f0720e2336509448a5bd653af59a41	fc4c2f456ba2c64e060f7101a126828bd109187a	ios-portable	fix(memory): emit explicit-uid OpenViking URIs resolved from system status
+5ff03cb0c411700a1d56d9e20c89cc81198067a9	7cd43cdf52f0720e2336509448a5bd653af59a41	ios-portable	fix(memory): scope OpenViking user cache to connection
+4387e0396084006ca042a768e998d4f85a8ea4a2	5ff03cb0c411700a1d56d9e20c89cc81198067a9	ios-portable	fix(memory): keep OpenViking identity operations consistent
+b0cf2597c2dbb9dacd5c4f063ae7e71587f02c2e	4387e0396084006ca042a768e998d4f85a8ea4a2	ios-portable	fix: follow-up for salvaged PR #93985 — cache key, snapshot, dead code
+a70d2ffce59b58b9bdb36a518ddffd16953b67f2	b0cf2597c2dbb9dacd5c4f063ae7e71587f02c2e	ios-portable	fix(background-review): teach review prompts the enforced read-before-write handshake
+610e2e02fb10360fdd1610d25a7fd084dd8d7e76	a70d2ffce59b58b9bdb36a518ddffd16953b67f2	ios-portable	fix(curator): tell the background reviewer to read before it writes
+8ad20d065a7653eae1625225382e4cd989794d91	610e2e02fb10360fdd1610d25a7fd084dd8d7e76	tests-metadata-merge	test(curator): assert the instruction through the delivered prompt, not the source
+760d3af0d70e641ad28b954ba80ffe0241cd0d60	8ad20d065a7653eae1625225382e4cd989794d91	tests-metadata-merge	chore: map contributor email for salvage attribution
+eaf6545ab4bff666f360ba45385c713a75fa7e1b	760d3af0d70e641ad28b954ba80ffe0241cd0d60	tests-metadata-merge	docs(gemini): update to use latest gemini models
+e5032945cbebb64b8a819b66ec831c1906297b81	eaf6545ab4bff666f360ba45385c713a75fa7e1b	tests-metadata-merge	chore: map contributor email for salvage attribution
+bb0d5503c2bf52d556116902f8e9f90ca0ac17a5	760d3af0d70e641ad28b954ba80ffe0241cd0d60	ios-portable	fix(gateway): widen computer-use media path repair to sibling surfaces
+105999a0c94833bbbd0e123400aa6d58fcdab9d4	bb0d5503c2bf52d556116902f8e9f90ca0ac17a5	ios-portable	refactor(gateway): unify computer-use repair call sites after review
+d634b37047c8a685353680da031a3cc68706e59e	105999a0c94833bbbd0e123400aa6d58fcdab9d4	ios-portable	refactor(gateway): retire private repair alias per replay_cleanup precedent
+dc3716d4515665b717065f31e22486fa8e88b3ad	e5032945cbebb64b8a819b66ec831c1906297b81 d634b37047c8a685353680da031a3cc68706e59e	tests-metadata-merge	Merge pull request #94536 from kshitijk4poor/salvage/94439-computer-use-media-path
+c8c3f4c448b4d756c3ae62e5c59666fb444bf4d2	760d3af0d70e641ad28b954ba80ffe0241cd0d60	ios-portable	fix(approval): machine-readable outcome parity on the gateway tails + sudo human-wait exclusion (#85125 2e)
+4c1f53be10d0fce1d25aee1975e5149b6c54f25a	dc3716d4515665b717065f31e22486fa8e88b3ad c8c3f4c448b4d756c3ae62e5c59666fb444bf4d2	tests-metadata-merge	Merge pull request #94568 from kshitijk4poor/fix/85125-2e-approval-outcome-parity-v2
+15f7b7293cbe3b517b5f4560be2d0867478b6282	4c1f53be10d0fce1d25aee1975e5149b6c54f25a	ios-portable	fix(terminal): persistent Docker containers are profile-scoped, not per-session
+aeac982223d477c4ac7c786e628433e11753a21f	15f7b7293cbe3b517b5f4560be2d0867478b6282	ios-portable	fix(computer_use): route explicit screen capture to get_desktop_state
+ce9b9a63517c6005ffa74557eceb06d3387b67bb	aeac982223d477c4ac7c786e628433e11753a21f	ios-portable	feat(computer_use): guide models from full-screen grabs to interactive lanes
+0268c0b8c0e75d1fcbce37f39b14e63b8871a2a2	ce9b9a63517c6005ffa74557eceb06d3387b67bb	tests-metadata-merge	chore: map 2ndNatureAI attribution
+76e306c45843607e6dc135d23c13d3654417ebd5	0268c0b8c0e75d1fcbce37f39b14e63b8871a2a2	ios-portable	refactor(tools): remove expired BFL FLUX 3 promo core tools (migration v39); FLUX 3 stays via video_gen/FAL for subscribers (#94599)
+1104ffe0b912868f0db31635bf46403ff3630d89	76e306c45843607e6dc135d23c13d3654417ebd5	ios-portable	feat(memory): opt-in fail-closed pre-compress checkpoint contract (API v1)
+3c31c448801a191d87c22e2ae5369fe8c2209038	1104ffe0b912868f0db31635bf46403ff3630d89	tests-metadata-merge	docs(memory): document the pre-compress checkpoint contract
+70d0b1fffb45badc808183ebfafba3348afacd5d	3c31c448801a191d87c22e2ae5369fe8c2209038	ios-portable	fix(memory): review follow-ups for the pre-compress checkpoint contract
+8cc379b5282d94c61a00df1302f6974e10a2d6e4	70d0b1fffb45badc808183ebfafba3348afacd5d	ios-portable	fix(memory): bind the checkpoint gate to every compaction authority
+9e551d293133791ae3b3e32dde19488dc15390c1	8cc379b5282d94c61a00df1302f6974e10a2d6e4	ios-portable	refactor(memory): renumber checkpoint API — v1 is the implicit historical contract, v2 opts into fail-closed checkpoints
+1ee524f77d1c84a6ee1ae58341e633d8a9b6ef1d	9e551d293133791ae3b3e32dde19488dc15390c1	ios-portable	fix(memory): bind the checkpoint gate to post-turn micro-compaction too
+7a67bd07a7000a4fe0c3581f91ab5b5f4815c033	1ee524f77d1c84a6ee1ae58341e633d8a9b6ef1d	ios-portable	feat(docker): support shared container identities
+f5200a4c10d4a0c563cb1693b9f616ba79889c31	7a67bd07a7000a4fe0c3581f91ab5b5f4815c033	ios-portable	fix(config): declare shared Docker container key
+82b32f32ef6a6646a160f79c1fdf6358d271b70a	f5200a4c10d4a0c563cb1693b9f616ba79889c31	ios-portable	feat(terminal): wire shared-container key into profile-scoped resolver and MEDIA delivery
+d736f5d53f1d33fabad5a17cb070eb138b618fb8	82b32f32ef6a6646a160f79c1fdf6358d271b70a	ios-portable	fix(docker): digest-suffix shared-container identity labels so distinct keys never collide
+90fd9a838b28121c2da97065e8be8f8c3200615f	d736f5d53f1d33fabad5a17cb070eb138b618fb8	ios-portable	feat(mcp): add Cloudflare's official API MCP server to the catalog
+53015d3eb5348d5843ace1550278da565ceea43f	90fd9a838b28121c2da97065e8be8f8c3200615f	ios-portable	feat(mcp): pin ?codemode=false so tool_search sees the full endpoint surface
+3a1a3a1c8fb25b163e688fdd4f4ac2bb757af1fa	53015d3eb5348d5843ace1550278da565ceea43f	ios-portable	feat(mcp): curated exclude list for cloudflare + glob tool filters + default_excluded manifests
+753f362a237382b435e5d1e5d25b03ac72c2ac52	3a1a3a1c8fb25b163e688fdd4f4ac2bb757af1fa	ios-portable	feat(mcp): add 34 official vendor-hosted remote MCP servers to the catalog
+3e570dd42d056ea174948f5ed4185798727192bb	753f362a237382b435e5d1e5d25b03ac72c2ac52	ios-portable	refine(mcp): drop github, perplexity, telnyx, exa, parallel-search from the catalog batch
+99f5aec733373ded354e9d3ea0ff8658d8998e1b	3e570dd42d056ea174948f5ed4185798727192bb	ios-portable	feat(mcp): add Better Stack and Railway remote MCPs (OAuth+DCR, live-verified)
+9a37325717d7158d2e69f0fd69158e306e05787c	99f5aec733373ded354e9d3ea0ff8658d8998e1b	ios-portable	feat(mcp): add 18 more live-verified remote MCPs from the final sweep
+88369af1c7219b49257a994a0b933f48c8fa3ef8	9a37325717d7158d2e69f0fd69158e306e05787c	ios-portable	refine(mcp): debloat the catalog batch — vendor-doc tool audit applied to every entry
+054cba271e2e348bcda37bcff48476944e3ce00f	88369af1c7219b49257a994a0b933f48c8fa3ef8	ios-portable	fix(mcp): review findings — reinstall no longer clobbers user exclude lists + 4 curation gaps
+164e25a936f5743482eb5cf5ffdb74758700c39c	054cba271e2e348bcda37bcff48476944e3ce00f	tests-metadata-merge	test(mcp-catalog): actually exercise the exfil-shaped-manifest rejection
+fb1ec36a4b86adb407cb3b49d17f21c41540b370	164e25a936f5743482eb5cf5ffdb74758700c39c	ios-portable	fix(mcp): treat tools.include: [] as an explicit empty whitelist
+01177ed719e845fc505fe992a28c8980a017e237	fb1ec36a4b86adb407cb3b49d17f21c41540b370	ios-portable	fix(mcp-catalog): don't announce a probe on the exclude-mode install path
+965689d13a9650b44e61ac239c62d98400697589	01177ed719e845fc505fe992a28c8980a017e237	ios-portable	fix(mcp-catalog): failed probe keeps the prior tool filter instead of wiping it
+45b35f962f2f904616ae2300d67f14b7dc8cb5ba	965689d13a9650b44e61ac239c62d98400697589	ios-portable	fix(mcp): tool-selection UIs stay in exclude mode instead of freezing include lists
+04603fc0403184dc1cd66e8a3261db5be9827882	45b35f962f2f904616ae2300d67f14b7dc8cb5ba	ios-portable	feat(web): TTL result caching for web_search + web_extract
+8adef09be8665ded007ef13800c2d67a55e5ab74	04603fc0403184dc1cd66e8a3261db5be9827882	ios-portable	fix(web): extract cache serves only after policy + provider gates; rescue and format/provider isolation
+f0381ee4ae05e99de15008dd162513aceeec7884	8adef09be8665ded007ef13800c2d67a55e5ab74	ios-portable	fix(web): never cache local development URLs in the extract cache
+ba9fc55e165bd640a3026f069705395e1ef3ad3a	f0381ee4ae05e99de15008dd162513aceeec7884	ios-portable	feat(web): cache_exempt_hosts — always-live fetches for staging/tunnel sites
+1bbb6e5bce56e721ab685af4cd87df21bbff4d35	ba9fc55e165bd640a3026f069705395e1ef3ad3a	tests-metadata-merge	docs(skill): troubleshoot stale web_extract pages — cache carveouts + cache_exempt_hosts
