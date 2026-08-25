@@ -19,9 +19,10 @@ import TalariaKit
 // 2. Provider order comes from the backend and is never re-sorted inside a
 //    group; only the groups themselves get a stable alphabetical order, so
 //    switching models cannot reshuffle the list under the user's thumb.
-// 3. `config.set` with no matching session falls back to the *persistent
-//    profile config* — so a control that means "this chat" never reaches the
-//    gateway without a session id behind it.
+// 3. `config.set` with no matching session falls back to gateway-global
+//    config. It does not address a bot profile. A Bot Mode selection therefore
+//    sends a session-scoped switch and then a provider-qualified
+//    `profiles.configure` write for that bot.
 // 4. A source-qualified bot owns its catalog and every session mutation. A
 //    remote picker never reads from or writes through the primary gateway.
 
@@ -478,9 +479,14 @@ extension AppModel {
             // The provider travels with the id: a bare name resolves inside
             // whatever aggregator is current, which is how a self-hosted model
             // ends up being looked for on a subscription endpoint.
+            // This RPC changes the live forever-chat only.  `--global` is the
+            // gateway process' config scope; it is not a profile-addressed
+            // write and therefore cannot stand in for profiles.configure.
+            // Keeping this session-scoped also avoids one bot changing the
+            // default inherited by its siblings.
             let outcome = try await context.client.applySessionModel(
                 sessionID: sessionID, model: model, provider: provider,
-                persistAsDefault: shouldPersistModelAsDefault(botID: botID, provider: provider),
+                persistAsDefault: false,
                 confirmExpensive: confirmExpensive)
             guard modelStateIsCurrent(state, botID: botID, route: context.route) else {
                 return .failed("the bot changed gateways while the model picker was open")
@@ -495,12 +501,46 @@ extension AppModel {
                 return .needsConfirmation(message: message)
             }
 
-            state.pendingConfirmation = nil
             let resolved = outcome.value.isEmpty ? model : outcome.value
-            pinModel(botID: botID, provider: provider, model: resolved)
+            state.pendingConfirmation = nil
 
-            if outcome.deferred { return .deferred(model: resolved) }
-            return .applied(warning: outcome.warning)
+            // Bot Mode has one durable profile behind every forever-chat.
+            // Persist that profile with the explicit provider+model pair;
+            // config.set above cannot address a profile and Hermes silently
+            // drops model-only profile writes.  MoA is intentionally a
+            // session preset rather than a profile model.
+            var persistenceWarning = ""
+            if provider.lowercased() != "moa" {
+                let edit = ProfileEdit(model: resolved, provider: provider)
+                do {
+                    let applied = try await context.client.applyProfileEdit(
+                        name: context.route.profile, edit)
+                    guard edit.wasFullyApplied(applied) else {
+                        throw GatewayError(code: 4065,
+                                           message: "the gateway did not save the profile model")
+                    }
+                    guard modelStateIsCurrent(state, botID: botID, route: context.route) else {
+                        return .failed("the bot changed gateways while the model picker was open")
+                    }
+                    await refreshProfileRoster(gatewayID: context.route.gatewayID)
+                } catch {
+                    persistenceWarning = "The live chat changed, but the bot profile default was not saved."
+                }
+            }
+
+            pinModel(botID: botID, provider: provider, model: resolved,
+                     persistedProfile: persistenceWarning.isEmpty && provider.lowercased() != "moa")
+
+            if outcome.deferred {
+                if !persistenceWarning.isEmpty {
+                    state.note(persistenceWarning, warning: true)
+                }
+                return .deferred(model: resolved)
+            }
+            let warning = [outcome.warning, persistenceWarning]
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            return .applied(warning: warning)
         } catch let error as GatewayError {
             guard modelStateIsCurrent(state, botID: botID, route: context.route) else {
                 return .failed("the bot changed gateways while the model picker was open")
@@ -646,8 +686,9 @@ extension AppModel {
 
     /// Record the selection locally: the bot's pin and the picker's own idea of
     /// the current pair, so the checkmark moves before the next catalog read.
-    private func pinModel(botID: String, provider: String, model: String) {
-        if let idx = bots.firstIndex(where: { $0.id == botID }) {
+    private func pinModel(botID: String, provider: String, model: String,
+                          persistedProfile: Bool = true) {
+        if persistedProfile, let idx = bots.firstIndex(where: { $0.id == botID }) {
             bots[idx].pinnedModel = model
         }
         let state = modelPicker(for: botID)
@@ -655,14 +696,6 @@ extension AppModel {
         state.catalog.provider = provider
         // A `…-fast` variant IS fast mode, expressed as a separate model id.
         if ModelLabels.baseID(model).lowercased().hasSuffix("-fast") { state.fastMode = true }
-    }
-
-    /// Bot Mode has one forever-chat per profile, so a picker change is the
-    /// profile default. Desktop's primary-session picker writes `--global`
-    /// for that reason; MoA presets stay session-only so they cannot rewrite
-    /// config.yaml.
-    func shouldPersistModelAsDefault(botID _: String, provider: String) -> Bool {
-        provider.lowercased() != "moa"
     }
 
     /// The demo world's catalog: one honest provider row so the picker's
