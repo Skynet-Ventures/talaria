@@ -22,6 +22,10 @@ class FullRangeClosureTests(unittest.TestCase):
         self.assertEqual(len(self.manifest["ledgers"]), 7)
         self.assertEqual(
             self.manifest["conclusion"]["undispositionedPortableGapCount"], 0)
+        self.assertEqual(
+            [row["pullRequest"] for row in self.manifest["conclusion"]["openImplementationSlices"]],
+            [73, 91, 94, 95, 98],
+        )
 
     def test_component_hash_or_endpoint_drift_fails_closed(self) -> None:
         changed = copy.deepcopy(self.manifest)

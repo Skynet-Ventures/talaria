@@ -94,7 +94,7 @@ DISPOSITIONS = {
     "already-portable",
     "covered-by-predecessor",
     "covered-by-pr91-excluded",
-    "implemented-unmerged-uncertified",
+    "merged-to-parent-not-main-uncertified",
     "upstream-contract-blocked",
     "verify-on-host",
 }
@@ -103,7 +103,7 @@ TALARIA_STATUSES = {
     "existing-model-options-consumer",
     "existing-generic-cron-delivery",
     "pr91-excluded",
-    "pr94-unmerged-uncertified",
+    "pr94-parent-merged-not-main-uncertified",
 }
 
 
@@ -248,10 +248,10 @@ def _validate_reference_metadata(metadata: dict[str, Any]) -> None:
             "state": "implemented-excluded",
         },
         "PR94-model-discount-presentation": {
-            "branch": "codex/model-discount-presentation",
-            "commit": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
-            "parent": "27a12f11c3825cc8ada4860b60e298acdcc4fa37",
-            "state": "unmerged-uncertified",
+            "branch": "codex/model-contract-copy",
+            "commit": "5cb68d2dd38539b2f5de789e7be95a545437ca22",
+            "parent": "27a12f11c3825cc8ada4860b60e298acdcc4fa37 ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+            "state": "merged-to-parent-not-main-uncertified",
         },
     }
     seen: set[str] = set()

@@ -19,7 +19,7 @@ union SHA-256 is
 
 | Classification | Commits | Disposition |
 | --- | ---: | --- |
-| Portable already covered | 56 | 27 predecessor-covered, 26 live dynamic catalog, 2 heartbeat slice, 1 PR94 unmerged/uncertified |
+| Portable already covered | 56 | 27 predecessor-covered, 26 live dynamic catalog, 2 heartbeat slice, 1 PR94 parent-merged/not-main/uncertified |
 | Upstream-contract-blocked | 5 | Do not implement a phone mutation |
 | Other-client-only | 27 | Dashboard, TUI, ACP, installer, browser/voice controller, or third-party platform adapter |
 | Host-only | 79 | Hermes runtime, state, plugin/provider, tool, scheduler, security, or local process behavior |
@@ -55,19 +55,22 @@ the checker rejects scope drift.
 
 `1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4` adds the exact search aliases
 `x-preview-f-free -> ox-alpha, ox` to the dashboard/TUI pickers. It is covered
-by local-only PR94
-`codex/model-discount-presentation@ff0ea1a6e91c3af0996f406dac0acf9f607cc166`.
-PR94 is not merged or device/live-gateway certified. Its bounded discount hint
+by PR94 implementation
+`ff0ea1a6e91c3af0996f406dac0acf9f607cc166`, now merged into parent branch
+`codex/model-contract-copy` as `5cb68d2dd38539b2f5de789e7be95a545437ca22`.
+PR94 is not in `main` or device/live-gateway certified. Its bounded discount hint
 also closes pre-existing presentation debt from pre-range `649472f` / PARITY
 row 390, not a newly introduced `057dcdf` wire contract.
 
 `9153be2a5126f8280839a58d143ddcf80afc6d12` and
 `e3f695e5e00ef8718d8829fbe44fd3d2e36ed236` add shared/TUI heartbeat and
 reconnect behavior. The narrow existing Talaria basis is
-`codex/gateway-heartbeat@5658b57c21c45a5b9c6108c7de55439984e0a40f`; it adds
-bounded heartbeat/foreground validation, retires superseded transports, and
+`codex/gateway-heartbeat@e5abb0fae3ca84757631f835495fa1f15bfda016`; it adds
+bounded heartbeat/foreground validation, monitors early initial adoption, retires superseded transports, and
 lets exact-current authenticated inbound traffic reconcile a stale offline
-publication. It remains a transport slice, not a mutation authority.
+publication. Its full 1,111 XCTest + 39 Swift Testing suite and
+`talaria-verify` pass and its corrected signed build succeeds; installation
+and lock/return proof remain open. It remains a transport slice, not a mutation authority.
 
 Compaction, canonical session state, and Bot Chat/A2A result projections are
 already consumed through pinned client-wire/authority contracts and current

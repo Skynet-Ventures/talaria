@@ -34,10 +34,10 @@ a2da0ab797edf5e7ca7d3f64591facbbc37ec7f2	hermes_cli/profiles.py;hermes_cli/subco
 15751166291cfa82b20b233d33aac61c1a07ade6	hermes_cli/backup.py;hermes_cli/update_cmd.py	CLI02-host-update-lifecycle	gateway-host-runtime	host-cli-only	none	none
 67af79d7e1bd8264119c2f02b37a2a0686008666	hermes_cli/models.py	CLI04-provider-catalog-host-runtime	gateway-host-runtime	dynamic-catalog-already-consumed	existing-model-options-consumer	none
 d9d967e07ab24c4f06c00ce67f53b6f88ef94064	hermes_cli/linux_desktop_entry.py	CLI01-dashboard-desktop-surface	desktop-only	desktop-only	none	none
-1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4	hermes_cli/model_search.py	CLI05-pr94-model-presentation	portable-mobile-presentation	implemented-unmerged-uncertified	pr94-unmerged-uncertified	none
+1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4	hermes_cli/model_search.py	CLI05-pr94-model-presentation	portable-mobile-presentation	merged-to-parent-not-main-uncertified	pr94-parent-merged-not-main-uncertified	none
 01d8562fce28a77362e3e3ce7797f3aae57b1985	hermes_cli/auth.py;hermes_cli/models.py	CLI04-provider-catalog-host-runtime	gateway-host-runtime	dynamic-catalog-already-consumed	existing-model-options-consumer	none
 907da145b6af089927a6d08904260f86f3813323	hermes_cli/models.py	CLI04-provider-catalog-host-runtime	gateway-host-runtime	dynamic-catalog-already-consumed	existing-model-options-consumer	none
-bd93a5f3160dc84d1891e27b49bffeb88483d8f0	hermes_cli/auth.py;hermes_cli/inventory.py;hermes_cli/models.py	CLI05-pr94-model-presentation	portable-mobile-presentation	implemented-unmerged-uncertified	pr94-unmerged-uncertified	none
+bd93a5f3160dc84d1891e27b49bffeb88483d8f0	hermes_cli/auth.py;hermes_cli/inventory.py;hermes_cli/models.py	CLI05-pr94-model-presentation	portable-mobile-presentation	merged-to-parent-not-main-uncertified	pr94-parent-merged-not-main-uncertified	none
 f9849c43a24d410cbc937daa2216c811b729b578	hermes_cli/backup.py	CLI02-host-update-lifecycle	gateway-host-runtime	host-cli-only	none	none
 d422f7103ec6e43cf40abeb0d3c258a5244fdcd3	hermes_cli/backup.py	CLI02-host-update-lifecycle	gateway-host-runtime	host-cli-only	none	none
 2fb1e62b2ee0723486893ed30d5b481f5ad0b5b6	hermes_cli/gateway.py	CLI02-host-update-lifecycle	gateway-host-runtime	host-cli-only	none	none
@@ -166,4 +166,3 @@ ec5e369fe68f4abb3188767c751d6166d2139f0a	hermes_cli/_parser.py;hermes_cli/auth.p
 ddbd928ee4e881f0c7b3536a00355647c6559fe2	hermes_cli/cron.py	CLI11-predecessor-covered	predecessor-covered	covered-by-predecessor	none	core-runtime:R05-cron-execution-and-retirement
 b595fcd5e16425a78b168881d9401b9d07e8e187	hermes_cli/config_defaults.py;hermes_cli/main.py	CLI01-dashboard-desktop-surface	desktop-only	desktop-only	none	none
 057dcdf236f8a6a26721c10fcc6ccb72726e272a	hermes_cli/config_defaults.py;hermes_cli/main.py	CLI00-merge-parent-integration	merge-integration	merge-integration	none	core-runtime:R09-merge-parent-integration
-

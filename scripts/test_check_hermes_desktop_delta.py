@@ -69,10 +69,11 @@ class DesktopDeltaCheckerTests(unittest.TestCase):
             "authority": 60, "client-wire": 14, "core-runtime": 27,
         })
         self.assertEqual(metadata["crossReferenceUnionCount"], 87)
-        self.assertEqual(metadata["pr94"]["head"], "ff0ea1a6e91c3af0996f406dac0acf9f607cc166")
+        self.assertEqual(metadata["pr94"]["head"], "5cb68d2dd38539b2f5de789e7be95a545437ca22")
+        self.assertEqual(metadata["pr94"]["implementationHead"], "ff0ea1a6e91c3af0996f406dac0acf9f607cc166")
         self.assertEqual(
             metadata["pr94"]["state"],
-            "implemented-on-open-branch-not-merged-or-device-certified",
+            "merged-to-parent-not-main-or-device-certified",
         )
 
     def test_schema_and_pr94_state_drift_fail_closed(self) -> None:

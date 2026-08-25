@@ -23,6 +23,41 @@ EXPECTED_IDS = (
     "authority", "client-wire", "core-runtime", "desktop", "cli",
     "gateway-platform", "residual-runtime",
 )
+EXPECTED_OPEN_SLICES = [
+    {
+        "pullRequest": 73,
+        "branch": "codex/gateway-heartbeat",
+        "head": "e5abb0fae3ca84757631f835495fa1f15bfda016",
+        "status": "implemented-unmerged-device-proof-pending",
+    },
+    {
+        "pullRequest": 91,
+        "branch": "codex/durable-host-update-recovery",
+        "head": "733b9621228b375f15c4132046ef750c56489f94",
+        "implementationCommit": "cc3322f674ac388c55a9d2694efaaf7e941a1666",
+        "status": "implemented-unmerged-live-proof-pending",
+    },
+    {
+        "pullRequest": 94,
+        "branch": "codex/model-contract-copy",
+        "head": "5cb68d2dd38539b2f5de789e7be95a545437ca22",
+        "implementationCommit": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+        "status": "merged-to-parent-not-main-device-proof-pending",
+    },
+    {
+        "pullRequest": 95,
+        "branch": "codex/source-qualified-push-presentation",
+        "head": "887de277b1ea9b9f2860b85e9e38b5fe8b2e8971",
+        "implementationCommit": "4a06df18e768fe4bb8a206dc86f1dce0a08feec6",
+        "status": "implemented-unmerged-device-proof-pending",
+    },
+    {
+        "pullRequest": 98,
+        "branch": "codex/bot-profile-model-switch",
+        "head": "9a476ca669db09c294fde971062fe996a1bcaed8",
+        "status": "implemented-unmerged-ci-review-device-proof-pending",
+    },
+]
 
 
 class CheckError(RuntimeError):
@@ -107,7 +142,7 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
     if conclusion["undispositionedPortableGapCount"] != 0:
         raise CheckError("closure contains an undispositioned portable gap")
     slices = conclusion["openImplementationSlices"]
-    if [row.get("pullRequest") for row in slices] != [73, 91, 94, 95]:
+    if slices != EXPECTED_OPEN_SLICES:
         raise CheckError("open implementation slice inventory drift")
     for row in slices:
         if not SHA40.fullmatch(str(row.get("head", ""))):

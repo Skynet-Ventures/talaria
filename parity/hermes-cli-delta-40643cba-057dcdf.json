@@ -68,7 +68,7 @@
       "disposition": "covered-by-pr91-excluded",
       "talariaStatus": "pr91-excluded",
       "contract": "Durable update action receipts and bounded recovery status are already owned by Talaria PR91, not this CLI delta ledger.",
-      "evidence": "PR91 is pinned at cc3322f674ac388c55a9d2694efaaf7e941a1666; raw update plans remain host-local inventory rather than a mobile-safe projection.",
+      "evidence": "PR91 review head 733b9621228b375f15c4132046ef750c56489f94 retains implementation cc3322f674ac388c55a9d2694efaaf7e941a1666; raw update plans remain host-local inventory rather than a mobile-safe projection.",
       "required": "Do not add a second update/restart path. Any future plan read needs separately bounded, authenticated, redacted authority."
     },
     "CLI04-provider-catalog-host-runtime": {
@@ -81,11 +81,11 @@
     },
     "CLI05-pr94-model-presentation": {
       "classification": "portable-mobile-presentation",
-      "disposition": "implemented-unmerged-uncertified",
-      "talariaStatus": "pr94-unmerged-uncertified",
+      "disposition": "merged-to-parent-not-main-uncertified",
+      "talariaStatus": "pr94-parent-merged-not-main-uncertified",
       "contract": "The exact search aliases and bounded sale presentation are read-only model-options presentation, never model selection authority.",
-      "evidence": "PR94 ff0ea1a6e91c3af0996f406dac0acf9f607cc166 adds x-preview-f-free search aliases and renders only finite integral 1...100 discount_percent values in both pickers.",
-      "required": "Treat PR94 as local/unmerged/uncertified until focused Swift tests, verifier, and integration certification land; do not claim it is merged."
+      "evidence": "PR94 implementation ff0ea1a6e91c3af0996f406dac0acf9f607cc166, merged into parent branch codex/model-contract-copy as 5cb68d2dd38539b2f5de789e7be95a545437ca22, adds x-preview-f-free search aliases and renders only finite integral 1...100 discount_percent values in both pickers.",
+      "required": "Treat PR94 as parent-merged but not in main or certified until parent PR67 CI/review and focused Swift/device integration certification land."
     },
     "CLI06-cli-local-management": {
       "classification": "host-cli-runtime",
@@ -169,7 +169,7 @@
     "host-cli-only": 65,
     "covered-by-pr91-excluded": 6,
     "already-portable": 1,
-    "implemented-unmerged-uncertified": 2,
+    "merged-to-parent-not-main-uncertified": 2,
     "covered-by-predecessor": 14,
     "verify-on-host": 2,
     "upstream-contract-blocked": 1
@@ -179,7 +179,7 @@
     "existing-model-options-consumer": 32,
     "pr91-excluded": 6,
     "existing-generic-cron-delivery": 1,
-    "pr94-unmerged-uncertified": 2
+    "pr94-parent-merged-not-main-uncertified": 2
   },
   "finalNetFiles": [
     {
@@ -467,19 +467,19 @@
         "60b6269142db284f5142a73b4be8e6d78c0661a3",
         "7a54ab22e648a0d2d7e740fad908dda93f025820"
       ],
-      "note": "PR91 owns durable host-update recovery receipt/status behavior. This ledger retains exact source inventory but excludes that contract from new mobile work."
+      "note": "PR91 implementation remains cc3322f674ac388c55a9d2694efaaf7e941a1666; current review head 733b9621228b375f15c4132046ef750c56489f94 includes refreshed main. This ledger retains exact source inventory but excludes that contract from new mobile work."
     },
     {
       "id": "PR94-model-discount-presentation",
-      "branch": "codex/model-discount-presentation",
-      "commit": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
-      "parent": "27a12f11c3825cc8ada4860b60e298acdcc4fa37",
-      "state": "unmerged-uncertified",
+      "branch": "codex/model-contract-copy",
+      "commit": "5cb68d2dd38539b2f5de789e7be95a545437ca22",
+      "parent": "27a12f11c3825cc8ada4860b60e298acdcc4fa37 ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+      "state": "merged-to-parent-not-main-uncertified",
       "upstreamCommits": [
         "1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4",
         "bd93a5f3160dc84d1891e27b49bffeb88483d8f0"
       ],
-      "note": "Local-only PR94 adds search-only Ox Alpha aliases and bounded read-only discount presentation. It is neither merged nor certified."
+      "note": "PR94 implementation ff0ea1a6e91c3af0996f406dac0acf9f607cc166 is merged into its parent branch at this merge commit, but is not in main or certified. It adds search-only Ox Alpha aliases and bounded read-only discount presentation."
     }
   ],
   "sourceAssertions": [

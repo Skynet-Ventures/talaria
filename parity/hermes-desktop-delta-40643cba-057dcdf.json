@@ -48,7 +48,7 @@
     "cross-referenced-predecessor": 58,
     "desktop-only": 45,
     "existing-backlog": 1,
-    "implemented-by-pr94-not-merged-or-device-certified": 2,
+    "implemented-by-pr94-merged-to-parent-not-main-or-device-certified": 2,
     "merge-parent-integration": 34,
     "test-fixture-or-build-only": 18
   },
@@ -7180,7 +7180,7 @@
     },
     {
       "branch": "codex/durable-room-composer-drafts",
-      "head": "1d88002454ec70c06bc3aa60fa44248a1b848cfd",
+      "head": "7e5377115c1103235d41c4d55440db03f510065a",
       "id": "durable-room-composer-drafts"
     },
     {
@@ -7194,8 +7194,8 @@
       "id": "stale-bot-session-reconciliation"
     },
     {
-      "branch": "codex/attachment-picker-polish",
-      "head": "9f26348d576004d40da8b3f03c2cb6c93b4333c3",
+      "branch": "codex/attachment-picker-restack",
+      "head": "158589b77992728195e1665d2e446b550ada457a",
       "id": "attachment-picker-polish"
     },
     {
@@ -7220,7 +7220,7 @@
     },
     {
       "branch": "codex/durable-host-update-recovery",
-      "head": "cc3322f674ac388c55a9d2694efaaf7e941a1666",
+      "head": "733b9621228b375f15c4132046ef750c56489f94",
       "id": "durable-host-update-recovery"
     },
     {
@@ -7230,10 +7230,11 @@
     }
   ],
   "pr94": {
-    "branch": "codex/model-discount-presentation",
-    "head": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+    "branch": "codex/model-contract-copy",
+    "head": "5cb68d2dd38539b2f5de789e7be95a545437ca22",
     "id": "pr94-model-discount-presentation",
-    "state": "implemented-on-open-branch-not-merged-or-device-certified",
+    "implementationHead": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+    "state": "merged-to-parent-not-main-or-device-certified",
     "talariaFiles": [
       "Packages/Talaria/Sources/TalariaUI/GatewayClient+Models.swift",
       "Packages/Talaria/Sources/TalariaUI/Screens/ModelEffortSheet.swift",

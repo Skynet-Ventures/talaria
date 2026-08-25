@@ -32,19 +32,25 @@ behavior.
 
 ## Portable work still open
 
-- PR73 `5658b57c21c45a5b9c6108c7de55439984e0a40f`: heartbeat, foreground
-  validation, replacement-transport retirement, and exact-current inbound
-  recovery. Local suites pass; corrected physical-device installation and
-  lock/return certification remain open.
-- PR91 `cc3322f674ac388c55a9d2694efaaf7e941a1666`: durable host-update receipt
+- PR73 `e5abb0fae3ca84757631f835495fa1f15bfda016`: heartbeat, foreground
+  validation, replacement-transport retirement, exact-current inbound
+  recovery, and monitoring during initial connection adoption. The full 1,111
+  XCTest + 39 Swift Testing suite and `talaria-verify` pass, and a corrected
+  signed device build succeeds; installation plus lock/return certification
+  remain open.
+- PR91 review head `733b9621228b375f15c4132046ef750c56489f94`
+  (implementation `cc3322f674ac388c55a9d2694efaaf7e941a1666`): durable host-update receipt
   recovery. Merge and disposable-host live proof remain open.
-- PR94 `ff0ea1a6e91c3af0996f406dac0acf9f607cc166`: bounded discount presentation
-  and Ox Alpha search aliases. Independent QA and CI are green, but its
-  dependency chain and device proof remain open.
+- PR94 implementation `ff0ea1a6e91c3af0996f406dac0acf9f607cc166` was merged
+  into parent branch `codex/model-contract-copy` as
+  `5cb68d2dd38539b2f5de789e7be95a545437ca22`. It is not in `main`; parent PR67
+  CI/review and device proof remain open.
 - PR95 review head `887de277b1ea9b9f2860b85e9e38b5fe8b2e8971`
   (implementation `4a06df18e768fe4bb8a206dc86f1dce0a08feec6`): exact-source push admission
   plus configured bot title/avatar presentation. Merge and device proof remain
   open.
+- PR98 `9a476ca669db09c294fde971062fe996a1bcaed8`: live bot-profile model
+  switching. CI, independent review, and device proof remain open.
 
 These statuses are certification facts, not reasons to retain an older Hermes
 source pin: the new pin says the source range has been audited and dispositioned.

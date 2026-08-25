@@ -66,7 +66,7 @@ class ResidualRuntimeDeltaCheckerTests(unittest.TestCase):
         rows = {row["commit"]: row for row in entries}
         self.assertEqual(rows[residual.REARM_COMMIT]["classification"], "upstream-contract-blocked")
         self.assertEqual(rows[residual.AUXILIARY_BLOCKED_COMMIT]["classification"], "upstream-contract-blocked")
-        self.assertEqual(rows["1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4"]["talariaStatus"], "pr94-unmerged-uncertified")
+        self.assertEqual(rows["1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4"]["talariaStatus"], "pr94-parent-merged-not-main-uncertified")
 
     def test_scope_exclusions_are_bounded_and_explicit(self) -> None:
         self.assertTrue(residual._is_residual_production_path("agent/compaction_display.py"))

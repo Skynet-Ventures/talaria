@@ -149,12 +149,12 @@ CLASSIFICATIONS = {
 }
 DISPOSITIONS = {
     "covered-by-predecessor-ledger", "covered-by-open-talaria-slice",
-    "dynamic-catalog-already-consumed", "implemented-unmerged-uncertified",
+    "dynamic-catalog-already-consumed", "merged-to-parent-not-main-uncertified",
     "other-client-only", "host-only", "merge-integration", "upstream-contract-blocked",
 }
 TALARIA_STATUSES = {
     "none", "predecessor-ledger", "rich-transcript-current", "gateway-heartbeat-current",
-    "model-options-current", "message-agent-current", "pr94-unmerged-uncertified",
+    "model-options-current", "message-agent-current", "pr94-parent-merged-not-main-uncertified",
     "authority-blocked",
 }
 
@@ -172,23 +172,23 @@ CLUSTER_DEFINITIONS: dict[str, dict[str, str]] = {
         "disposition": "covered-by-open-talaria-slice",
         "talariaStatus": "gateway-heartbeat-current",
         "contract": "Silent socket failure is detected with a bounded gateway.ping heartbeat and socket-generation invalidation; reconnect ownership stays with the client transport.",
-        "evidence": "Talaria codex/gateway-heartbeat@5658b57c21c45a5b9c6108c7de55439984e0a40f adds bounded silent-socket detection, immediate foreground validation, superseded-transport retirement, adopted event-authority fencing, bounded OAuth preflight, and fail-closed credential rotation.",
-        "required": "Run transport heartbeat tests plus an authenticated sleep/proxy-idle reconnect proof before certification.",
+        "evidence": "Talaria codex/gateway-heartbeat@e5abb0fae3ca84757631f835495fa1f15bfda016 adds bounded silent-socket detection, immediate foreground validation, early initial-adoption monitoring, superseded-transport retirement, adopted event-authority fencing, bounded OAuth preflight, and fail-closed credential rotation. The full 1,111 XCTest + 39 Swift Testing suite and talaria-verify pass, and the corrected signed build succeeds.",
+        "required": "Install the corrected build and complete authenticated sleep/proxy-idle reconnect proof before certification.",
     },
     "R03-model-presentation-pr94": {
         "classification": "portable-already-covered",
-        "disposition": "implemented-unmerged-uncertified",
-        "talariaStatus": "pr94-unmerged-uncertified",
+        "disposition": "merged-to-parent-not-main-uncertified",
+        "talariaStatus": "pr94-parent-merged-not-main-uncertified",
         "contract": "Model identity, provider routing, availability, and prices remain gateway-owned. Search aliases and bounded discount display are presentation-only.",
-        "evidence": "PR94 codex/model-discount-presentation@ff0ea1a6e91c3af0996f406dac0acf9f607cc166 covers the Ox Alpha aliases and bounded sale hint without a config mutation.",
-        "required": "Merge and run focused model-contract/device/live-gateway proof before calling PR94 certified.",
+        "evidence": "PR94 implementation ff0ea1a6e91c3af0996f406dac0acf9f607cc166 was merged into parent branch codex/model-contract-copy as 5cb68d2dd38539b2f5de789e7be95a545437ca22; it covers the Ox Alpha aliases and bounded sale hint without a config mutation.",
+        "required": "Complete parent PR67 CI/review, merge the parent to main, and run focused model-contract/device/live-gateway proof before calling PR94 certified.",
     },
     "R04-model-catalog": {
         "classification": "portable-already-covered",
         "disposition": "dynamic-catalog-already-consumed",
         "talariaStatus": "model-options-current",
         "contract": "Provider/model, effort, capability, and price inventory is gateway-declared through model.options; phone code must not create a static provider map or credential mutation from a catalog change.",
-        "evidence": "Talaria model-contract-copy@27a12f11c3825cc8ada4860b60e298acdcc4fa37 decodes the live model options shape; the range changes host catalog/routing data rather than a new phone wire authority.",
+        "evidence": "Talaria model-contract-copy@5cb68d2dd38539b2f5de789e7be95a545437ca22 decodes the live model options shape and contains merged PR94 presentation; the range changes host catalog/routing data rather than a new phone wire authority.",
         "required": "Refresh model.options and retain gateway IDs; any provider credential or config write needs separately bounded authenticated authority.",
     },
     "R05-a2a-canonical-transcript": {
@@ -558,12 +558,12 @@ def _validate_talaria_references(metadata: dict[str, Any]) -> None:
     expected = {
         "rich-transcript-hydration": ("codex/rich-transcript-hydration", "d5bad705f1c19d716eea4abb8de1ba4206659dde", "99c203cd516491d94d255b46943315a5169f39a1"),
         "rich-transcript-structured-output": ("codex/rich-transcript-structured-output", "fdee839fdc1fda8a4a8233ff5e459795d09752b0", "79ccf0f5aaaaa8fac2efd742aba1a4a7a720c649"),
-        "gateway-heartbeat": ("codex/gateway-heartbeat", "5658b57c21c45a5b9c6108c7de55439984e0a40f", "64c595025202bfc5be028c23c95030c07298deb9"),
-        "model-contract-copy": ("codex/model-contract-copy", "27a12f11c3825cc8ada4860b60e298acdcc4fa37", "ccb945a03bc1f9dda9a50b151becef8636fa88f4"),
+        "gateway-heartbeat": ("codex/gateway-heartbeat", "e5abb0fae3ca84757631f835495fa1f15bfda016", "5658b57c21c45a5b9c6108c7de55439984e0a40f"),
+        "model-contract-copy": ("codex/model-contract-copy", "5cb68d2dd38539b2f5de789e7be95a545437ca22", "27a12f11c3825cc8ada4860b60e298acdcc4fa37 ff0ea1a6e91c3af0996f406dac0acf9f607cc166"),
         "message-agent-projection-v2": ("codex/current-hermes-message-agent-projection-v2", "d6024e26a805c35f9cba91c0c6b1c9e9813f13b4", "f332d263d9bb2d5a53feed3727a52a5e2dd89c88"),
         "mcp-live-reload": ("codex/mcp-live-reload", "9851fca979f40b08df283855de290de4e3f04568", "ccb945a03bc1f9dda9a50b151becef8636fa88f4"),
         "auxiliary-model-administration": ("codex/auxiliary-model-administration", "ebc1c577887c1f98e992a9900cbb43a4f95fe6e9", "1ec216d77e156f72d6184b82c252cdff26bb6eda"),
-        "PR94-model-discount-presentation": ("codex/model-discount-presentation", "ff0ea1a6e91c3af0996f406dac0acf9f607cc166", "27a12f11c3825cc8ada4860b60e298acdcc4fa37"),
+        "PR94-model-discount-presentation": ("codex/model-contract-copy", "5cb68d2dd38539b2f5de789e7be95a545437ca22", "27a12f11c3825cc8ada4860b60e298acdcc4fa37 ff0ea1a6e91c3af0996f406dac0acf9f607cc166"),
     }
     if not isinstance(refs, list) or len(refs) != len(expected):
         raise CheckError("Talaria reference inventory drift")

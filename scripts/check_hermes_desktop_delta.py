@@ -83,7 +83,7 @@ OPEN_SLICE_HEADS = {
     ),
     "durable-room-composer-drafts": (
         "codex/durable-room-composer-drafts",
-        "1d88002454ec70c06bc3aa60fa44248a1b848cfd",
+        "7e5377115c1103235d41c4d55440db03f510065a",
     ),
     "durable-room-member-holds": (
         "codex/durable-room-member-holds",
@@ -94,8 +94,8 @@ OPEN_SLICE_HEADS = {
         "23bf4e618a4b772bc2b7b6c4dc30f456d8ff14d0",
     ),
     "attachment-picker-polish": (
-        "codex/attachment-picker-polish",
-        "9f26348d576004d40da8b3f03c2cb6c93b4333c3",
+        "codex/attachment-picker-restack",
+        "158589b77992728195e1665d2e446b550ada457a",
     ),
     "artifact-remote-body": (
         "codex/artifact-remote-body",
@@ -115,7 +115,7 @@ OPEN_SLICE_HEADS = {
     ),
     "durable-host-update-recovery": (
         "codex/durable-host-update-recovery",
-        "cc3322f674ac388c55a9d2694efaaf7e941a1666",
+        "733b9621228b375f15c4132046ef750c56489f94",
     ),
     "live-activity-policy": (
         "codex/current-hermes-live-activity-policy",
@@ -125,9 +125,10 @@ OPEN_SLICE_HEADS = {
 
 PR94 = {
     "id": "pr94-model-discount-presentation",
-    "branch": "codex/model-discount-presentation",
-    "head": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
-    "state": "implemented-on-open-branch-not-merged-or-device-certified",
+    "branch": "codex/model-contract-copy",
+    "head": "5cb68d2dd38539b2f5de789e7be95a545437ca22",
+    "implementationHead": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+    "state": "merged-to-parent-not-main-or-device-certified",
     "upstreamCommits": [
         "1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4",
         "bd93a5f3160dc84d1891e27b49bffeb88483d8f0",
@@ -153,7 +154,7 @@ CLASSIFICATIONS = {
 DISPOSITIONS = {
     "cross-referenced-predecessor",
     "covered-by-open-slice",
-    "implemented-by-pr94-not-merged-or-device-certified",
+    "implemented-by-pr94-merged-to-parent-not-main-or-device-certified",
     "desktop-only",
     "existing-backlog",
     "test-fixture-or-build-only",
@@ -376,12 +377,12 @@ def _policy(
         return {
             "cluster": "D06-model-settings-and-provider-surface",
             "classification": "portable-model-presentation",
-            "disposition": "implemented-by-pr94-not-merged-or-device-certified",
+            "disposition": "implemented-by-pr94-merged-to-parent-not-main-or-device-certified",
             "talariaSlice": PR94["id"],
             "predecessors": predecessor_text,
             "contract": "Model search aliases and bounded provider discount metadata are local presentation only; wire IDs, catalog identity, routing, and provider ownership remain gateway-owned.",
-            "evidence": "The exact Desktop source path is retained above; PR94 pins the matching Talaria alias and bounded-sale presentation implementation.",
-            "required": "Run the PR94 model-contract tests plus device/live-gateway certification before claiming merged or certified coverage.",
+            "evidence": "The exact Desktop source path is retained above; PR94 implementation ff0ea1a6e91c3af0996f406dac0acf9f607cc166 is present in parent merge 5cb68d2dd38539b2f5de789e7be95a545437ca22.",
+            "required": "Complete parent PR67 CI/review, merge it to main, then run the PR94 model-contract plus device/live-gateway certification before claiming certified coverage.",
         }
     if commit in EXISTING_BACKLOG_COMMITS:
         return {
@@ -732,7 +733,7 @@ def load(metadata_path: Path) -> tuple[dict[str, Any], list[dict[str, str]]]:
     if slices != expected_slices:
         raise CheckError("open Talaria slice inventory drift")
     if metadata["pr94"] != PR94:
-        raise CheckError("PR94 implementation/not-merged certification state drift")
+        raise CheckError("PR94 parent-merge/main/device certification state drift")
     assertions = metadata["sourceAssertions"]
     if assertions != SOURCE_ASSERTIONS:
         raise CheckError("source assertion inventory drift")
@@ -817,9 +818,13 @@ def _verify_open_slice_heads(metadata: dict[str, Any]) -> None:
         actual = _git(ROOT, "show-ref", "--verify", "--hash", f"refs/heads/{row['branch']}")
         if actual != row["head"]:
             raise CheckError(f"open Talaria slice ref drift: {row['id']}")
-    actual_pr94 = _git(ROOT, "show-ref", "--verify", "--hash", f"refs/heads/{PR94['branch']}")
+    remote_ref = f"refs/remotes/origin/{PR94['branch']}"
+    try:
+        actual_pr94 = _git(ROOT, "show-ref", "--verify", "--hash", remote_ref)
+    except CheckError:
+        actual_pr94 = _git(ROOT, "show-ref", "--verify", "--hash", f"refs/heads/{PR94['branch']}")
     if actual_pr94 != PR94["head"]:
-        raise CheckError("PR94 open branch head drift")
+        raise CheckError("PR94 parent branch head drift")
     assertions = [
         ("Packages/Talaria/Sources/TalariaUI/GatewayClient+Models.swift", "boundedDiscountPercent"),
         ("Packages/Talaria/Sources/TalariaUI/Screens/ModelEffortSheet.swift", "ModelPricePresentation"),

@@ -90,8 +90,8 @@ class CLIDeltaCheckerTests(unittest.TestCase):
         pr94 = next(row for row in metadata["talariaReferences"] if row["id"] == (
             "PR94-model-discount-presentation"
         ))
-        self.assertEqual(pr94["commit"], "ff0ea1a6e91c3af0996f406dac0acf9f607cc166")
-        self.assertEqual(pr94["state"], "unmerged-uncertified")
+        self.assertEqual(pr94["commit"], "5cb68d2dd38539b2f5de789e7be95a545437ca22")
+        self.assertEqual(pr94["state"], "merged-to-parent-not-main-uncertified")
         self.assertEqual(pr94["upstreamCommits"], [
             "1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4",
             "bd93a5f3160dc84d1891e27b49bffeb88483d8f0",

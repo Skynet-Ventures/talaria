@@ -38,7 +38,7 @@ d524cc9a16e13be42762984d21c1e4d19fbce24e	tools/browser_extension_router.py;tools
 a5882058de7db8c34bf6d72f05c42183b08ab46b	tools/browser_extension_router.py	1	R09-other-client-only	other-client-only	other-client-only	none	gateway-platform-current:G02-browser-host
 f8e5949f61f2b519ff1b937ff3d6f745a11327b9	agent/model_metadata.py	1	R04-model-catalog	portable-already-covered	dynamic-catalog-already-consumed	model-options-current	none
 ac8dff4fbcf47a392a3cddcbec068aa05930ab47	agent/auxiliary_client.py	1	R10-host-runtime	host-only	host-only	none	none
-1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4	ui-tui/src/lib/model-search-text.ts;web/src/lib/model-search-text.ts	1	R03-model-presentation-pr94	portable-already-covered	implemented-unmerged-uncertified	pr94-unmerged-uncertified	desktop-current:D06-model-settings-and-provider-surface;cli-current:CLI05-pr94-model-presentation
+1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4	ui-tui/src/lib/model-search-text.ts;web/src/lib/model-search-text.ts	1	R03-model-presentation-pr94	portable-already-covered	merged-to-parent-not-main-uncertified	pr94-parent-merged-not-main-uncertified	desktop-current:D06-model-settings-and-provider-surface;cli-current:CLI05-pr94-model-presentation
 01d8562fce28a77362e3e3ce7797f3aae57b1985	agent/model_metadata.py;plugins/model-providers/zai/__init__.py	1	R04-model-catalog	portable-already-covered	dynamic-catalog-already-consumed	model-options-current	cli-current:CLI04-provider-catalog-host-runtime
 9e36774d77b90982f225c5417c92ee95a1ec9ec9	plugins/platforms/telegram/adapter.py	1	R09-other-client-only	other-client-only	other-client-only	none	none
 3841910cee795960fce630a8a34aa5a00f1916ab	plugins/platforms/telegram/adapter.py	1	R09-other-client-only	other-client-only	other-client-only	none	none
@@ -200,4 +200,3 @@ e3f695e5e00ef8718d8829fbe44fd3d2e36ed236	ui-tui/src/gatewayClient.ts;ui-tui/src/
 111d8095627b2d56b4a70df4b78b950864af6f28	plugins/platforms/telegram/adapter.py	1	R09-other-client-only	other-client-only	other-client-only	none	none
 e400e0088767a596ee21985d661a924cb087775a	plugins/platforms/telegram/adapter.py	2	M01-merge-integration	merge-integration	merge-integration	predecessor-ledger	none
 057dcdf236f8a6a26721c10fcc6ccb72726e272a	plugins/platforms/telegram/adapter.py	2	M01-merge-integration	merge-integration	merge-integration	predecessor-ledger	core-runtime:R09-merge-parent-integration;desktop-current:D10-merge-parent-integration;cli-current:CLI00-merge-parent-integration
-

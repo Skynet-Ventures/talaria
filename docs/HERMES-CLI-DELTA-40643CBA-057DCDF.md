@@ -59,8 +59,9 @@ already portable through Talaria's generic delivery-target handling. It keeps
 its PR85 predecessor reference and needs live proof, not a new iOS mutation.
 
 The durable host-update recovery subset is explicitly recorded as
-`covered-by-pr91-excluded`. PR91 is
-`cc3322f674ac388c55a9d2694efaaf7e941a1666`; this ledger does not duplicate
+`covered-by-pr91-excluded`. PR91 review head is
+`733b9621228b375f15c4132046ef750c56489f94` (implementation
+`cc3322f674ac388c55a9d2694efaaf7e941a1666`); this ledger does not duplicate
 its bounded receipt/status design or authorize a mobile restart/update path.
 Raw `hermes update --plan` inventory is still host-local and unbounded for
 mobile purposes.
@@ -88,11 +89,12 @@ Only after that authority exists is
 `codex/current-hermes-cron-push-isolation@28e9f713e4aa46fc78fbaa1ef19abf0892ff3c8e`
 a suitable narrow mobile dependency base.
 
-### PR94 model presentation: local, unmerged, uncertified
+### PR94 model presentation: merged to parent, not main, uncertified
 
-The manifest records local-only PR94 commit
-`ff0ea1a6e91c3af0996f406dac0acf9f607cc166`, based on
-`27a12f11c3825cc8ada4860b60e298acdcc4fa37`. It covers:
+The manifest records PR94 implementation
+`ff0ea1a6e91c3af0996f406dac0acf9f607cc166`, merged into parent branch
+`codex/model-contract-copy` as `5cb68d2dd38539b2f5de789e7be95a545437ca22`.
+It covers:
 
 - `1bf8bd2c7d2057de4fdf80236b0b017f7d7097e4` — search-only
   `x-preview-f-free → ox-alpha, ox` aliases; and
@@ -103,7 +105,8 @@ The alias never changes display, identity, provider ownership, availability,
 or routing. Discount rendering is read-only and limited to finite integral
 `1...100` values. The discount gap is pre-existing PARITY.md row 390 /
 pre-range `649472f`, not a newly claimed `057dcdf` wire contract. PR94 is
-explicitly **not merged or certified**.
+explicitly **not in `main` or certified**; parent PR67 CI/review and device
+proof remain open.
 
 ## Verification
 
@@ -117,5 +120,5 @@ python3 scripts/test_check_hermes_cli_delta.py
 
 The first command verifies exact endpoint commits, every-parent history,
 predecessor source rows, final-net hashes, critical source assertions, and the
-PR91/PR94 local reference parents. The test suite mutates fixture metadata and
+PR91 implementation and PR94 parent-merge references. The test suite mutates fixture metadata and
 rows to prove scope, classification, reference, and hash drift fail closed.
