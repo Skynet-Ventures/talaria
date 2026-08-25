@@ -12,6 +12,8 @@ import Foundation
 // - Current gateways advertise `heartbeat:true` on gateway.ready and answer
 //   `gateway.ping`; Talaria then detects silent half-open sockets. Older peers
 //   remain on the URLSession/WebSocket close-event path.
+// - Current gateways also advertise an opaque `replay_epoch`, stamp session
+//   events with `params.seq`, and answer `session.events.since` after a drop.
 // - On disconnect, live sessions are parked for ~20 s; reconnect and
 //   session.resume within the grace window reattaches in-flight state.
 
@@ -55,6 +57,9 @@ public actor GatewayTransport {
     private let heartbeatPolicy: GatewayHeartbeatPolicy
     private var heartbeat = GatewayHeartbeatState(policy: .current)
     private var heartbeatTask: Task<Void, Never>?
+    /// Process identity advertised by gateway.ready. Sequence numbers may be
+    /// compared only while this exact value is unchanged.
+    private(set) public var replayEpoch: String?
     private(set) public var state: TransportState = .idle
 
     /// All server events, in arrival order. Single consumer.
@@ -68,7 +73,13 @@ public actor GatewayTransport {
         self.heartbeatPolicy = heartbeatPolicy
         self.heartbeat = GatewayHeartbeatState(policy: heartbeatPolicy)
         var cont: AsyncStream<GatewayEvent>.Continuation!
-        self.events = AsyncStream(bufferingPolicy: .unbounded) { cont = $0 }
+        // Replay negotiation intentionally parks live frames for a bounded
+        // five-second window. Keep that queue finite too; a current gateway's
+        // seq gap caused by overflow retires the socket instead of silently
+        // publishing out of order.
+        self.events = AsyncStream(
+            bufferingPolicy: .bufferingNewest(GatewayReplayCodec.maximumTotalEvents)
+        ) { cont = $0 }
         self.eventsCont = cont
     }
 
@@ -202,12 +213,15 @@ public actor GatewayTransport {
         if obj["method"]?.stringValue == "event", let params = obj["params"] {
             if params["type"]?.stringValue == "gateway.ready" {
                 let advertised = params["payload"]?["heartbeat"]?.boolValue == true
+                replayEpoch = Self.admittedReplayEpoch(
+                    params["payload"]?["replay_epoch"])
                 heartbeat.activate(advertised: advertised, now: Self.uptime)
                 if advertised { startHeartbeat() }
             }
             let event = GatewayEvent(type: params["type"]?.stringValue ?? "",
                                      sessionID: params["session_id"]?.stringValue ?? "",
                                      payload: params["payload"],
+                                     sequence: Self.admittedSequence(params["seq"]),
                                      inboundSequence: frameSequence)
             eventsCont.yield(event)
             return
@@ -244,6 +258,20 @@ public actor GatewayTransport {
     }
 
     private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    static func admittedSequence(_ value: JSONValue?) -> UInt64? {
+        guard let number = value?.doubleValue, number.isFinite, number >= 1,
+              number.rounded(.towardZero) == number,
+              number <= GatewayReplayCodec.maximumSafeJSONInteger else { return nil }
+        return UInt64(number)
+    }
+
+    static func admittedReplayEpoch(_ value: JSONValue?) -> String? {
+        guard let raw = value?.stringValue else { return nil }
+        let epoch = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !epoch.isEmpty, epoch.unicodeScalars.count <= 256 else { return nil }
+        return epoch
+    }
 
     private func startHeartbeat() {
         guard heartbeatPolicy.isEnabled, heartbeatTask == nil else { return }

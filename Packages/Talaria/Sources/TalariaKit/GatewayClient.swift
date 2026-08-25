@@ -705,6 +705,17 @@ public actor GatewayClient {
     /// after the exact same socket became authoritative.
     private var eventAuthorityEpoch: UInt64 = 0
     private var adoptedEventAuthorityEpoch: UInt64?
+    private struct PendingReplayAdoption: Sendable {
+        var publication: GatewayReplayPublication
+        var targetWatermarks: [String: UInt64]
+        var transportEpoch: UInt64
+    }
+    /// Replay identity and per-session cursors survive transport replacement
+    /// because this GatewayClient actor survives supervised reconnects.
+    private var replayEpoch: String?
+    private var replayWatermarks: [String: UInt64] = [:]
+    private var replaySessionOrder: [String] = []
+    private var pendingReplayAdoption: PendingReplayAdoption?
 
     public init(baseURL: URL, credential: GatewayCredential,
                 keychain: KeychainStore = KeychainStore()) {
@@ -810,6 +821,30 @@ public actor GatewayClient {
         eventsTask = task
     }
 
+    func installPreparedReplayForTesting(
+        events: [GatewayEvent], certainty: GatewayReplayCertainty,
+        epoch: String = "test-epoch"
+    ) {
+        replayEpoch = epoch
+        var targets: [String: UInt64] = [:]
+        for event in events {
+            guard !event.sessionID.isEmpty, let sequence = event.sequence else { continue }
+            targets[event.sessionID] = max(targets[event.sessionID] ?? 0, sequence)
+        }
+        pendingReplayAdoption = PendingReplayAdoption(
+            publication: GatewayReplayPublication(
+                events: events, certainty: certainty, sourceEpoch: epoch,
+                requestedSessionCount: Set(events.map(\.sessionID)).count),
+            targetWatermarks: targets,
+            transportEpoch: transportEpoch)
+    }
+
+    func replayWatermarksForTesting() -> [String: UInt64] { replayWatermarks }
+
+    func admitLiveEventForTesting(_ event: GatewayEvent) -> Bool {
+        admitLiveEvent(event)
+    }
+
     /// Install the owning app's source-qualified lifecycle admission. The
     /// check lives on the client rather than only in route resolution so a
     /// mutation that begins after a caller obtains this actor still wins the
@@ -844,6 +879,19 @@ public actor GatewayClient {
     /// without network traffic and intentionally follow the same publication.
     @discardableResult
     public func publishCurrentTransportForEvents() async -> Bool {
+        guard let publication = await prepareCurrentTransportForEvents() else { return false }
+        // Compatibility entry point for non-AppModel owners. AppModel uses the
+        // split prepare/apply/commit contract so replay is applied before its
+        // post-reconnect snapshots. Other owners still receive replay through
+        // their existing handler fan-out.
+        return commitPreparedReplay(
+            publication.token, excludingEpochHandler: nil,
+            dispatchReplayToHandlers: true)
+    }
+
+    /// Adopt the installed transport but keep its buffered live events parked
+    /// until AppModel has applied the prepared replay ahead of snapshots.
+    public func prepareCurrentTransportForEvents() async -> GatewayReplayPublication? {
         let ready: Bool
         if let foregroundReadinessForTesting {
             ready = foregroundReadinessForTesting
@@ -854,10 +902,61 @@ public actor GatewayClient {
         }
         guard ready else {
             adoptedEventAuthorityEpoch = nil
-            return false
+            return nil
         }
         eventAuthorityEpoch &+= 1
         adoptedEventAuthorityEpoch = eventAuthorityEpoch
+        if var pending = pendingReplayAdoption {
+            pending.publication = GatewayReplayPublication(
+                // Every publication attempt gets a fresh capability. A caller
+                // suspended across a second prepare cannot commit that newer
+                // transport authority with its stale token.
+                token: UUID(),
+                events: pending.publication.events,
+                certainty: pending.publication.certainty,
+                sourceEpoch: pending.publication.sourceEpoch,
+                requestedSessionCount: pending.publication.requestedSessionCount,
+                eventAuthorityEpoch: eventAuthorityEpoch)
+            pending.transportEpoch = transportEpoch
+            pendingReplayAdoption = pending
+            return pending.publication
+        }
+        let publication = GatewayReplayPublication(
+            events: [], certainty: .notNeeded, sourceEpoch: replayEpoch,
+            requestedSessionCount: 0, eventAuthorityEpoch: eventAuthorityEpoch)
+        pendingReplayAdoption = PendingReplayAdoption(
+            publication: publication, targetWatermarks: [:],
+            transportEpoch: transportEpoch)
+        return publication
+    }
+
+    /// Commit a replay only while the exact prepared socket remains published.
+    /// The primary AppModel handler can be excluded because it applies the
+    /// batch synchronously before calling here; every focused auxiliary
+    /// consumer still receives the same ordered events through normal fan-out.
+    @discardableResult
+    public func commitPreparedReplay(
+        _ token: UUID, excludingEpochHandler: UUID?,
+        dispatchReplayToHandlers: Bool = true
+    ) -> Bool {
+        guard let pending = pendingReplayAdoption,
+              pending.publication.token == token,
+              pending.transportEpoch == transportEpoch,
+              adoptedEventAuthorityEpoch == eventAuthorityEpoch else { return false }
+
+        if dispatchReplayToHandlers {
+            for event in pending.publication.events {
+                for handler in handlerSnapshot() { handler(event) }
+                for (id, handler) in epochEventHandlers where id != excludingEpochHandler {
+                    handler(event, eventAuthorityEpoch)
+                }
+            }
+        }
+        for (sessionID, sequence) in pending.targetWatermarks {
+            noteReplayWatermark(sequence, sessionID: sessionID)
+        }
+        pendingReplayAdoption = nil
+        if let transport { startEventDelivery(transport, installedEpoch: transportEpoch) }
         return true
     }
 
@@ -975,23 +1074,7 @@ public actor GatewayClient {
             if self.transport === transport { self.transport = nil }
             throw error
         }
-
-        eventsTask = Task {
-            for await event in transport.events {
-                // A cancelled old pump may already hold a frame while the
-                // actor installs a successor. Never tag it with the new
-                // authority merely because it resumes after that transition.
-                guard installedEpoch == self.transportEpoch,
-                      self.transport === transport else { return }
-                let deliveryEpoch = self.eventAuthorityEpoch
-                for handler in self.handlerSnapshot() {
-                    handler(event)
-                }
-                for handler in self.epochHandlerSnapshot() {
-                    handler(event, deliveryEpoch)
-                }
-            }
-        }
+        await prepareReplayAfterConnect(transport, installedEpoch: installedEpoch)
     }
 
     /// A gateway refresh token is rotating and single-use. Persist its
@@ -1014,12 +1097,205 @@ public actor GatewayClient {
         Array(epochEventHandlers.values)
     }
 
+    private enum ReplayFetchAnswer: Sendable {
+        case value(JSONValue)
+        case unsupported
+        case failed
+    }
+
+    /// Negotiate replay while the replacement transport's live AsyncStream is
+    /// still buffering. This closes the overlap race: replay is prepared first,
+    /// AppModel applies it, then `commitPreparedReplay` releases live frames
+    /// through the same watermark gate.
+    private func prepareReplayAfterConnect(
+        _ transport: GatewayTransport, installedEpoch: UInt64
+    ) async {
+        let sourceEpoch = await transport.replayEpoch
+        let plans = replaySessionOrder.compactMap { sessionID in
+            replayWatermarks[sessionID].map { (sessionID, $0) }
+        }.suffix(GatewayReplayCodec.maximumSessions)
+        guard !plans.isEmpty else {
+            replayEpoch = sourceEpoch
+            pendingReplayAdoption = nil
+            startEventDelivery(transport, installedEpoch: installedEpoch)
+            return
+        }
+
+        var issues: Set<GatewayReplayIssue> = []
+        switch GatewayReplayCodec.epochDisposition(
+            previous: replayEpoch, current: sourceEpoch,
+            hasWatermarks: !plans.isEmpty) {
+        case .unsupported:
+            issues.insert(.unsupportedGateway)
+            replayEpoch = nil
+            replayWatermarks.removeAll()
+            replaySessionOrder.removeAll()
+            installPendingReplay([], issues: issues, epoch: nil,
+                                 requested: plans.count, targets: [:],
+                                 installedEpoch: installedEpoch)
+            return
+        case .restarted(let sourceEpoch):
+            issues.insert(.sourceRestarted)
+            replayEpoch = sourceEpoch
+            replayWatermarks.removeAll()
+            replaySessionOrder.removeAll()
+            installPendingReplay([], issues: issues, epoch: sourceEpoch,
+                                 requested: plans.count, targets: [:],
+                                 installedEpoch: installedEpoch)
+            return
+        case .replay(let epoch):
+            // Bound by the switch so the remainder can use a nonoptional epoch.
+            guard sourceEpoch == epoch else { return }
+        case .noGap:
+            startEventDelivery(transport, installedEpoch: installedEpoch)
+            return
+        }
+        guard let sourceEpoch else { return }
+
+        let answers: [String: ReplayFetchAnswer] = await withTaskGroup(
+            of: (String, ReplayFetchAnswer).self,
+            returning: [String: ReplayFetchAnswer].self
+        ) { group in
+            for (sessionID, lastSeen) in plans {
+                group.addTask {
+                    do {
+                        let value = try await transport.request(
+                            "session.events.since",
+                            params: .object([
+                                "session_id": .string(sessionID),
+                                "last_seen": .number(Double(lastSeen)),
+                            ]),
+                            timeout: GatewayReplayCodec.requestTimeout)
+                        return (sessionID, .value(value))
+                    } catch let error as GatewayError where error.code == -32601 {
+                        return (sessionID, .unsupported)
+                    } catch {
+                        return (sessionID, .failed)
+                    }
+                }
+            }
+            var collected: [String: ReplayFetchAnswer] = [:]
+            for await (sessionID, answer) in group { collected[sessionID] = answer }
+            return collected
+        }
+
+        var events: [GatewayEvent] = []
+        var targets: [String: UInt64] = [:]
+        for (sessionID, lastSeen) in plans {
+            switch answers[sessionID] ?? .failed {
+            case .unsupported:
+                issues.insert(.unsupportedGateway)
+            case .failed:
+                issues.insert(.requestFailed)
+            case .value(let value):
+                guard let page = GatewayReplayCodec.decode(
+                    value, sessionID: sessionID, lastSeen: lastSeen,
+                    expectedEpoch: sourceEpoch) else {
+                    issues.insert(.malformedResponse)
+                    continue
+                }
+                if let issue = page.issue { issues.insert(issue) }
+                if events.count + page.events.count > GatewayReplayCodec.maximumTotalEvents {
+                    issues.insert(.bounded)
+                    continue
+                }
+                events.append(contentsOf: page.events)
+                targets[sessionID] = page.latestSequence
+            }
+        }
+        if issues.contains(.unsupportedGateway) {
+            // An epoch advertisement without the replay RPC is an internally
+            // inconsistent/older peer. Disable sequencing for this socket so
+            // it remains usable through the legacy snapshot path instead of
+            // entering a reconnect loop on its next stamped event.
+            replayEpoch = nil
+            replayWatermarks.removeAll()
+            replaySessionOrder.removeAll()
+            events.removeAll()
+            targets.removeAll()
+        }
+        installPendingReplay(events, issues: issues, epoch: sourceEpoch,
+                             requested: plans.count, targets: targets,
+                             installedEpoch: installedEpoch)
+    }
+
+    private func installPendingReplay(
+        _ events: [GatewayEvent], issues: Set<GatewayReplayIssue>, epoch: String?,
+        requested: Int, targets: [String: UInt64], installedEpoch: UInt64
+    ) {
+        let certainty: GatewayReplayCertainty = issues.isEmpty ? .complete : .uncertain(issues)
+        pendingReplayAdoption = PendingReplayAdoption(
+            publication: GatewayReplayPublication(
+                events: events, certainty: certainty, sourceEpoch: epoch,
+                requestedSessionCount: requested),
+            targetWatermarks: targets,
+            transportEpoch: installedEpoch)
+    }
+
+    private func startEventDelivery(_ transport: GatewayTransport,
+                                    installedEpoch: UInt64) {
+        guard eventsTask == nil else { return }
+        eventsTask = Task {
+            for await event in transport.events {
+                // A cancelled old pump may already hold a frame while the
+                // actor installs a successor. Never tag it with the new
+                // authority merely because it resumes after that transition.
+                guard installedEpoch == self.transportEpoch,
+                      self.transport === transport else { return }
+                guard self.admitLiveEvent(event) else { continue }
+                let deliveryEpoch = self.eventAuthorityEpoch
+                for handler in self.handlerSnapshot() { handler(event) }
+                for handler in self.epochHandlerSnapshot() { handler(event, deliveryEpoch) }
+            }
+        }
+    }
+
+    private func admitLiveEvent(_ event: GatewayEvent) -> Bool {
+        guard !event.sessionID.isEmpty else { return true }
+        guard replayEpoch != nil else { return true }
+        guard let sequence = event.sequence else {
+            // A gateway that advertised replay must stamp every session event.
+            // Continuing would silently poison the cursor; retire the exact
+            // socket and let the supervisor negotiate a fresh suffix/snapshot.
+            invalidateReplayTransport()
+            return false
+        }
+        if let last = replayWatermarks[event.sessionID] {
+            if sequence <= last { return false }
+            guard sequence == last + 1 else {
+                invalidateReplayTransport()
+                return false
+            }
+        }
+        noteReplayWatermark(sequence, sessionID: event.sessionID)
+        return true
+    }
+
+    private func invalidateReplayTransport() {
+        adoptedEventAuthorityEpoch = nil
+        eventAuthorityEpoch &+= 1
+        guard let transport else { return }
+        Task { await transport.close() }
+    }
+
+    private func noteReplayWatermark(_ sequence: UInt64, sessionID: String) {
+        replayWatermarks[sessionID] = max(replayWatermarks[sessionID] ?? 0, sequence)
+        replaySessionOrder.removeAll { $0 == sessionID }
+        replaySessionOrder.append(sessionID)
+        while replaySessionOrder.count > GatewayReplayCodec.maximumSessions {
+            let removed = replaySessionOrder.removeFirst()
+            replayWatermarks[removed] = nil
+        }
+    }
+
     public func disconnect() async {
         adoptedEventAuthorityEpoch = nil
         eventAuthorityEpoch &+= 1
         await transport?.close()
         transport = nil
         eventsTask?.cancel()
+        eventsTask = nil
+        pendingReplayAdoption = nil
     }
 
     @discardableResult
@@ -1046,6 +1322,18 @@ public actor GatewayClient {
 
     public func status() async throws -> GatewayStatus {
         try await auth.status()
+    }
+
+    /// Current gateway replay-ring occupancy for diagnostics. Older gateways
+    /// answer method-not-found; malformed telemetry is never normalized into
+    /// reassuring zeroes.
+    public func eventReplayStats() async throws -> GatewayReplayStats {
+        let result = try await rpc("session.events.stats", .object([:]), timeout: 5)
+        guard let stats = GatewayReplayStats.decode(result) else {
+            throw GatewayError(
+                code: -8, message: "session.events.stats malformed response")
+        }
+        return stats
     }
 
     // MARK: - Profiles (the bot roster)

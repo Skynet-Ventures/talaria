@@ -39,6 +39,27 @@ or certify unrelated post-cutoff movement. Automated evidence is
 real-device Wi-Fi/cellular handoff and a deliberately black-holed socket remain
 live certification cases.
 
+## Targeted post-cutoff lossless event-replay audit
+
+The exact Hermes range
+`057dcdf236f8a6a26721c10fcc6ccb72726e272a..1bbb6e5bce56e721ab685af4cd87df21bbff4d35`
+adds one portable reconnect contract in `tui_gateway/event_replay.py`,
+`tui_gateway/methods_session.py`, `tui_gateway/ws.py`, and
+`apps/shared/src/json-rpc-gateway.ts`:
+
+| Upstream contract | Talaria disposition |
+|---|---|
+| Session event frames carry a per-session monotonic `params.seq`; `gateway.ready.payload.replay_epoch` identifies the process that owns those counters. | **Implemented in `GatewayTransport` / `GatewayClient`.** Only exact positive integer sequences and bounded nonempty epochs are admitted. Cursors are retained by the surviving client actor and cleared when the source epoch changes. |
+| `session.events.since {session_id,last_seen}` returns bare event objects plus `latest_seq`, `truncated`, `count`, and `epoch`. | **Implemented with strict bounded decoding.** Session identity, epoch, count, cursor, bare-object shape, contiguous order, and a 512-event/session plus 2,048-event/transaction ceiling are enforced. RPCs have a five-second mobile deadline and at most 32 retained sessions. |
+| Live frames can race a replay response and overlap its tail. | **Implemented as an adoption transaction.** The replacement transport buffers live frames while replay is fetched; AppModel applies the replay before `session.resume`/roster snapshots, then auxiliary consumers receive the same source-epoch-stamped frames and buffered live events pass through one watermark dedupe gate. |
+| Restart, truncation, malformed response, RPC failure, and old gateway behavior must not silently claim completeness. | **Fail closed.** Restarted sources discard incompatible cursors; incomplete answers raise one reconnect warning and proceed to authoritative snapshot reconciliation. A method-unavailable/epoch-less gateway remains usable through the legacy snapshot path. |
+
+Automated evidence is `GatewayEventReplayTests`,
+`GatewayReplayAdoptionTests`, `ProtocolChecks.gatewayReplayDecoding`, the full
+Swift suite, and `talaria-verify`. Real-device certification still requires a
+mid-turn lock/background/reconnect with an overlapping live terminal frame and
+a deliberately overflowed replay ring.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit

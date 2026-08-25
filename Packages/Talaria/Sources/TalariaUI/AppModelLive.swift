@@ -198,6 +198,10 @@ final class LiveRuntime {
     /// two overlapping attempts that share a normalized endpoint.
     var connectionAttemptToken: UUID?
     var eventPump: Task<Void, Never>?
+    /// Main AppModel epoch handler. Replay is applied synchronously before
+    /// reconnect snapshots, then committed to every auxiliary handler except
+    /// this one so the primary transcript is not double-applied.
+    var primaryEpochHandlerID: UUID?
     var monitorTask: Task<Void, Never>?
     var reconnectTask: Task<Void, Never>?
 
@@ -418,7 +422,7 @@ extension AppModel {
         // arrive in ~30 fps bursts and must append in order).
         let (stream, continuation) = AsyncStream.makeStream(
             of: GatewayEpochEventDelivery.self)
-        _ = await client.addEpochEventHandler { event, transportEpoch in
+        runtime.primaryEpochHandlerID = await client.addEpochEventHandler { event, transportEpoch in
             continuation.yield(GatewayEpochEventDelivery(
                 event: event, transportEpoch: transportEpoch))
         }
@@ -559,12 +563,18 @@ extension AppModel {
 
         // Source, credential and pooled-client authority are all installed now.
         // Signal before profiles.list or any other ancillary refresh can fail.
-        guard await client.publishCurrentTransportForEvents() else {
+        guard let replay = await client.prepareCurrentTransportForEvents() else {
             _ = await registry.clientPool.disconnectIfCurrent(
                 poolSnapshot, for: savedGateway.id)
             throw GatewayError(
                 code: -3,
                 message: "connected gateway transport was not ready for adoption")
+        }
+        guard await applyPreparedGatewayReplay(
+            replay, client: client, sourceGatewayID: savedGateway.id) else {
+            _ = await registry.clientPool.disconnectIfCurrent(
+                poolSnapshot, for: savedGateway.id)
+            throw CancellationError()
         }
         // Socket ownership is established at publication, not after the
         // ancillary roster/routine/session/room refreshes below. Those calls
@@ -608,6 +618,45 @@ extension AppModel {
             && runtime.baseURL == authority.baseURL
             && runtime.connectionAttemptToken == authority.token
             && client.map(ObjectIdentifier.init) == ObjectIdentifier(authority.client)
+    }
+
+    /// Apply the primary transcript/state projection before any reconnect
+    /// snapshot can replace it, then fan the same replay through every focused
+    /// auxiliary handler and release live frames parked behind the replay RPC.
+    /// Every event is re-proven against the exact published transport after
+    /// crossing back to MainActor.
+    func applyPreparedGatewayReplay(
+        _ replay: GatewayReplayPublication, client: GatewayClient,
+        sourceGatewayID: String
+    ) async -> Bool {
+        guard self.client === client,
+              await client.isCurrentReadyTransport(
+                epoch: replay.eventAuthorityEpoch) else { return false }
+        // One source claim covers the whole synchronous MainActor batch. No
+        // reconnect/snapshot publication can interleave between two replayed
+        // deltas and leave a partially applied suffix that would duplicate on
+        // the next attempt.
+        for event in replay.events {
+            handle(event: event, sourceGatewayID: sourceGatewayID)
+        }
+
+        if case .uncertain(let issues) = replay.certainty {
+            let detail: String
+            if issues.contains(.sourceRestarted) {
+                detail = "Hermes restarted while Talaria was away. The app is reconciling from authoritative session snapshots."
+            } else if issues.contains(.truncated) || issues.contains(.bounded) {
+                detail = "The gateway replay window was incomplete. Talaria is reconciling session snapshots before showing current state."
+            } else if issues.contains(.unsupportedGateway) {
+                detail = "This gateway does not support lossless reconnect replay. Talaria is reconciling from session snapshots."
+            } else {
+                detail = "Talaria could not verify the full reconnect event gap and is reconciling from session snapshots."
+            }
+            toast(kind: .warning, title: "Checking session after reconnect",
+                  message: detail, key: "gateway-event-replay", ledger: true)
+        }
+        return await client.commitPreparedReplay(
+            replay.token,
+            excludingEpochHandler: LiveRuntime.shared.primaryEpochHandlerID)
     }
 
     private func requireCurrentConnectionTransition(generation: Int, token: UUID) throws {

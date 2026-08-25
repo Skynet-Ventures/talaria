@@ -9,13 +9,17 @@ public struct GatewayEvent: Sendable {
     /// Runtime session id; empty string for global broadcasts.
     public var sessionID: String
     public var payload: JSONValue?
+    /// Hermes' per-session replay sequence (`params.seq`). Current gateways
+    /// stamp every session event; older gateways omit it.
+    public var sequence: UInt64?
     /// Monotonic frame position assigned by the transport. Zero is reserved
     /// for synthetic/test events that predate sequencing.
     public var inboundSequence: UInt64
 
     public init(type: String, sessionID: String, payload: JSONValue?,
-                inboundSequence: UInt64 = 0) {
+                sequence: UInt64? = nil, inboundSequence: UInt64 = 0) {
         self.type = type; self.sessionID = sessionID; self.payload = payload
+        self.sequence = sequence
         self.inboundSequence = inboundSequence
     }
 
