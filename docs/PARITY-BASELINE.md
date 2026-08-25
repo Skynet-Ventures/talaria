@@ -7,20 +7,29 @@ are not current until they are regenerated against this baseline.
 ## Exact authority
 
 - Hermes repository: <https://github.com/nousresearch/hermes-agent>
-- Hermes commit: `40643cbaf9b767af146694131ffb8f8160f25e1c`
-- Talaria baseline: `04695b91e8fe7cc59a8638e266b5b151c58144ab`
-- Audited cutoff: 2026-08-20 (America/Los_Angeles), exact `40643cba` snapshot
+- Hermes commit: `057dcdf236f8a6a26721c10fcc6ccb72726e272a`
+- Talaria audit base: `7e46a9ab4e68f4f74ecc68fe2222798883a66091`
+- Audited cutoff: 2026-08-24 (America/New_York), exact `057dcdf23` snapshot
 - Machine-readable pin and authority-file hashes:
   [`parity/hermes-upstream.json`](../parity/hermes-upstream.json)
 - Audited contract delta and remaining certification:
   [`docs/HERMES-CURRENT-AUDIT.md`](HERMES-CURRENT-AUDIT.md)
-- Later authority-file-only delta through `057dcdf23` (63 exact commits; does
-  not move this canonical pin):
+- Authority-file delta from the preceding pin through `057dcdf23` (63 exact
+  commits):
   [`docs/HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md`](HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md)
-- Later production client-wire delta through `057dcdf23` (71 scoped commits,
-  partitioned into 64 new rows and 7 authority-ledger cross-references; does
-  not move this canonical pin):
+- Production client-wire delta through `057dcdf23` (71 scoped commits,
+  partitioned into 64 new rows and 7 authority-ledger cross-references):
   [`docs/HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md`](HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md)
+- Complete seven-ledger production closure that authorizes this canonical
+  repin while preserving open merge/device proof and upstream blockers:
+  [`docs/HERMES-FULL-RANGE-CLOSURE-40643CBA-057DCDF.md`](HERMES-FULL-RANGE-CLOSURE-40643CBA-057DCDF.md)
+
+The canonical pin moved only after authority, client-wire, core-runtime,
+Desktop, non-web CLI, gateway/platform, and residual production inventories
+were jointly verified. The closure has zero **undispositioned** portable gaps;
+that is not a claim that open PRs are merged or that device/live certification
+is complete. Those gates remain explicit in the closure document and component
+ledgers.
 
 The earlier `b5455fdd..c1e25cad` drift was material: it changed all five
 authority files and added canonical-chat adoption, renamed-friendly mentions,

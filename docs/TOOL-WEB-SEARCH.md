@@ -2,7 +2,7 @@
 
 Talaria renders a bounded specialist card only for Hermes' exact,
 case-sensitive `web_search` tool. This slice is based on the repository's
-pinned Hermes authority (`40643cba`); names that merely resemble web search
+pinned Hermes authority (`057dcdf23`); names that merely resemble web search
 remain generic tool evidence.
 
 ## Admission

@@ -1,9 +1,9 @@
 # Hermes authority-file delta: `40643cba..057dcdf23`
 
 This is the bounded authority-file slice of the larger current-Hermes audit.
-It does **not** move Talaria's canonical upstream pin. The manifest remains at
-`40643cbaf9b767af146694131ffb8f8160f25e1c` until the other 978 net-changed
-files in the complete range receive the same explicit treatment.
+It did **not** independently move Talaria's canonical upstream pin. The later
+seven-ledger full-range closure gives the other production scopes the same
+explicit treatment and authorizes the canonical move to `057dcdf23`.
 
 The machine ledger is
 [`parity/hermes-authority-delta-40643cba-057dcdf.tsv`](../parity/hermes-authority-delta-40643cba-057dcdf.tsv),
@@ -91,5 +91,6 @@ relay-deployment, shared-room CAS/projection, and certification analyses.
 Those targeted snapshots are cross-referenced by the evidence column where
 they genuinely overlap; they are not claimed to disposition unrelated Bot
 Mode or Desktop-guide commits. This ledger closes only the five-file authority
-slice. The complete 981-file range audit remains open, so
-`parity/hermes-upstream.json` stays unchanged.
+slice. The complete production-range proof and canonical repin are owned by
+[`HERMES-FULL-RANGE-CLOSURE-40643CBA-057DCDF.md`](HERMES-FULL-RANGE-CLOSURE-40643CBA-057DCDF.md),
+not by this component in isolation.

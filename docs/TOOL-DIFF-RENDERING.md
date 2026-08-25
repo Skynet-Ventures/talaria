@@ -1,7 +1,7 @@
 # Bounded file-edit diff rendering
 
 Authority target: the repository-governed Hermes Desktop snapshot
-`40643cbaf9b767af146694131ffb8f8160f25e1c`.
+`057dcdf236f8a6a26721c10fcc6ccb72726e272a`.
 
 Talaria recognizes explicit `inline_diff` / `diff` fields only for the exact,
 case-sensitive Hermes names `edit_file`, `patch`, and `write_file`. Live

@@ -18,6 +18,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The parity closure deliberately verifies immutable predecessor and
+          # open-slice commits, not merely the PR tip.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -25,6 +29,19 @@ jobs:
 
       - name: Validate pinned Hermes authority manifest
         run: python3 scripts/check_hermes_upstream.py
+
+      - name: Validate complete Hermes production-range closure
+        run: |
+          python3 scripts/check_hermes_full_range_closure.py
+          python3 -m unittest \
+            scripts/test_check_hermes_authority_delta.py \
+            scripts/test_check_hermes_client_wire_delta.py \
+            scripts/test_check_hermes_core_runtime_delta.py \
+            scripts/test_check_hermes_desktop_delta.py \
+            scripts/test_check_hermes_cli_delta.py \
+            scripts/test_check_hermes_gateway_platform_delta.py \
+            scripts/test_check_hermes_residual_runtime_delta.py \
+            scripts/test_check_hermes_full_range_closure.py
 
       - name: Toolchain info
         run: xcodebuild -version && swift --version

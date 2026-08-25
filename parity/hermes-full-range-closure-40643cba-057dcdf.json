@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
+  "targetCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "auditedAt": "2026-08-24",
+  "talariaAuditBase": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+  "methodology": "Seven non-overlapping or explicitly cross-referenced every-parent ledgers cover the authority, client wire, core runtime, Desktop, non-web CLI, gateway/platform, and residual production ranges. Component hashes make this closure fail closed if any inventory changes.",
+  "ledgers": [
+    {
+      "id": "authority",
+      "metadataFile": "parity/hermes-authority-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-authority-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_authority_delta.py",
+      "documentationFile": "docs/HERMES-AUTHORITY-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "775e78cf9c80db969143335ecc93913a7592fc36c6c303579a52a24a07bc9f22",
+      "entriesSha256": "34f3b775e3f613cac1158fc15f5e9051f400a9eff1707d61f29cd2c1c9d12145",
+      "scopedCommitCount": 63
+    },
+    {
+      "id": "client-wire",
+      "metadataFile": "parity/hermes-client-wire-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-client-wire-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_client_wire_delta.py",
+      "documentationFile": "docs/HERMES-CLIENT-WIRE-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "4eb018f0662d6cf9ff5d050c8feced0cb78de8d2f39095d0ef791c399be11d8a",
+      "entriesSha256": "fa882ad70c344c739376f6210106c6d1c1135fb15359203c0dbc4dccc7e5b9ca",
+      "scopedCommitCount": 71
+    },
+    {
+      "id": "core-runtime",
+      "metadataFile": "parity/hermes-core-runtime-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-core-runtime-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_core_runtime_delta.py",
+      "documentationFile": "docs/HERMES-CORE-RUNTIME-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "2f2919f5804ddc68058c3ce56e1c9e289bb369464089939a9acd7f52e7a4f143",
+      "entriesSha256": "84dfe220664489e7002da4a2a35456b2ca13ed4d0b1404f37e7724c97c723b89",
+      "scopedCommitCount": 112
+    },
+    {
+      "id": "desktop",
+      "metadataFile": "parity/hermes-desktop-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-desktop-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_desktop_delta.py",
+      "documentationFile": "docs/HERMES-DESKTOP-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "90a975cc299258eaaa55b351938f872db025e56251c9dc7d0f6bebabe152c84d",
+      "entriesSha256": "2498d4e2307bf1ca122263ec2d8e61ef7d3bc1b015e3adf64e4062ab0560ea2c",
+      "scopedCommitCount": 241
+    },
+    {
+      "id": "cli",
+      "metadataFile": "parity/hermes-cli-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-cli-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_cli_delta.py",
+      "documentationFile": "docs/HERMES-CLI-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "00ac0df1b557cf6e44cbf197ef3e53f32771ca1d01ee9819b05827a3e69a8977",
+      "entriesSha256": "d2db6c09bf284dfaea6e7b746a10f18e16d3f8fb1ee4fec690abcabbdac2c24d",
+      "scopedCommitCount": 167
+    },
+    {
+      "id": "gateway-platform",
+      "metadataFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-gateway-platform-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_gateway_platform_delta.py",
+      "documentationFile": "docs/HERMES-GATEWAY-PLATFORM-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "672db1cf853e6c52c9a49567ecea58bbcefae2fdbd6264b367e9e47f21979cdb",
+      "entriesSha256": "7d82ecd09a4e5e4dc4f281f5daa7446326636908f63d1c40989806c1655d5d5b",
+      "scopedCommitCount": 82
+    },
+    {
+      "id": "residual-runtime",
+      "metadataFile": "parity/hermes-residual-runtime-delta-40643cba-057dcdf.json",
+      "entriesFile": "parity/hermes-residual-runtime-delta-40643cba-057dcdf.tsv",
+      "checkerFile": "scripts/check_hermes_residual_runtime_delta.py",
+      "documentationFile": "docs/HERMES-RESIDUAL-RUNTIME-DELTA-40643CBA-057DCDF.md",
+      "metadataSha256": "bbc60e2ab4b426c364a54bcd636483521c40e91d757c828599cc044831f19c5b",
+      "entriesSha256": "292a2ce7eb073437c83cc39bc9e0772dd546691ab5d6933840acab7230201828",
+      "scopedCommitCount": 201
+    }
+  ],
+  "conclusion": {
+    "undispositionedPortableGapCount": 0,
+    "openImplementationSlices": [
+      {
+        "pullRequest": 73,
+        "branch": "codex/gateway-heartbeat",
+        "head": "e5abb0fae3ca84757631f835495fa1f15bfda016",
+        "status": "implemented-unmerged-device-proof-pending"
+      },
+      {
+        "pullRequest": 91,
+        "branch": "codex/durable-host-update-recovery",
+        "head": "733b9621228b375f15c4132046ef750c56489f94",
+        "implementationCommit": "cc3322f674ac388c55a9d2694efaaf7e941a1666",
+        "status": "implemented-unmerged-live-proof-pending"
+      },
+      {
+        "pullRequest": 94,
+        "branch": "codex/model-contract-copy",
+        "head": "5cb68d2dd38539b2f5de789e7be95a545437ca22",
+        "implementationCommit": "ff0ea1a6e91c3af0996f406dac0acf9f607cc166",
+        "status": "merged-to-parent-not-main-device-proof-pending"
+      },
+      {
+        "pullRequest": 95,
+        "branch": "codex/source-qualified-push-presentation",
+        "head": "887de277b1ea9b9f2860b85e9e38b5fe8b2e8971",
+        "implementationCommit": "4a06df18e768fe4bb8a206dc86f1dce0a08feec6",
+        "status": "implemented-unmerged-device-proof-pending"
+      },
+      {
+        "pullRequest": 98,
+        "branch": "codex/bot-profile-model-switch",
+        "head": "9a476ca669db09c294fde971062fe996a1bcaed8",
+        "status": "implemented-unmerged-ci-review-device-proof-pending"
+      }
+    ],
+    "upstreamContractBlockers": [
+      "one-shot cron re-arm",
+      "learned-memory row and import/export management",
+      "auxiliary-model and MoA administration"
+    ]
+  }
+}

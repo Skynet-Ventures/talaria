@@ -1,0 +1,798 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "baseCommit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
+  "targetCommit": "057dcdf236f8a6a26721c10fcc6ccb72726e272a",
+  "scopeRoot": "gateway",
+  "excludedPathComponents": [
+    "fixture",
+    "fixtures",
+    "generated",
+    "test",
+    "tests"
+  ],
+  "scopedCommitCount": 82,
+  "entryCount": 48,
+  "entriesFile": "hermes-gateway-platform-delta-40643cba-057dcdf.tsv",
+  "clusterCounts": {
+    "G01-client-projection": 5,
+    "G02-browser-host": 7,
+    "G07-merge-integration": 5,
+    "G04-delivery-session-recovery": 11,
+    "G05-host-lifecycle": 12,
+    "G06-platform-housekeeping": 2,
+    "G03-source-profile-auth": 6
+  },
+  "classificationCounts": {
+    "portable-mobile-contract": 5,
+    "gateway-host-runtime": 38,
+    "merge-integration": 5
+  },
+  "dispositionCounts": {
+    "covered-current-talaria": 5,
+    "host-only": 25,
+    "merge-integration": 5,
+    "verify-on-host": 13
+  },
+  "historyPathUnion": [
+    "gateway/authz_mixin.py",
+    "gateway/browser_control_artifacts.py",
+    "gateway/browser_control_broker.py",
+    "gateway/channel_directory.py",
+    "gateway/config.py",
+    "gateway/control_socket.py",
+    "gateway/delivery_ledger.py",
+    "gateway/disk_status.py",
+    "gateway/drain_control.py",
+    "gateway/kanban_watchers.py",
+    "gateway/lifecycle_ledger.py",
+    "gateway/media_policy.py",
+    "gateway/memory_status.py",
+    "gateway/mirror.py",
+    "gateway/pairing.py",
+    "gateway/platform_registry.py",
+    "gateway/platforms/api_server.py",
+    "gateway/platforms/base.py",
+    "gateway/platforms/bluebubbles.py",
+    "gateway/platforms/signal.py",
+    "gateway/platforms/webhook.py",
+    "gateway/platforms/weixin.py",
+    "gateway/platforms/yuanbao.py",
+    "gateway/profile_routing.py",
+    "gateway/readiness.py",
+    "gateway/relay/__init__.py",
+    "gateway/relay/adapter.py",
+    "gateway/relay/descriptor.py",
+    "gateway/relay/ws_transport.py",
+    "gateway/restart.py",
+    "gateway/run.py",
+    "gateway/scale_to_zero.py",
+    "gateway/session.py",
+    "gateway/session_context.py",
+    "gateway/session_db_recovery.py",
+    "gateway/session_state.py",
+    "gateway/shutdown_flush.py",
+    "gateway/shutdown_forensics.py",
+    "gateway/shutdown_watchdog.py",
+    "gateway/slash_commands.py",
+    "gateway/status.py",
+    "gateway/stream_consumer.py",
+    "gateway/turn_context.py"
+  ],
+  "finalNetFiles": [
+    {
+      "path": "gateway/authz_mixin.py",
+      "baseSha256": "8e9349e9394adb96019f7a7f6f48924a770a4a84d10c1e0de68f8c1529f96581",
+      "targetSha256": "ef7bb250401004ec8fc5773b92da4c038a45a576fb65c02b0a371f1a525b3889"
+    },
+    {
+      "path": "gateway/browser_control_artifacts.py",
+      "baseSha256": "absent",
+      "targetSha256": "659357b7a21ff12dfc70530d8d114eb6b6e7fe011f3c067d94faea38283fdf91"
+    },
+    {
+      "path": "gateway/browser_control_broker.py",
+      "baseSha256": "absent",
+      "targetSha256": "e8f93770cfa542f842eff3b004ed25542103f52cd13961d3ed5a437d536088a8"
+    },
+    {
+      "path": "gateway/config.py",
+      "baseSha256": "b9280f7bba9f7034379a8a3c25c1b7481560cfdabd4ca92c0e1f17746d836783",
+      "targetSha256": "d88dcda8c5a14b79d84afcc1d5784c165858ab5d6f289ba59fe421502d2c63a3"
+    },
+    {
+      "path": "gateway/control_socket.py",
+      "baseSha256": "absent",
+      "targetSha256": "3e6552e9e9f90e1156fb3a2c66a7e4d92347e05341da65f405ebda0395e61879"
+    },
+    {
+      "path": "gateway/kanban_watchers.py",
+      "baseSha256": "7786eca8be3c1df9c6eb2a2c187818cd797e69684c9083a769adc4c272a0be27",
+      "targetSha256": "8e3074b2d005fbdf88108b994243e686952b4d29e8989a4dff8311e3bcdb340d"
+    },
+    {
+      "path": "gateway/pairing.py",
+      "baseSha256": "996abf73c652cd24d550062140f63168d73def4897f3f8a9e215d617e4d0fbc6",
+      "targetSha256": "3437f72b10be8e3f20aa3e42e357a9a3237b85d77837380725f8f0681d16604d"
+    },
+    {
+      "path": "gateway/platforms/api_server.py",
+      "baseSha256": "204fa3e857dc50c032e084f2e8ebd864ea3ebbac80891f65ad85760e92edfeda",
+      "targetSha256": "8d87036dd488cb811dbabb7048102d0c28fbf54e0e658c464683000118537ec3"
+    },
+    {
+      "path": "gateway/platforms/bluebubbles.py",
+      "baseSha256": "91229057af652ac463459a6fffc9d99b927ec72796c8fd3a0126debcba944732",
+      "targetSha256": "481b5a3d14fe5f3cd514debb6b6ae8fc2cc24dc5f3596122d2c5c8745a415d89"
+    },
+    {
+      "path": "gateway/platforms/signal.py",
+      "baseSha256": "e70adf00f177813eb759efc5a92b7ef5a84fa92c29973b3d47b443de9a46ff9a",
+      "targetSha256": "b8e4384d3d9ddbbdb5b6161836f6a0273046e294ca281370f3308735b0f8ecf8"
+    },
+    {
+      "path": "gateway/platforms/webhook.py",
+      "baseSha256": "794b51937668c28591b632164753ec1bc8f5ddb0e0b07fee0686aee5d482d372",
+      "targetSha256": "3c0ca16104b6932f27ece4bb8fa58ce50ffaa1c710e7eb7adeba8cf4dd2f983c"
+    },
+    {
+      "path": "gateway/platforms/weixin.py",
+      "baseSha256": "2f56a70a701730f7eb62f69d8ac2f9857d66d2003f2e698c8034000247a3d23d",
+      "targetSha256": "3354b015bd56c300bf251b131116714fbc0912462d4fdb8dd5311ad9d4e0e9a2"
+    },
+    {
+      "path": "gateway/platforms/yuanbao.py",
+      "baseSha256": "6d447b24c62e4be50161b5f9ffaee11ef5f88fe36f39a5dc13d0ed008b428f6b",
+      "targetSha256": "9ae407cb5ac6e2769aa06259fdbe31653d19654b8699bf6588549cc003ff0674"
+    },
+    {
+      "path": "gateway/readiness.py",
+      "baseSha256": "f311772bd1a2aaa051860ab54cc65b75a37bb27e4d83a11fcd99f900fc67fef1",
+      "targetSha256": "a02de86773b3045ebac5baa336fe392f69a4654c35a1014db3296dfa639e728d"
+    },
+    {
+      "path": "gateway/run.py",
+      "baseSha256": "ce4ad5d6aae293acb29a308a93b8abd7606bdb7868e3b4f3ad4a0843402d51cf",
+      "targetSha256": "069792cf65833d86935b9bf24fccc7594b2ca6477cc049827c9c1f57b425fd95"
+    },
+    {
+      "path": "gateway/session.py",
+      "baseSha256": "19910bc0e551d8475ba1c338799d4218a180e6732ee9f5708ad089280b62ac9c",
+      "targetSha256": "7c76cc72b6872eced713bf9f1d229249735519f15a1b21c01f17a6807ad0edb3"
+    },
+    {
+      "path": "gateway/session_context.py",
+      "baseSha256": "07525c03a72c47081b34ecc8d174aaea003e2a15f9da841fa9797345b02766aa",
+      "targetSha256": "b68908ffec7891b12080933a4d50a63d449479a596335c2579776c6e545c4500"
+    },
+    {
+      "path": "gateway/session_db_recovery.py",
+      "baseSha256": "absent",
+      "targetSha256": "8cdaaf6429e75ff93ec1d56b936733a9d905aaba0f267bf6df5b2a6ed2169cf0"
+    },
+    {
+      "path": "gateway/shutdown_forensics.py",
+      "baseSha256": "fcf99ebea43fa53c175ed65fe0005058b6b4c122c70d3f4b2fd43caeeb902481",
+      "targetSha256": "e20943c49ad0918d18d06790cd25c0c263fca2741bdca32d938f568f6b361287"
+    },
+    {
+      "path": "gateway/shutdown_watchdog.py",
+      "baseSha256": "a48a9ecd1003e5d8c4f2403e35ca157d25078a220bdc11347cfefab509ee7f18",
+      "targetSha256": "a3f3cacc056090fd21d404e1028de44993f1c2d0bbdbe6955a206b170c923163"
+    },
+    {
+      "path": "gateway/slash_commands.py",
+      "baseSha256": "a4fafca84c9eb11c7eb7918128301929101e8f81edded40335d4c680ab69de8f",
+      "targetSha256": "c7a058ee7a21478dbaec346026530ae24d8394c16587e1ecb0c7a640c4588286"
+    },
+    {
+      "path": "gateway/status.py",
+      "baseSha256": "3706915454f96d442f37c9ab2721c974dfe8367d14ab9365c56e103c938e7135",
+      "targetSha256": "69c03ed46d4a503fc56482bec03bae7f12a24f1a70c88c47328946dda36d04d9"
+    }
+  ],
+  "crossReferenceHeads": {
+    "authority": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+    "client-wire": "69d066bd3c213b8de69fa78735f20327f05f7123",
+    "core-runtime": "7e46a9ab4e68f4f74ecc68fe2222798883a66091"
+  },
+  "crossReferenceCounts": {
+    "authority": 3,
+    "client-wire": 21,
+    "core-runtime": 10
+  },
+  "crossReferences": [
+    {
+      "commit": "723dbda0414ce2d8fdc86283b76302537d91b724",
+      "paths": [
+        "gateway/platforms/base.py",
+        "gateway/run.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C01-canonical-routing",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-authority-crossref"
+    },
+    {
+      "commit": "052513f65b6db0b6328dfe8d2c7efb21849fdc3f",
+      "paths": [
+        "gateway/mirror.py",
+        "gateway/platforms/api_server.py",
+        "gateway/platforms/base.py",
+        "gateway/relay/adapter.py",
+        "gateway/relay/descriptor.py",
+        "gateway/relay/ws_transport.py",
+        "gateway/run.py",
+        "gateway/stream_consumer.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C01-canonical-routing",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-authority-crossref"
+    },
+    {
+      "commit": "0404020f7b944398db529a0d09726a0e5f3c06a4",
+      "paths": [
+        "gateway/browser_control_artifacts.py",
+        "gateway/browser_control_broker.py",
+        "gateway/config.py",
+        "gateway/control_socket.py",
+        "gateway/kanban_watchers.py",
+        "gateway/platforms/api_server.py",
+        "gateway/relay/adapter.py",
+        "gateway/run.py",
+        "gateway/scale_to_zero.py",
+        "gateway/session.py",
+        "gateway/session_context.py",
+        "gateway/shutdown_forensics.py",
+        "gateway/shutdown_watchdog.py",
+        "gateway/status.py",
+        "gateway/stream_consumer.py"
+      ],
+      "ledger": "authority",
+      "ledgerHead": "879078e3ef54d1af2d6e0208105c0cf93c71979c",
+      "ledgerCluster": "C01-canonical-routing",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-authority-crossref"
+    },
+    {
+      "commit": "3e5e4c5d20006e0f29f5389224ee0265e444dd3f",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "3f075d41dd593191b4bcf11fb608b72d698c3d3e",
+      "paths": [
+        "gateway/delivery_ledger.py",
+        "gateway/disk_status.py",
+        "gateway/lifecycle_ledger.py",
+        "gateway/memory_status.py",
+        "gateway/platform_registry.py",
+        "gateway/platforms/api_server.py",
+        "gateway/platforms/base.py",
+        "gateway/platforms/weixin.py",
+        "gateway/relay/__init__.py",
+        "gateway/restart.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/shutdown_flush.py",
+        "gateway/slash_commands.py",
+        "gateway/turn_context.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "d65b7d0760235210f5cf29c0eaaf98fe10078546",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "fcea2175e23fdeb95f7e615f0cc7d6e5f3f485b0",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "7ca19874593becb81aa742aae5800eac8c9088d2",
+      "paths": [
+        "gateway/platforms/base.py",
+        "gateway/platforms/webhook.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/session_state.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "abf87e7248b0218a56fb7f05be8379c7d19dfa7f",
+      "paths": [
+        "gateway/config.py",
+        "gateway/kanban_watchers.py",
+        "gateway/media_policy.py",
+        "gateway/mirror.py",
+        "gateway/platforms/api_server.py",
+        "gateway/platforms/base.py",
+        "gateway/relay/adapter.py",
+        "gateway/relay/descriptor.py",
+        "gateway/relay/ws_transport.py",
+        "gateway/run.py",
+        "gateway/scale_to_zero.py",
+        "gateway/session.py",
+        "gateway/slash_commands.py",
+        "gateway/status.py",
+        "gateway/stream_consumer.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "a2a23a8f7e30e644702459cfe0c4c74897524cfd",
+      "paths": [
+        "gateway/platforms/api_server.py",
+        "gateway/run.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "5df1d0e113279a892e4eec401a437f443f7a245c",
+      "paths": [
+        "gateway/browser_control_broker.py",
+        "gateway/platforms/api_server.py",
+        "gateway/session_context.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W02-browser-controller",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "c9fd5223f62317796b1a7c260bb1e8a1a22c348a",
+      "paths": [
+        "gateway/platforms/api_server.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W02-browser-controller",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "d524cc9a16e13be42762984d21c1e4d19fbce24e",
+      "paths": [
+        "gateway/browser_control_broker.py",
+        "gateway/platforms/api_server.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W02-browser-controller",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "095a1d078c5c1cf7a55d47cafc50179fc463e790",
+      "paths": [
+        "gateway/browser_control_broker.py",
+        "gateway/platforms/api_server.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W02-browser-controller",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "45078eb9413e87bbc3e0d007c58e58def4d7f27e",
+      "paths": [
+        "gateway/platforms/api_server.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W02-browser-controller",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "13f209d4fd6cd763041a6e3fa42a11daec968af4",
+      "paths": [
+        "gateway/browser_control_broker.py",
+        "gateway/platforms/api_server.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W02-browser-controller",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "a5b326a471d2e5cdf6741fbfd0913c85f6866aaa",
+      "paths": [
+        "gateway/browser_control_artifacts.py",
+        "gateway/browser_control_broker.py",
+        "gateway/kanban_watchers.py",
+        "gateway/platforms/api_server.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/session_context.py",
+        "gateway/shutdown_forensics.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "fd41164861575f5564cdb091dc16204d0f49883b",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "764dba69532e2ead23f57c2db3998ec007a3d3ce",
+      "paths": [
+        "gateway/run.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W05-bot-relay-delivery",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "4865194772e6af2af7ac974f73b6f50454264cb5",
+      "paths": [
+        "gateway/platforms/api_server.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W04-session-profile-correctness",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "4e8419dadb502f762d09dad5de6537847ae10318",
+      "paths": [
+        "gateway/platforms/api_server.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W07-approval-review",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "12395e57b4a3e7fa3610408c043011ec7ba2f8ad",
+      "paths": [
+        "gateway/run.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W07-approval-review",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "1a95d0d58e59669f8dc1b0b955e372411f6be410",
+      "paths": [
+        "gateway/authz_mixin.py",
+        "gateway/control_socket.py",
+        "gateway/platforms/api_server.py",
+        "gateway/platforms/bluebubbles.py",
+        "gateway/platforms/webhook.py",
+        "gateway/readiness.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/session_db_recovery.py",
+        "gateway/slash_commands.py",
+        "gateway/status.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "ec5e369fe68f4abb3188767c751d6166d2139f0a",
+      "paths": [
+        "gateway/pairing.py",
+        "gateway/platforms/signal.py",
+        "gateway/platforms/weixin.py",
+        "gateway/platforms/yuanbao.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "client-wire",
+      "ledgerHead": "69d066bd3c213b8de69fa78735f20327f05f7123",
+      "ledgerCluster": "W01-transcript-rewind-carriers",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-client-wire-crossref"
+    },
+    {
+      "commit": "37280c7e0c85de1902c95c9fa145acf114abc843",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "149757a63ad06bd25e8c590715a826d94d1f468c",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "2b33a09fcb59932cc28d094a5c2c033f0db7828a",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "336b3216d51938f790f28f08e85bfba9d3ea543f",
+      "paths": [
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "13fcf2fe38cde19e98b5350dee92143d93a552ab",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "a36d6704b67c5a5d45ebffc283798ee4525e44b9",
+      "paths": [
+        "gateway/config.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/shutdown_watchdog.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "fe95ed3930e3fe203c703a3893928e31b5ccbb69",
+      "paths": [
+        "gateway/config.py",
+        "gateway/control_socket.py",
+        "gateway/kanban_watchers.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/shutdown_forensics.py",
+        "gateway/shutdown_watchdog.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "9a91f7058c9728724d403304e50250af4e4433ab",
+      "paths": [
+        "gateway/authz_mixin.py",
+        "gateway/browser_control_artifacts.py",
+        "gateway/browser_control_broker.py",
+        "gateway/channel_directory.py",
+        "gateway/config.py",
+        "gateway/control_socket.py",
+        "gateway/delivery_ledger.py",
+        "gateway/disk_status.py",
+        "gateway/drain_control.py",
+        "gateway/kanban_watchers.py",
+        "gateway/lifecycle_ledger.py",
+        "gateway/media_policy.py",
+        "gateway/memory_status.py",
+        "gateway/mirror.py",
+        "gateway/platform_registry.py",
+        "gateway/platforms/api_server.py",
+        "gateway/platforms/base.py",
+        "gateway/platforms/bluebubbles.py",
+        "gateway/platforms/webhook.py",
+        "gateway/platforms/weixin.py",
+        "gateway/profile_routing.py",
+        "gateway/readiness.py",
+        "gateway/relay/__init__.py",
+        "gateway/relay/adapter.py",
+        "gateway/relay/descriptor.py",
+        "gateway/relay/ws_transport.py",
+        "gateway/restart.py",
+        "gateway/run.py",
+        "gateway/scale_to_zero.py",
+        "gateway/session.py",
+        "gateway/session_context.py",
+        "gateway/session_db_recovery.py",
+        "gateway/session_state.py",
+        "gateway/shutdown_flush.py",
+        "gateway/shutdown_forensics.py",
+        "gateway/shutdown_watchdog.py",
+        "gateway/slash_commands.py",
+        "gateway/status.py",
+        "gateway/stream_consumer.py",
+        "gateway/turn_context.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "6e534df114097b86fa82b464f33830fc5c97e2fa",
+      "paths": [
+        "gateway/pairing.py",
+        "gateway/platforms/signal.py",
+        "gateway/platforms/weixin.py",
+        "gateway/platforms/yuanbao.py",
+        "gateway/run.py",
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    },
+    {
+      "commit": "8e46e2c4c49391737e311aad12be829062364bac",
+      "paths": [
+        "gateway/session.py",
+        "gateway/slash_commands.py"
+      ],
+      "ledger": "core-runtime",
+      "ledgerHead": "7e46a9ab4e68f4f74ecc68fe2222798883a66091",
+      "ledgerCluster": "R09-merge-parent-integration",
+      "classification": "predecessor-owned",
+      "disposition": "covered-by-core-runtime-crossref"
+    }
+  ],
+  "talariaSlices": [
+    {
+      "id": "source-qualified-push-presentation",
+      "pullRequest": 95,
+      "branch": "codex/source-qualified-push-presentation",
+      "head": "887de277b1ea9b9f2860b85e9e38b5fe8b2e8971",
+      "implementationCommit": "4a06df18e768fe4bb8a206dc86f1dce0a08feec6",
+      "status": "implemented-unmerged-live-device-proof-open",
+      "contracts": [
+        "long_task admission uses the same exact trusted talaria/desktop originating-platform allowlist as response pushes before timing",
+        "response, approval, and long_task use bounded configured bot presentation while raw bot/source/deeplink routing remains unchanged",
+        "legacy sidecar long_task fails closed without exact trusted platform provenance; blocked-source titles cannot collide into trusted timers"
+      ]
+    }
+  ],
+  "sourceAssertions": [
+    {
+      "path": "gateway/run.py",
+      "contains": "async def _claim_pending_obligations"
+    },
+    {
+      "path": "gateway/run.py",
+      "contains": "async def _redeliver_claimed_obligations"
+    },
+    {
+      "path": "gateway/run.py",
+      "contains": "async def _await_startup_boot_sends"
+    },
+    {
+      "path": "gateway/authz_mixin.py",
+      "contains": "def _adapter_for_source"
+    },
+    {
+      "path": "gateway/platforms/api_server.py",
+      "contains": "def _prefix_names_served_profile"
+    },
+    {
+      "path": "gateway/control_socket.py",
+      "contains": "identify_gateway"
+    }
+  ],
+  "talariaAssertions": [
+    {
+      "path": "relay/talaria-push/talaria_push_relay/push.py",
+      "contains": "TRUSTED_TURN_PLATFORMS = frozenset({\"talaria\", \"desktop\"})"
+    },
+    {
+      "path": "relay/talaria-push/talaria_push_relay/push.py",
+      "contains": "def admit_turn_platform"
+    },
+    {
+      "path": "relay/talaria-push/talaria_push_relay/events.py",
+      "contains": "_turn_starts: Dict[Tuple[str, str, str, str], float]"
+    },
+    {
+      "path": "relay/talaria-push/talaria_push_relay/sidecar.py",
+      "contains": "_session_titles: Dict[tuple[str, str, str], str]"
+    },
+    {
+      "path": "relay/tests/test_source_qualified_push.py",
+      "contains": "def test_long_task_platform_policy_rejects_every_non_app_source_before_timing"
+    },
+    {
+      "path": "relay/tests/test_source_qualified_push.py",
+      "contains": "def test_sidecar_long_task_requires_exact_origin_platform_before_stopwatch"
+    }
+  ]
+}
