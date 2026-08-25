@@ -3,6 +3,25 @@ import XCTest
 @testable import TalariaKit
 @testable import TalariaUI
 
+private actor ForegroundPingLatch {
+    private(set) var count = 0
+    private var firstWaiter: CheckedContinuation<Void, Never>?
+
+    func enter() async {
+        count += 1
+        if count == 1 {
+            await withCheckedContinuation { firstWaiter = $0 }
+        }
+    }
+
+    var isWaiting: Bool { firstWaiter != nil }
+
+    func release() {
+        firstWaiter?.resume()
+        firstWaiter = nil
+    }
+}
+
 final class SupervisedReconnectParityTests: XCTestCase {
     @MainActor
     private struct Fixture {
@@ -221,6 +240,48 @@ final class SupervisedReconnectParityTests: XCTestCase {
         XCTAssertTrue(fixture.model.isReconnecting)
         dial?.resume()
         await LiveRuntime.shared.reconnectTask?.value
+    }
+
+    @MainActor
+    func testDuplicateUIKitAndSceneWakeShareOneHalfOpenValidation() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+
+        let ping = ForegroundPingLatch()
+        await fixture.client.setRPCExecutorForTesting { method, _, _ in
+            guard method == "gateway.ping" else {
+                return .object(["profiles": .array([]), "jobs": .array([])])
+            }
+            await ping.enter()
+            throw GatewayError(code: -5, message: "request timed out: gateway.ping")
+        }
+
+        var dialCount = 0
+        supervisor.dial = { _ in
+            dialCount += 1
+            throw URLError(.cannotConnectToHost)
+        }
+
+        // UIApplicationDelegate and SwiftUI scenePhase both publish this edge.
+        // The second callback must not cancel/restart the request already
+        // proving the exact suspended transport.
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<1_000 {
+            if await ping.isWaiting { break }
+            await Task.yield()
+        }
+        let firstPingIsWaiting = await ping.isWaiting
+        XCTAssertTrue(firstPingIsWaiting)
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<20 { await Task.yield() }
+
+        let observedPingCount = await ping.count
+        XCTAssertEqual(observedPingCount, 1)
+        await ping.release()
+        await waitUntil { dialCount > 0 }
+        XCTAssertTrue(fixture.model.isOffline)
     }
 
     @MainActor

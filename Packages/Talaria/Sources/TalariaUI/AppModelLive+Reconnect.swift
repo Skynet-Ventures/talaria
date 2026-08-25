@@ -376,7 +376,13 @@ extension AppModel {
     public func applicationDidBecomeActive() {
         startLinkSupervision()
         let supervisor = ConnectionSupervisor.shared
-        supervisor.foregroundValidationTask?.cancel()
+        // UIKit and SwiftUI normally publish the same foreground edge a few
+        // milliseconds apart. Do not cancel a liveness RPC already crossing
+        // the half-open transport: cancellation can retire its waiter while a
+        // replacement request is still queued behind that same dead socket.
+        // The check is bounded to three seconds, so one exact-source
+        // single-flight is both faster and safer than cancel-and-restart.
+        guard supervisor.foregroundValidationTask == nil else { return }
         let token = UUID()
         supervisor.foregroundValidationToken = token
         supervisor.foregroundValidationTask = Task { @MainActor [weak self] in
