@@ -253,6 +253,7 @@ private struct SettingsDetailPage: View {
                     InferenceProviderSettingsSection(model: model)
                     VoiceSettingsSection(model: model)
                     MemoryProviderSettingsSection(model: model)
+                    WebCacheSettingsSection(model: model)
                 case .agents:
                     ProfileLifecycleSettingsSection(model: model)
                 case .operations:
