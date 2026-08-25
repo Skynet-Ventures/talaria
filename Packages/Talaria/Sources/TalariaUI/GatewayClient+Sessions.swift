@@ -45,11 +45,11 @@ public struct SessionSearchHit: Identifiable, Sendable, Equatable {
     }
 }
 
-/// session.compress result, normalized across the three shapes the gateway
-/// can answer with (local compress, compute-host compress, lock held).
+/// session.compress result, normalized across the gateway's successful,
+/// lock-held, and fail-closed checkpoint-prerequisite shapes.
 public struct SessionCompression: Sendable {
     public enum Outcome: String, Sendable {
-        case compressed, aborted, skipped
+        case compressed, aborted, skipped, blocked
     }
 
     public var outcome: Outcome
@@ -75,6 +75,17 @@ public struct SessionCompression: Sendable {
         afterTokens = v["after_tokens"]?.intValue ?? 0
         removed = v["removed"]?.intValue ?? 0
 
+        let status = v["status"]?.stringValue
+        let message = v["message"]?.stringValue
+        if CompressionCheckpointFailurePolicy.isBlockedPrerequisite(status)
+            || CompressionCheckpointFailurePolicy.isBlockedPrerequisite(message) {
+            outcome = .blocked
+            headline = message ?? "Compression is blocked until a durable checkpoint is available."
+            tokenLine = ""
+            note = v["detail"]?.stringValue
+            return
+        }
+
         // A held compression lock is a no-op, not a failure: auto-compaction
         // is already doing the work.
         if v["lock_held"]?.boolValue == true || v["compressed"]?.boolValue == false {
@@ -86,8 +97,8 @@ public struct SessionCompression: Sendable {
         }
 
         let summary = v["summary"]
-        outcome = Outcome(rawValue: v["status"]?.stringValue ?? "compressed") ?? .compressed
-        headline = summary?["headline"]?.stringValue
+        outcome = Outcome(rawValue: status ?? "compressed") ?? .compressed
+        headline = message ?? summary?["headline"]?.stringValue
             ?? "\(beforeMessages) → \(afterMessages) messages"
         tokenLine = summary?["token_line"]?.stringValue
             ?? (beforeTokens > 0 ? "~\(beforeTokens) → ~\(afterTokens) tokens" : "")
