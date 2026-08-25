@@ -68,6 +68,11 @@ struct TalariaApp: App {
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
 
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        NotificationCenter.default.post(
+            name: .talariaApplicationDidBecomeActive, object: application)
+    }
+
     /// APNs registration succeeded — hand the token to PushCoordinator, which
     /// exposes it awaitably for the gateway relay registration RPC.
     func application(

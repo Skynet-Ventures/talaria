@@ -296,6 +296,15 @@ public struct TalariaRootView: View {
             // and any approval resolved from a notification has to be caught up.
             if scenePhase == .active { model.applicationDidBecomeActive() }
         }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .talariaApplicationDidBecomeActive
+        )) { _ in
+            // UIApplicationDelegate is the authoritative iOS wake edge. The
+            // model coalesces this with scenePhase so a normal foreground does
+            // one exact-source liveness validation, while a scenePhase miss
+            // after screen lock can no longer strand a dead socket.
+            model.applicationDidBecomeActive()
+        }
         .onAppear { wireUp() }
         .onReceive(NotificationCenter.default.publisher(for: .talariaOpenConnections)) { _ in
             // talaria://connections deep links and gateway pushes; this view

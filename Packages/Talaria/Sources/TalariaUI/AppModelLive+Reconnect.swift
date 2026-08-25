@@ -4,6 +4,16 @@ import SwiftUI
 import TalariaKit
 import TalariaTheme
 
+/// UIKit's application-active callback is the reliable wake edge on iOS.
+/// SwiftUI's scenePhase remains useful, but production devices have shown it
+/// can miss a lock-screen return while the mounted root view survives.  The
+/// app target posts this notification from UIApplicationDelegate and the root
+/// funnels both lifecycle sources through the same coalesced validation.
+public extension Notification.Name {
+    static let talariaApplicationDidBecomeActive = Notification.Name(
+        "bot.talaria.applicationDidBecomeActive")
+}
+
 // Connection supervision for every post-boot socket-loss path.
 //
 // Event-pump completion is the disconnect signal. The single supervised loop
@@ -99,6 +109,8 @@ final class ConnectionSupervisor {
     /// App-lifetime watch loop; nil until the first start request.
     @ObservationIgnored var watchTask: Task<Void, Never>?
     @ObservationIgnored var reconnectTaskToken: UUID?
+    @ObservationIgnored var foregroundValidationTask: Task<Void, Never>?
+    @ObservationIgnored var foregroundValidationToken: UUID?
     @ObservationIgnored var episodeSource: EpisodeSource?
     @ObservationIgnored var episodeStartedAt: TimeInterval?
     @ObservationIgnored var episodeAttempt = 0
@@ -133,6 +145,9 @@ final class ConnectionSupervisor {
         dial = { client in try await client.connect() }
         switchConnect = nil
         reconnectTaskToken = nil
+        foregroundValidationTask?.cancel()
+        foregroundValidationTask = nil
+        foregroundValidationToken = nil
         resetEpisode(for: .cleanOpen)
         isReconnecting = false
         reauthGateway = nil
@@ -360,13 +375,25 @@ extension AppModel {
     /// enters supervised reconnect immediately or refreshes a healthy source.
     public func applicationDidBecomeActive() {
         startLinkSupervision()
-        Task { @MainActor in
+        let supervisor = ConnectionSupervisor.shared
+        supervisor.foregroundValidationTask?.cancel()
+        let token = UUID()
+        supervisor.foregroundValidationToken = token
+        supervisor.foregroundValidationTask = Task { @MainActor [weak self] in
+            defer {
+                if supervisor.foregroundValidationToken == token {
+                    supervisor.foregroundValidationTask = nil
+                    supervisor.foregroundValidationToken = nil
+                }
+            }
+            guard !Task.isCancelled, let self else { return }
             guard mode == .live, let client,
                   let capturedSource = currentReconnectAuthority()?.episodeSource else {
                 await refreshConnectionHealth()
                 return
             }
             let liveness = await client.validateForegroundLiveness()
+            guard !Task.isCancelled else { return }
             // A gateway switch, credential rotation, client replacement, or
             // generation change while ping was suspended makes its answer
             // irrelevant. Never reconnect or publish against ambient state.
@@ -389,6 +416,7 @@ extension AppModel {
             // around lifecycle authority.
             foregroundReseed()
             await refreshConnectionHealth()
+            guard !Task.isCancelled else { return }
             guard mode == .live, self.client === client,
                   currentReconnectAuthority()?.episodeSource == capturedSource else { return }
             guard await client.isConnected else {
