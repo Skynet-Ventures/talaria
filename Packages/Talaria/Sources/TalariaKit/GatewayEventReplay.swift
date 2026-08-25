@@ -87,7 +87,9 @@ enum GatewayReplayEpochDisposition: Sendable, Equatable {
 
 enum GatewayReplayCodec {
     static let maximumSafeJSONInteger: Double = 9_007_199_254_740_991
-    static let maximumSessions = 32
+    // Match Hermes' process-local replay ring bound exactly. Retaining fewer
+    // cursors would silently evict a session that the server can still replay.
+    static let maximumSessions = 64
     static let maximumEventsPerSession = 512
     static let maximumTotalEvents = 2_048
     static let requestTimeout: TimeInterval = 5

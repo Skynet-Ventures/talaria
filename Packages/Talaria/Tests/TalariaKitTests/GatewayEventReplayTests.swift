@@ -186,5 +186,32 @@ final class GatewayEventReplayTests: XCTestCase {
         XCTAssertFalse(staleCommitted)
         XCTAssertEqual(finalWatermarks, ["s1": 6])
     }
+
+    func testWatermarksRetainExactHermesSessionRingBound() async throws {
+        let client = GatewayClient(
+            baseURL: URL(string: "https://replay-session-bound.example")!,
+            credential: .sessionToken("test"))
+        await client.setForegroundReadinessForTesting(true)
+        await client.installPreparedReplayForTesting(events: [GatewayEvent(
+            type: "message.delta", sessionID: "s1", payload: nil, sequence: 1)],
+            certainty: .complete)
+        let prepared = await client.prepareCurrentTransportForEvents()
+        let publication = try XCTUnwrap(prepared)
+        let committed = await client.commitPreparedReplay(
+            publication.token, excludingEpochHandler: nil)
+        XCTAssertTrue(committed)
+
+        for index in 2...65 {
+            let admitted = await client.admitLiveEventForTesting(GatewayEvent(
+                type: "message.delta", sessionID: "s\(index)",
+                payload: nil, sequence: 1))
+            XCTAssertTrue(admitted)
+        }
+
+        let watermarks = await client.replayWatermarksForTesting()
+        XCTAssertEqual(watermarks.count, 64)
+        XCTAssertNil(watermarks["s1"])
+        XCTAssertEqual(watermarks["s65"], 1)
+    }
 }
 #endif
