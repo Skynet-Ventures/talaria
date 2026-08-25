@@ -178,16 +178,17 @@ Implementation follow-ups now exist for every material slice, but none changes
 the pin decision until its exact head is independently reviewed, merged in
 dependency order, and certified against the exact gateway:
 
-| Slice | Review PR | Exact review head |
+| Slice | Review PR | Current implementation head |
 |---|---:|---|
-| Lossless gateway event replay | #100 | `415267da3cefed759b9bfcca49dfc9a522c6e8c1` |
+| Lossless gateway event replay | #100 | `39e602238d33e6ddb5743038e1274969aaa38494` |
 | Checkpoint-v2 management compatibility | #101 | `15a4b5f14690c723ff1bbdf5ef5ee965c9bb1c04` |
 | MCP include/exclude semantics | #102 | `9dd943dd5cf5578d454a59540dffac8930e7ea22` |
 | Web/browser cache management | #103 | `60f808c20ca4f278c00d92578498f775006e933c` |
 | Dynamic terminal/shared Docker management | #104 | `2709ef68170ae103b74c855494dd889f04cbe736` |
 
 PR #73 remains the dependency for replay. Exact-head CI or automated review on
-an earlier SHA is not approval for a later SHA.
+an earlier SHA is not approval for a later SHA. These implementation heads are
+inventory references only; none is represented here as independently stamped.
 
 **Do not move the canonical pin.** Keep
 `057dcdf236f8a6a26721c10fcc6ccb72726e272a` authoritative. The authority guide
