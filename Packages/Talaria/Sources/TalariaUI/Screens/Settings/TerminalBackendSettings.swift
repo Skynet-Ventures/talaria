@@ -53,6 +53,13 @@ private struct TerminalBackendSnapshot {
     var catalog: TerminalBackendCatalog
 }
 
+private struct TerminalConfigSnapshot {
+    var id = UUID()
+    var source: TerminalBackendSource
+    var generation: Int
+    var client: GatewayClient
+}
+
 /// Phone-safe terminal environment settings. Hermes performs host plug-in
 /// discovery and readiness probes; Talaria only renders its authenticated,
 /// profile-scoped response and sends a selected row back to that same source.
@@ -68,6 +75,7 @@ public struct TerminalBackendSettingsSection: View {
     @State private var stateSource: TerminalBackendSource?
     @State private var generation = 0
     @State private var snapshot: TerminalBackendSnapshot?
+    @State private var configSnapshot: TerminalConfigSnapshot?
     @State private var configuredSharedContainerKey = ""
     @State private var sharedContainerKeyDraft = ""
     @State private var isLoading = false
@@ -324,7 +332,8 @@ public struct TerminalBackendSettingsSection: View {
     }
 
     private var canSaveSharedContainerKey: Bool {
-        guard let snapshot, isSnapshotCurrent(snapshot), busyAction == nil else { return false }
+        guard let configSnapshot, isConfigSnapshotCurrent(configSnapshot),
+              busyAction == nil else { return false }
         return sharedContainerKeyIsValid
             && requestedSharedContainerKey != configuredSharedContainerKey
     }
@@ -412,10 +421,18 @@ public struct TerminalBackendSettingsSection: View {
         )
     }
 
+    private func isConfigSnapshotCurrent(_ snapshot: TerminalConfigSnapshot) -> Bool {
+        stateSource == snapshot.source
+            && snapshot.source == targetSource
+            && snapshot.generation == generation
+            && configSnapshot?.id == snapshot.id
+    }
+
     private func reset(source: TerminalBackendSource?) {
         generation &+= 1
         stateSource = source
         snapshot = nil
+        configSnapshot = nil
         configuredSharedContainerKey = ""
         sharedContainerKeyDraft = ""
         isLoading = false
@@ -440,31 +457,38 @@ public struct TerminalBackendSettingsSection: View {
         do {
             let client = try await targetClient(for: source)
             guard isCurrent(source, generation: capturedGeneration) else { return }
-            async let catalogRequest = client.terminalBackendCatalog(profile: source.profile)
-            async let keyRequest = client.terminalDockerSharedContainerKey(profile: source.profile)
-            let (catalog, key) = try await (catalogRequest, keyRequest)
-            guard isCurrent(source, generation: capturedGeneration) else { return }
-
-            // `routedClient` may have refreshed or replaced a connection while
-            // the two reads were in flight. Never publish a catalog from an
-            // old source client into a current-looking gateway/profile view.
-            let currentClient = try await targetClient(for: source)
-            guard currentClient === client,
-                  isCurrent(source, generation: capturedGeneration) else {
-                return
+            var failures: [String] = []
+            do {
+                let catalog = try await client.terminalBackendCatalog(profile: source.profile)
+                guard isCurrent(source, generation: capturedGeneration) else { return }
+                let currentClient = try await targetClient(for: source)
+                guard currentClient === client,
+                      isCurrent(source, generation: capturedGeneration) else { return }
+                snapshot = TerminalBackendSnapshot(
+                    source: source, generation: capturedGeneration,
+                    client: client, catalog: catalog)
+            } catch {
+                failures.append((error as? GatewayError)?.message ?? error.localizedDescription)
             }
 
-            snapshot = TerminalBackendSnapshot(
-                source: source,
-                generation: capturedGeneration,
-                client: client,
-                catalog: catalog
-            )
-            // The raw key participates in Hermes' collision-resistant digest;
-            // trimming it would silently select a different container.
-            configuredSharedContainerKey = key
-            sharedContainerKeyDraft = configuredSharedContainerKey
-            setNotice(completionNotice, warning: false)
+            do {
+                let key = try await client.terminalDockerSharedContainerKey(profile: source.profile)
+                guard isCurrent(source, generation: capturedGeneration) else { return }
+                let currentClient = try await targetClient(for: source)
+                guard currentClient === client,
+                      isCurrent(source, generation: capturedGeneration) else { return }
+                configSnapshot = TerminalConfigSnapshot(
+                    source: source, generation: capturedGeneration, client: client)
+                // The raw key participates in Hermes' collision-resistant digest;
+                // trimming it would silently select a different container.
+                configuredSharedContainerKey = key
+                sharedContainerKeyDraft = key
+            } catch {
+                failures.append((error as? GatewayError)?.message ?? error.localizedDescription)
+            }
+            setNotice(
+                failures.isEmpty ? completionNotice : failures.joined(separator: "\n"),
+                warning: !failures.isEmpty)
         } catch {
             guard isCurrent(source, generation: capturedGeneration) else { return }
             setNotice((error as? GatewayError)?.message ?? error.localizedDescription, warning: true)
@@ -545,8 +569,8 @@ public struct TerminalBackendSettingsSection: View {
 
     private func saveSharedContainerKey() async {
         guard busyAction == nil,
-              let snapshot,
-              operationIsCurrent(snapshot),
+              let configSnapshot,
+              isConfigSnapshotCurrent(configSnapshot),
               sharedContainerKeyIsValid,
               requestedSharedContainerKey != configuredSharedContainerKey else {
             return
@@ -554,31 +578,32 @@ public struct TerminalBackendSettingsSection: View {
         let key = requestedSharedContainerKey
         busyAction = "shared-container-key"
         defer {
-            if operationIsCurrent(snapshot) { busyAction = nil }
+            if isConfigSnapshotCurrent(configSnapshot) { busyAction = nil }
         }
 
         do {
-            let client = try await targetClient(for: snapshot.source)
-            guard operationIsCurrent(snapshot) else { return }
-            guard client === snapshot.client else {
+            let client = try await targetClient(for: configSnapshot.source)
+            guard isConfigSnapshotCurrent(configSnapshot) else { return }
+            guard client === configSnapshot.client else {
                 await load(
-                    source: snapshot.source,
+                    source: configSnapshot.source,
                     completionNotice: "Gateway connection changed; terminal settings were refreshed."
                 )
                 return
             }
-            try await client.setTerminalDockerSharedContainerKey(key, profile: snapshot.source.profile)
-            guard operationIsCurrent(snapshot) else { return }
+            try await client.setTerminalDockerSharedContainerKey(
+                key, profile: configSnapshot.source.profile)
+            guard isConfigSnapshotCurrent(configSnapshot) else { return }
             configuredSharedContainerKey = key
             sharedContainerKeyDraft = key
             setNotice(
                 key.isEmpty
                     ? "Profile isolation will apply to future Docker containers."
-                    : "Saved a shared Docker identity for \(snapshot.source.profile).",
+                    : "Saved a shared Docker identity for \(configSnapshot.source.profile).",
                 warning: false
             )
         } catch {
-            guard operationIsCurrent(snapshot) else { return }
+            guard isConfigSnapshotCurrent(configSnapshot) else { return }
             setNotice((error as? GatewayError)?.message ?? error.localizedDescription, warning: true)
         }
     }
