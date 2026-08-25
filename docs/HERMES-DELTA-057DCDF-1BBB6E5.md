@@ -7,6 +7,11 @@ This is the exact-source audit of Hermes
 `40643cba..057dcdf` closure. It does not rewrite that evidence or move
 Talaria's canonical Hermes pin.
 
+The immediately following upstream range is covered separately by the
+additive [`1bbb6e5..02c7ae9` successor audit](HERMES-DELTA-1BBB6E5-02C7AE9.md).
+That range adds no new Talaria client work and does not change this audit's pin
+decision.
+
 The range contains **130 commits and 324 net-changed paths**, with 17,430
 additions and 4,080 deletions. Every commit is listed in
 [`hermes-delta-057dcdf-1bbb6e5-commits.tsv`](../parity/hermes-delta-057dcdf-1bbb6e5-commits.tsv),

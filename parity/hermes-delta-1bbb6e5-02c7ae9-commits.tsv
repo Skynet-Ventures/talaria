@@ -1,0 +1,4 @@
+commit	parents	classification	subject
+cbd8de8ad64530be01efea23b7764d5c37c634ed	1bbb6e5bce56e721ab685af4cd87df21bbff4d35	ios-portable	fix(gateway): bind session cwd for the live system-prompt rebuild
+90ee4460cb45f46fdbcb3288beebf74c6b150e00	cbd8de8ad64530be01efea23b7764d5c37c634ed	desktop-only	fix(desktop): translate sidebar recents_profile through SSH aliases
+02c7ae956e42891d5e337a921b45de0a6067146d	90ee4460cb45f46fdbcb3288beebf74c6b150e00	desktop-only	fix(desktop): route session list REST through the active profile
