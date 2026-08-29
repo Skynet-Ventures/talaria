@@ -277,6 +277,9 @@ public actor GatewayClientPool {
         }
         slots[gatewayID] = nil
         releaseLeaseBarrier(ownedLease.token, gatewayID: gatewayID)
+        await MainActor.run {
+            ReadAloudRuntime.shared.sourceDidInvalidate(gatewayID: gatewayID)
+        }
         await client.disconnect()
         return true
     }
@@ -310,6 +313,12 @@ public actor GatewayClientPool {
                                  task: nil, client: client, leaseToken: nil)
         releaseLeaseBarrier(reservation, gatewayID: gatewayID)
 
+        if previous != nil {
+            await MainActor.run {
+                ReadAloudRuntime.shared.sourceDidInvalidate(gatewayID: gatewayID)
+            }
+        }
+
         previous?.task?.cancel()
         if let old = previous?.client, ObjectIdentifier(old) != ObjectIdentifier(client) {
             await old.disconnect()
@@ -325,6 +334,9 @@ public actor GatewayClientPool {
         let slot = slots.removeValue(forKey: gatewayID)
         releaseLeaseBarrier(reservation, gatewayID: gatewayID)
         guard let slot else { return }
+        await MainActor.run {
+            ReadAloudRuntime.shared.sourceDidInvalidate(gatewayID: gatewayID)
+        }
         slot.task?.cancel()
         if let client = slot.client {
             await client.disconnect()

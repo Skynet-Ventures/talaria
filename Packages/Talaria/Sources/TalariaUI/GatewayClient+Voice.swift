@@ -116,6 +116,12 @@ public struct ProfileSTTReadiness: Sendable, Equatable {
 
 extension GatewayClient {
 
+    /// Whole-response cap for the JSON data URL returned by Hermes. The
+    /// decoded mobile audio ceiling below is smaller; this outer bound stops a
+    /// hostile base64 body while it is still crossing the wire.
+    static let maximumSpeechResponseBytes = 14_000_000
+    static let maximumDecodedSpeechBytes = 10_000_000
+
     // MARK: - Capability probe
 
     /// Typed `voice.toggle {action:"status"}`. Never throws for a gateway that
@@ -164,14 +170,22 @@ extension GatewayClient {
     /// (The streaming sibling, /api/audio/speak-stream, is a WebSocket that
     /// emits raw int16 PCM frames, not a REST route; see notes.)
     public func synthesizeSpeech(text: String, profile: String? = nil) async throws -> SpokenAudio {
-        let payload = try await audioPOST(path: "api/audio/speak", profile: profile,
-                                          body: ["text": .string(text)], timeout: 240)
+        let payload = try await boundedAudioPOST(
+            path: "api/audio/speak", profile: profile,
+            body: ["text": .string(text)], timeout: 240,
+            maximumResponseBytes: Self.maximumSpeechResponseBytes)
         guard let dataURL = payload["data_url"]?.stringValue,
-              let decoded = Self.decodeDataURL(dataURL) else {
+              let decoded = Self.decodeDataURL(
+                dataURL, maximumDecodedBytes: Self.maximumDecodedSpeechBytes) else {
             throw GatewayError(code: -11, message: "speak returned no audio")
         }
+        let declared = payload["mime_type"]?.stringValue
+            .map(Self.canonicalAudioMIME)
+        guard declared == nil || declared == decoded.mimeType else {
+            throw GatewayError(code: -11, message: "speak returned inconsistent audio")
+        }
         return SpokenAudio(data: decoded.data,
-                           mimeType: payload["mime_type"]?.stringValue ?? decoded.mimeType,
+                           mimeType: declared ?? decoded.mimeType,
                            provider: payload["provider"]?.stringValue)
     }
 
@@ -197,15 +211,49 @@ extension GatewayClient {
                                   body: body, timeout: timeout)
     }
 
+    /// Sensitive TTS responses are both bounded and redirect-free so an HTTP
+    /// redirect can never replay the gateway credential to another origin.
+    private func boundedAudioPOST(path: String, profile: String?, body: JSONValue,
+                                  timeout: TimeInterval,
+                                  maximumResponseBytes: Int) async throws -> JSONValue {
+        var query: [URLQueryItem] = []
+        if let profile, !profile.isEmpty {
+            query = [URLQueryItem(name: "profile", value: profile)]
+        }
+        return try await restJSONBoundedNoRedirect(
+            path: path, method: "POST", query: query, body: body,
+            timeout: timeout, maximumResponseBytes: maximumResponseBytes)
+    }
+
     /// Split `data:<mime>;base64,<payload>` into bytes + mime.
-    static func decodeDataURL(_ dataURL: String) -> (data: Data, mimeType: String)? {
-        guard dataURL.hasPrefix("data:"), let comma = dataURL.firstIndex(of: ",") else { return nil }
+    static func decodeDataURL(_ dataURL: String,
+                              maximumDecodedBytes: Int = maximumDecodedSpeechBytes)
+        -> (data: Data, mimeType: String)? {
+        guard maximumDecodedBytes > 0, dataURL.hasPrefix("data:"),
+              let comma = dataURL.firstIndex(of: ",") else { return nil }
         let header = String(dataURL[dataURL.index(dataURL.startIndex, offsetBy: 5)..<comma])
-        guard header.contains(";base64") else { return nil }
+        let headerParts = header.split(separator: ";", omittingEmptySubsequences: false)
+        guard headerParts.count == 2, headerParts[1].lowercased() == "base64" else { return nil }
+        let mime = canonicalAudioMIME(String(headerParts[0]))
+        guard allowedSpeechMIMEs.contains(mime) else { return nil }
         let encoded = String(dataURL[dataURL.index(after: comma)...])
-        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters),
-              !data.isEmpty else { return nil }
-        let mime = header.split(separator: ";").first.map(String.init) ?? "audio/mpeg"
+        // Base64 expands by 4/3. Reject before allocating decoded bytes, then
+        // validate the exact result as a second boundary.
+        let maximumEncoded = ((maximumDecodedBytes + 2) / 3) * 4
+        guard !encoded.isEmpty, encoded.utf8.count <= maximumEncoded,
+              let data = Data(base64Encoded: encoded),
+              !data.isEmpty, data.count <= maximumDecodedBytes else { return nil }
         return (data, mime)
+    }
+
+    private static let allowedSpeechMIMEs: Set<String> = [
+        "audio/aac", "audio/flac", "audio/m4a", "audio/mp4", "audio/mpeg",
+        "audio/ogg", "audio/opus", "audio/wav", "audio/webm", "audio/x-m4a",
+        "audio/x-wav",
+    ]
+
+    private static func canonicalAudioMIME(_ value: String) -> String {
+        value.split(separator: ";", maxSplits: 1).first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
 }

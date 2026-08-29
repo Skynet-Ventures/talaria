@@ -305,17 +305,18 @@ public final class VoicePlayer {
 
     /// Play to completion. Returns early (and quietly) if `stop()` interrupts —
     /// barge-in and "end call" both need playback to unwind without throwing.
-    public func play(_ audio: Data) async {
+    @discardableResult
+    public func play(_ audio: Data) async -> Bool {
         stop()
         do {
             try VoiceAudioSession.activate()
             let player = try AVAudioPlayer(data: audio)
             player.isMeteringEnabled = true
             player.prepareToPlay()
-            guard player.play() else { return }
+            guard player.play() else { return false }
             self.player = player
         } catch {
-            return
+            return false
         }
         isPlaying = true
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -336,6 +337,7 @@ public final class VoicePlayer {
                 }
             }
         }
+        return true
     }
 
     public func stop() {
@@ -358,7 +360,8 @@ public final class VoicePlayer {
 
     #else
 
-    public func play(_ audio: Data) async {}
+    @discardableResult
+    public func play(_ audio: Data) async -> Bool { false }
     public func stop() {}
 
     #endif

@@ -276,7 +276,10 @@ public struct ChatView: View {
         }
         .onChange(of: pendingSlashPrefill) { _, _ in consumeSlashPrefillIfSafe() }
         .onChange(of: draft) { _, _ in consumeSlashPrefillIfSafe() }
-        .onChange(of: messages) { transcriptFindMessageGeneration &+= 1 }
+        .onChange(of: messages) {
+            transcriptFindMessageGeneration &+= 1
+            model.readAloud.visibleTranscriptDidChange(model: model, botID: botID)
+        }
         .onChange(of: botID) { closeTranscriptFind() }
         .onChange(of: transcriptFindSource) { closeTranscriptFind() }
         .onChange(of: responseAlternativeSelectionKey) {
@@ -285,6 +288,12 @@ public struct ChatView: View {
             transcriptFindIndexMessageGeneration = -1
             transcriptFindResult = TranscriptFindResult()
             transcriptFindResultMessageGeneration = -1
+            model.readAloud.visibleTranscriptDidChange(model: model, botID: botID)
+        }
+        .onChange(of: model.readAloud.lastFailure) { _, failure in
+            guard let failure else { return }
+            model.toast(kind: .failure, title: "Read Aloud unavailable",
+                        message: failure)
         }
         .onChange(of: transcriptFindAccessibilityStatus) { announceTranscriptFindStatus() }
         .onChange(of: transcriptFindOwnsScroll) {
@@ -379,6 +388,7 @@ public struct ChatView: View {
         .onDisappear {
             cancelQueuedPromptEdit()
             closeTranscriptFind()
+            model.readAloud.stopIfOwned(botID: botID)
         }
     }
 
@@ -1235,6 +1245,12 @@ public struct ChatView: View {
                             .padding(.leading, theme.id == .ink ? 14 : 0)
                     }
                 }
+                if model.readAloud.isActive(messageID: message.id, botID: botID),
+                   let status = model.readAloud.status {
+                    readAloudControl(status)
+                        .padding(.top, 6)
+                        .padding(.leading, theme.id == .ink ? 12 : 0)
+                }
                 if let failure = message.failure {
                     FailedTurnCard(
                         failure: failure,
@@ -1467,11 +1483,43 @@ public struct ChatView: View {
 
     // MARK: Message actions (long press)
 
+    private func readAloudControl(_ status: ReadAloudPlaybackStatus) -> some View {
+        Button { model.stopReadingAloud() } label: {
+            HStack(spacing: 8) {
+                if status == .preparing, !reducedMotion {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: status == .preparing ? "waveform" : "stop.fill")
+                }
+                Text(ReadAloudPresentation.controlLabel(status))
+                    .font(theme.body(12, weight: .semibold))
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+            }
+            .foregroundStyle(botColor)
+            .padding(.horizontal, 12)
+            .frame(minHeight: ReadAloudPresentation.minimumControlHeight)
+            .background(theme.panel, in: Capsule())
+            .overlay(Capsule().strokeBorder(botColor.opacity(0.35), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(ReadAloudPresentation.controlLabel(status))
+        .accessibilityHint(ReadAloudPresentation.accessibilityHint(status))
+    }
+
     @ViewBuilder private func messageMenu(_ message: ChatMessage) -> some View {
         Button {
             copyToPasteboard(AssistantMediaProjection.copyText(in: message))
         } label: {
             Label(copy.copyMessage(theme.id), systemImage: "doc.on.doc")
+        }
+        if model.readAloud.isActive(messageID: message.id, botID: botID) {
+            Button { model.stopReadingAloud() } label: {
+                Label("Stop reading aloud", systemImage: "stop.fill")
+            }
+        } else if model.canReadAloud(message, in: botID) {
+            Button { model.readMessageAloud(message, in: botID) } label: {
+                Label("Read Aloud", systemImage: "waveform")
+            }
         }
         let archived = isArchivedMessage(message)
             || chat?.isShowingArchivedResponseAlternative == true

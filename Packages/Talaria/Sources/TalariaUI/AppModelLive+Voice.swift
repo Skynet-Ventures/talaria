@@ -321,6 +321,12 @@ extension AppModel {
     /// The returned token must be released; a token prevents background router
     /// attachment from replacing this source while the conversation is open.
     public func acquireVoiceRouter(for botID: String) async -> UUID? {
+        // A VoiceSession claims the shared phone-audio coordinator before this
+        // point. This additional invalidation closes non-view/test callers:
+        // Voice Mode may stop a one-shot read, never mix with or steal it.
+        if ReadAloudRuntime.shared.status != nil {
+            ReadAloudRuntime.shared.stop()
+        }
         guard let route = profileRoute(for: botID) else { return nil }
         let runtime = VoiceRuntime.shared
         let claim = runtime.routerFence.acquireOverlay(gatewayID: route.gatewayID)

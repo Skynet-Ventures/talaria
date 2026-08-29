@@ -142,6 +142,8 @@ private final class ProfileLifecycleRuntime {
     func block(_ route: GatewayBotRoute) {
         routeGenerations[route, default: 0] &+= 1
         blockedRoutes.insert(route)
+        ReadAloudRuntime.shared.sourceDidInvalidate(
+            gatewayID: route.gatewayID, profile: route.profile)
     }
 
     func restore(_ route: GatewayBotRoute) {
