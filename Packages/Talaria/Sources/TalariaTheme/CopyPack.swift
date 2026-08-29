@@ -109,6 +109,7 @@ public struct CopyPack: Sendable {
     /// would actually tag (default → @hermes) or the display title — and
     /// never prints the raw profile name.
     public var composer: @Sendable (Bot) -> String
+    public var earlierMessages: String = "Earlier messages"
 
     public static func pack(for theme: ThemeID) -> CopyPack {
         switch theme {

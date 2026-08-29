@@ -33,6 +33,37 @@ public enum ProtocolChecks {
         try botModeNotices()
         try transcriptActing()
         try messageBranching()
+        try openChatHistoryPolicy()
+    }
+
+    static func openChatHistoryPolicy() throws {
+        try expect(OpenChatHistoryPolicy.resumeDefersHistory,
+                   "open-chat resume defers the full transcript")
+        let deferred = GatewayClient.resumeSessionParams(
+            "stored-1", profile: "research",
+            deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
+        try expect(deferred["defer_history"]?.boolValue == true,
+                   "session.resume carries defer_history for open-chat")
+        try expect(deferred["session_id"]?.stringValue == "stored-1",
+                   "session.resume names the durable key")
+        let full = GatewayClient.resumeSessionParams("stored-1", deferHistory: false)
+        try expect(full["defer_history"] == nil,
+                   "mutation-proof resume omits defer_history")
+        try expect(OpenChatHistoryPolicy.needsLatestPage(
+            historyDeferred: true, resumeMessageCount: 6),
+                   "a deferred stub still loads the REST latest page")
+        try expect(!OpenChatHistoryPolicy.needsLatestPage(
+            historyDeferred: false, resumeMessageCount: 6),
+                   "a full resume projection is already complete")
+        let query = OpenChatHistoryPolicy.latestMessagesQuery(
+            profile: "research", limit: 200, offset: 0)
+        try expect(query.contains(where: { $0.name == "order" && $0.value == "latest" }),
+                   "REST hydration pages from the newest messages")
+        try expect(query.contains(where: { $0.name == "include_compacted" && $0.value == "true" }),
+                   "REST hydration keeps compacted display rows")
+        try expect(OpenChatHistoryPolicy.hasOlderMessages(
+            pageCount: 200, limit: 200, source: .latestPage),
+                   "a full latest page is a window, not the whole store")
     }
 
     static func eventEnvelopeDecoding() throws {

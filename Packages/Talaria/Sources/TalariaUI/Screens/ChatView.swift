@@ -496,6 +496,21 @@ public struct ChatView: View {
     }
 
     @ViewBuilder private var transcriptRows: some View {
+        if chat?.transcriptHasOlder == true {
+            Button {
+                Task { await model.loadOlderTranscript(botID: botID) }
+            } label: {
+                Text(copy.earlierMessages)
+                    .font(theme.id == .soft ? theme.body(12, weight: .semibold) : theme.mono(10))
+                    .foregroundStyle(theme.sub)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .disabled(chat?.isLoadingOlderTranscript == true)
+            .opacity(chat?.isLoadingOlderTranscript == true ? 0.55 : 1)
+            .accessibilityLabel(Text(copy.earlierMessages))
+        }
         ForEach(messages) { message in
             messageRow(message)
                 .id(message.id.uuidString)

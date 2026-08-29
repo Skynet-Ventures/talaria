@@ -28,5 +28,6 @@ final class ProtocolXCTests: XCTestCase {
     func testBotModeNotices() throws { try ProtocolChecks.botModeNotices() }
     func testTranscriptActing() throws { try ProtocolChecks.transcriptActing() }
     func testMessageBranching() throws { try ProtocolChecks.messageBranching() }
+    func testOpenChatHistoryPolicy() throws { try ProtocolChecks.openChatHistoryPolicy() }
 }
 #endif
