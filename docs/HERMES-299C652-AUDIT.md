@@ -21,7 +21,7 @@ still the source of truth.
 | `fd565c80`, `77edf1b4`, `cb75983a`, `07b87f14`, `962b308b`, `6fdaef6a`, `db127f75`; Desktop session owner/router modules | Session and profile actions retain exact connection/profile/session ownership. Same session ids in different profiles are distinct rows. | **Existing architecture, retain and certify.** Talaria uses source-qualified routes and gateway/profile-qualified room/session stores. Add any missing collision cases; do not collapse by bare session id. |
 | `01f7ce5b`, `9faa6853`; `hermes_cli/web_routers/sessions.py` | `POST /api/sessions/owner-backfill` with optional profile returns `{ok, stamped, profile}`. New Desktop also keeps a read-only cross-backend transcript fallback for legacy rows. | **New compatibility slice.** Invoke only against an unambiguous owning gateway/profile, treat 404 as version skew, and never turn fallback discovery into mutation authority. |
 | `25525799`, `7450266a`, `8fe4816e`, `61b6788d`; profile/model controls | A guarded profile model change may return `confirm_required` and `confirm_message`; resend only after consent with `confirm_expensive_model:true`. | **Already implemented.** Talaria's shared live model control decodes the guarded result and uses the same confirmation path from settings and Bot profile. Retain source qualification. |
-| `213ae08e`, `c19849cd`, `a7ea1564`, `62534e2b`; Desktop gateway-event compaction state | “Compacting” clears only on a compacted status, resume, or `session.info.running=false`. | **Audit against Talaria activity projection.** Do not clear sustained activity from an idle timer alone. |
+| `213ae08e`, `c19849cd`, `a7ea1564`, `62534e2b`; Desktop gateway-event compaction state | “Compacting” clears only on a compacted status, resume, or `session.info.running=false`. | **No equivalent retained client state.** Talaria's manual compaction is one awaited, source-fenced RPC and returns the gateway receipt directly; it does not publish Desktop's independently persistent “compacting” composer state or clear one from an idle timer. Ordinary turn activity already settles from `message.complete`, `error`, resume/session-info, and the authoritative active-session snapshot. Revisit only if Talaria adds background compaction presentation. |
 
 ## Server-owned changes
 
@@ -54,8 +54,7 @@ Talaria must not pin or implement the reverted wire shape.
 
 1. Land the additive Bot Mode session-create contract.
 2. Add the source-fenced owner-backfill/read-only legacy transcript slice.
-3. Re-audit Talaria's compaction/activity terminal evidence.
-4. Run the existing source-qualified ownership/collision matrix and exact
+3. Run the existing source-qualified ownership/collision matrix and exact
    gateway/device Bot Chat + room provider-switch certification.
 
 The pin records an audit, not certification. Gateway- and device-dependent
