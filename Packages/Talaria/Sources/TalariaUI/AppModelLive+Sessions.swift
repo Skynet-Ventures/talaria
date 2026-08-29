@@ -1435,6 +1435,8 @@ extension AppModel {
             if chat.storedSessionID == id {
                 chat.storedSessionID = nil
                 if let sid = chat.sessionID, let route = gatewayRoute(for: botID) {
+                    SubagentLiveRuntime.shared.tearDown(
+                        gatewayID: route.gatewayID, parentRuntimeSessionID: sid)
                     if route.gatewayID == LiveRuntime.shared.gatewayID {
                         LiveRuntime.shared.sessionToBot.removeValue(forKey: sid)
                     } else {
