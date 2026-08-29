@@ -38,9 +38,21 @@ public final class ChatState {
     public var storedSessions: [SessionSummary] = []
     /// Live context-window breakdown (session.context_breakdown).
     public var contextSegments: [ContextSegment] = []
+    /// The visible transcript is the newest REST window, not the full store.
+    /// `loadOlderTranscript` prepends the next page when this is true.
+    public var transcriptHasOlder: Bool = false
+    /// REST `offset` for the next older `order=latest` page.
+    public var transcriptOlderOffset: Int = 0
+    public var isLoadingOlderTranscript: Bool = false
 
     public init(messages: [ChatMessage] = []) {
         self.messages = messages
+    }
+
+    func resetTranscriptWindow() {
+        transcriptHasOlder = false
+        transcriptOlderOffset = 0
+        isLoadingOlderTranscript = false
     }
 }
 

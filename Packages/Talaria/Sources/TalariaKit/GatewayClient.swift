@@ -1043,12 +1043,20 @@ public actor GatewayClient {
 
     /// Resume a stored session by durable key. Within ~20 s of a disconnect
     /// this reattaches the live in-memory session with in-flight state.
+    /// Open-chat callers pass `deferHistory: true` so the ack is not the
+    /// full transcript; mutation-proof callers keep the default.
     public func resumeSession(_ storedID: String, profile: String? = nil,
                               deferHistory: Bool = false) async throws -> LiveSession {
-        var params: [String: JSONValue] = ["session_id": .string(storedID), "source": "talaria"]
-        if let profile { params["profile"] = .string(profile) }
-        if deferHistory { params["defer_history"] = .bool(true) }
-        return LiveSession(try await rpc("session.resume", .object(params), timeout: 180))
+        LiveSession(try await rpc(
+            "session.resume",
+            Self.resumeSessionParams(storedID, profile: profile, deferHistory: deferHistory),
+            timeout: 180))
+    }
+
+    public static func resumeSessionParams(_ storedID: String, profile: String? = nil,
+                                           deferHistory: Bool = false) -> JSONValue {
+        OpenChatHistoryPolicy.resumeSessionParams(
+            storedID, profile: profile, deferHistory: deferHistory)
     }
 
     /// Exact resume plus the transport frame boundary of the authoritative
@@ -1062,13 +1070,11 @@ public actor GatewayClient {
             guard let transport else {
                 throw GatewayError(code: -3, message: "not connected")
             }
-            var params: [String: JSONValue] = [
-                "session_id": .string(storedID), "source": "talaria",
-            ]
-            if let profile { params["profile"] = .string(profile) }
-            if deferHistory { params["defer_history"] = .bool(true) }
             let response = try await transport.requestSequenced(
-                "session.resume", params: .object(params), timeout: 180)
+                "session.resume",
+                params: Self.resumeSessionParams(
+                    storedID, profile: profile, deferHistory: deferHistory),
+                timeout: 180)
             await lease?.release()
             return (LiveSession(response.value), response.inboundSequence)
         } catch {
