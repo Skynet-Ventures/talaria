@@ -355,6 +355,11 @@ public actor GatewayClientPool {
     private func publishConnectedClient(_ client: GatewayClient, gatewayID: String,
                                         generation: UInt64) async throws {
         await installLifecycleAdmission(on: client, gatewayID: gatewayID)
+        // The connector has completed `GatewayClient.connect()` at this point.
+        // Install event authority before publishing the slot, so a routed
+        // consumer never observes a connected secondary whose valid frames
+        // are rejected for lack of an adopted transport epoch.
+        _ = await client.publishCurrentTransportForEvents()
         try Task.checkCancellation()
         guard let current = slots[gatewayID], current.generation == generation,
               current.client == nil, current.task != nil else {
