@@ -954,14 +954,51 @@ public actor GatewayClient {
         return result["hidden"]?.boolValue ?? hidden
     }
 
-    public func createSession(profile: String? = nil, title: String? = nil,
-                              model: String? = nil, hidden: Bool = false) async throws -> LiveSession {
+    /// How Hermes should reconstruct the runtime when this stored session is
+    /// resumed later. Ordinary user chats restore the model/provider that the
+    /// row actually used; Bot Mode-owned conversations instead follow the
+    /// profile's current configuration.
+    public enum SessionRuntimeContract: Sendable, Equatable {
+        case storedConfiguration
+        case followProfileConfiguration
+        case roomPlumbing
+    }
+
+    static func sessionCreateParams(
+        profile: String? = nil,
+        title: String? = nil,
+        model: String? = nil,
+        hidden: Bool = false,
+        runtimeContract: SessionRuntimeContract = .storedConfiguration
+    ) -> JSONValue {
         var params: [String: JSONValue] = ["source": "talaria", "cols": 100]
         if let profile { params["profile"] = .string(profile) }
         if let title { params["title"] = .string(title) }
         if let model { params["model"] = .string(model) }
         if hidden { params["hidden"] = .bool(true) }
-        return LiveSession(try await rpc("session.create", .object(params)))
+        switch runtimeContract {
+        case .storedConfiguration:
+            break
+        case .followProfileConfiguration:
+            params["follow_profile_config"] = .bool(true)
+        case .roomPlumbing:
+            params["room_plumbing"] = .bool(true)
+            params["follow_profile_config"] = .bool(true)
+        }
+        return .object(params)
+    }
+
+    public func createSession(
+        profile: String? = nil,
+        title: String? = nil,
+        model: String? = nil,
+        hidden: Bool = false,
+        runtimeContract: SessionRuntimeContract = .storedConfiguration
+    ) async throws -> LiveSession {
+        let params = Self.sessionCreateParams(
+            profile: profile, title: title, model: model, hidden: hidden,
+            runtimeContract: runtimeContract)
+        return LiveSession(try await rpc("session.create", params))
     }
 
     /// Resume a stored session by durable key. Within ~20 s of a disconnect
