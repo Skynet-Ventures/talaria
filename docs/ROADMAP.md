@@ -375,10 +375,21 @@ create/edit/clone/run certification cases.
 ### 5. Remaining transcript and session depth
 
 Message edit, rewind/restore, regenerate, and message-level child creation are
-implemented. Remaining depth includes the N/M alternative-branch picker and
-lineage presentation, persistent multimodal parts and generated-media lightboxes,
-grouped tool runs, diff/ANSI/search/math/diagram presentation, per-message TTS
-and timing. The explicit durable composer queue is now a separate,
+implemented. Desktop's N/M regenerate alternatives are client-local response
+siblings; selecting one does not switch Hermes' durable context and a normal
+resume cannot reconstruct them. The separate `session.branch` durable child
+contract is already implemented. Talaria now retains bounded current-ChatState
+alternatives only after an accepted receipt or exact effect proof, renders the
+selected local response inertly, and keeps the newest durable model context.
+Live gateway and physical-device certification remain open. The open dependency
+stack now adds normalized durable session-tree presentation and bounded ordered
+multimodal/tool parts. Both consume explicit Hermes producer contracts rather
+than inferring identity or order; the corresponding upstream Hermes PRs must
+land before release certification. Other remaining depth includes math/diagram
+presentation, per-message TTS, whole-turn timing, tours, and
+transcript-wide activity. Bounded diff, ANSI terminal, web-search, generated-
+image lightbox/share, and explicit assistant image/audio/video/file cards are
+implemented on the open transcript stack. The explicit durable composer queue is now a separate,
 source-qualified, text-only phone interaction; it still needs retained live
 gateway/device certification, not a broader queue CRUD surface. The remaining
 work should be split into independently reviewed slices after the certification

@@ -22,6 +22,15 @@ change or a material portable-contract delta creates a parity blocker;
 metadata, test-only, or non-portable drift can be recorded without chasing the
 moving head.
 
+## Open-stack implementation scope
+
+Rich-transcript hydration through assistant `MEDIA:` projection and the
+durable Queue dispositions below describe the still-open PR #54-#63 stack
+ending at Talaria `ab6c89f09ebc6260a0e15ce38efb862c0ba32580`. They do not
+claim those slices are present on released `main`
+(`a8463632e409620d471cfd40d25b2197015ae00d` at this edit), and remain
+provisional until the exact independently reviewed heads merge.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit
@@ -191,24 +200,36 @@ therefore never inferred as removal.
 | Projects filesystem | Blocked upstream for safe mobile use: `/api/fs` does not return authoritative resolved-target/root containment proof and writes have no atomic expected-hash/`If-Match`. Talaria must remain fail-closed rather than provide best-effort editing. |
 | Unknown explicit Project profile | Hermes currently falls back to the launch profile. Talaria revalidates the selected route immediately before writes and fails closed, but Hermes should reject an explicit unknown profile. |
 | Cron per-job reasoning effort | Implemented as an explicitly authorized mobile REST mutation. Talaria decodes and displays the raw field, preserves unknown values on unrelated edits, and sends only canonical/clear values through the exact REST PUT normalizer, which delegates to Hermes' canonical `cron.jobs.update_job` validation. The model tool remains read-only and cannot set this job-owned field. Live certification remains open. |
-| Rich transcript parity | Partial: markdown, tables, code, working avatar, transcript actions, jump-to-bottom, exact-source message-level child creation, and bounded typed tool-history hydration now exist. The mobile generic fallback groups larger runs and discloses status, arguments, result, provenance, and diagnostics without name/prose pairing. Explicit file-edit diffs now hydrate and overlay only by exact tool id, then render as bounded, sanitized, selectable mobile disclosures with +/- counts; live gateway/device proof remains open. Persistent multimodal parts, generated images/lightbox, specialist ANSI/search/math/diagram renderers, per-message TTS, whole-turn timing, the N/M alternative-branch picker, lineage presentation, and tour/activity remain. |
+| Rich transcript parity | Partial on the open stack described above: markdown, tables, code, quiet/advanced tools, working avatar, transcript actions, jump-to-bottom, local transcript find, exact-source message-level child creation, bounded current-chat N/M response alternatives, typed tool-history hydration, bounded ordered multimodal/tool parts, file-edit diffs, structured terminal output with bounded ANSI styling, web-search result cards, exact successful generated-image cards/lightbox/share, explicit assistant `MEDIA:` image/audio/video/file cards, and normalized durable session-lineage presentation exist there. The ordered-parts and lineage consumers rely on additive Hermes contracts in `NousResearch/hermes-agent#93720` and `NousResearch/hermes-agent#93675`; neither may be called release-certified until its producer lands. The separate explicit text-only durable Queue has source/session-qualified persistence, edit/pause/remove/uncertainty semantics, and focused automated coverage. Assistant `MEDIA:` loads are all explicit and source-fenced. Generated public-URL images also require explicit contact, while an admitted gateway-path generated image starts its bounded authenticated load when its card appears. Gateway assistant-media images/files use managed reads, audio/video use the stream route, and public URLs use bounded no-credential/no-redirect loading. Live gateway/device proof remains open. Specialist math/diagram renderers, per-message TTS, whole-turn timing, and tour/activity remain. Desktop N/M selection changes only local renderer visibility; it sends no gateway RPC and cannot be reconstructed from a normal resume. Talaria mirrors that narrow behavior with an ephemeral exact-bound shelf and does not infer alternatives after resume. Durable `session.branch` child creation and the lineage browser are distinct from that local alternative group. |
 | Management parity | Partial: provider/model/profile/capability/routine/memory/voice/operator surfaces exist. Messaging platform/webhook/relay-deployment lifecycle, subagent tree/live tail/files/cost, learned-memory curation, profile import/export, MCP per-server logs, auxiliary goal-judge/vision slots (including `auxiliary.goal_judge.timeout`), and MoA administration remain. |
 | Git/System depth | Partial: core review and guarded mutations exist. Base/commit/ship context, dirty-worktree recovery, worktree-session integration, usage periods/daily/model/skill detail, and multi-gateway backend update orchestration remain. |
 | Artifact completeness | Exact retained-source discovery is implemented with atomic no-dial snapshots, sequential reads, compacted rows, collision isolation, and explicit bounded/stale/failure state. Retained bodies use the exact captured client only after `/api/files` proves one canonical locked root; root and body responses are wire-bounded, authority is rechecked after awaits, and sign-out purges source-owned bytes. Hermes `session.list` still has no global continuation, transcript offsets remain informational under Talaria's 150-item cap, and gateways returning `locked_root: nil` remain fail-closed. Live certification remains open. |
 
 ## True platform exceptions
 
-These are genuinely local Desktop behaviors and are not copied literally:
+An exception must be tied to the Desktop host or renderer itself. A missing RPC,
+an unfinished screen, an uncertified implementation, or an awkward phone layout
+is not an exception. The current classifications are:
 
-- Finder/Explorer reveal and native path pickers for the gateway host.
-- Electron titlebar, placement, HUD, always-on-top, translucency, and local
-  multi-window management.
-- Launching a separate desktop terminal emulator or locally spawning backends.
-- Replacing Talaria's signed binary; App Store/TestFlight owns iOS app updates.
-- Native Windows PTY when the gateway itself has no supported PTY backend.
+| Desktop behavior | Classification on iOS | Boundary that remains authoritative |
+|---|---|---|
+| Electron titlebar, pane docking, saved window placement, HUD, always-on-top, translucency, and local multi-window geometry | **True exception.** Talaria uses navigation stacks, sheets, and compact phone layouts; it does not reproduce pixel-for-pixel window management. | The portable destination and state must remain reachable and restorable. |
+| Pointer hover, hover pre-warm, native tooltips, drag regions, and CSS cursor states | **Literal interaction is a true exception; purpose is not.** Touch-down/on-appear prefetch, long press, visible labels, and VoiceOver hints are the mobile equivalents. | Discoverability and first-open latency still require implementation and device evidence. |
+| DOM/SVG/CSS/React compiler, QueryClient, renderer plugin registration, and contribution-id plumbing | **True renderer exception.** SwiftUI, `AppModel`, and explicit lifecycle wiring replace these mechanisms. | Transferable semantics such as idempotent registration, invalidate-after-mutation, reduced motion, and state restoration still apply. |
+| Desktop global shortcuts and shell menu integration | **True exception where they address window/plugin hosting.** Hardware-keyboard shortcuts may be added as mobile convenience, but Bot Mode registers no parity-defining keybinds. | Every essential operation must remain reachable by touch and VoiceOver. |
+| Finder/Explorer reveal and a path picker running on the gateway host | **True host-local exception.** Talaria uses a gateway-authorized Files/Projects browser and must not imply that an iOS picker selects a remote host path. | Remote reads/writes are portable, but writes remain fail-closed without resolved-target/root and atomic conflict proof. |
+| Launching a separate local terminal emulator or spawning a Hermes backend on the client machine | **True host-local exception.** The authenticated gateway PTY and gateway operations are the mobile equivalents. | PTY/backend support must exist on the selected gateway; source/profile authority may never be guessed. |
+| Native Windows PTY when the selected gateway exposes no supported PTY backend | **True host capability exception.** A phone cannot manufacture a missing remote PTY service. | Show the unsupported state honestly; do not silently fall back to another gateway. |
+| Replacing the running app binary or applying a Desktop updater | **True distribution exception.** App Store/TestFlight owns signed iOS updates. | Gateway compatibility and release-channel state still need visible, testable handling. |
+| Local desktop notifications, tray/dock badges, and foreground toast placement | **Presentation exception only.** APNs, the local activity journal, badges, and in-app toasts carry the portable signal. | Source identity, filtering, action routing, negative cases, and Debug/production APNs must be certified separately. |
+| Desktop main-window progress chrome | **Presentation exception only.** A Live Activity is permitted only after sustained operational tool work survives Talaria's explicit 20-second admission grace, never for ordinary open chats or short answers. | Start/update/end policy, background cleanup, and reduced-motion behavior remain device-certification requirements. |
 
-Remote Git, Projects, gateway maintenance, and the authenticated gateway PTY
-are portable mobile equivalents, not exceptions.
+The following are explicitly **not** platform exceptions: union-roster routing,
+rooms, canonical chats, durable queued work, rich transcripts and generated
+media, attachments, notification delivery, provider/profile/routine management,
+remote Git/Projects/files, gateway maintenance, and authenticated PTY access.
+They are either implemented-but-uncertified or remain portable work in the
+ledger above.
 
 ## Certification still required
 
@@ -223,3 +244,7 @@ are portable mobile equivalents, not exceptions.
   routing, and the complete TestFlight production matrix remain open.
 - A supervisor that outlives the gateway for honest offline/recovered push;
   a sidecar on the same failed host is not sufficient evidence.
+
+Record these results with the stable ids and mandatory environment/evidence
+fields in [`REAL-DEVICE-CERTIFICATION.md`](REAL-DEVICE-CERTIFICATION.md).
+Implemented source and passing automated tests do not pre-fill a device result.
