@@ -64,6 +64,12 @@ public enum ProtocolChecks {
         try expect(OpenChatHistoryPolicy.hasOlderMessages(
             pageCount: 200, limit: 200, source: .latestPage),
                    "a full latest page is a window, not the whole store")
+        try expect(OpenChatHistoryPolicy.sameBinding(
+            "root", target: "tip", durableID: "root"),
+                   "root id and resume tip are one conversation")
+        try expect(OpenChatHistoryPolicy.attachRestTarget(
+            "Bot Chat", durableID: nil, canonicalTitle: "Bot Chat") == nil,
+                   "a title-only resume does not prefetch REST")
     }
 
     static func eventEnvelopeDecoding() throws {
