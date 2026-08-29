@@ -384,6 +384,40 @@ enum TranscriptHydrationMerge {
             merged[index].arguments = merged[index].arguments ?? overlay.arguments
             merged[index].result = merged[index].result ?? overlay.result
             merged[index].resultText = merged[index].resultText ?? overlay.resultText
+            let storedStructuredEvidence = ToolStructuredOutput.merging(
+                newer: merged[index].structuredOutput,
+                preserving: merged[index].deferredStructuredOutput)
+            let overlayStructuredEvidence = ToolStructuredOutput.merging(
+                newer: overlay.structuredOutput,
+                preserving: overlay.deferredStructuredOutput)
+            let storedHadStructuredEvidence = storedStructuredEvidence != nil
+            let preservesStructuredFailure = storedHadStructuredEvidence
+                && stored[index].state == .failed && overlay.state != .failed
+            if ToolOutputCodec.isStructuredTool(merged[index].name) {
+                merged[index].structuredOutput = preservesStructuredFailure
+                    ? ToolStructuredOutput.merging(
+                        newer: storedStructuredEvidence,
+                        preserving: overlayStructuredEvidence)
+                    : ToolStructuredOutput.merging(
+                        newer: overlayStructuredEvidence,
+                        preserving: storedStructuredEvidence)
+                merged[index].deferredStructuredOutput = nil
+            } else {
+                merged[index].structuredOutput = preservesStructuredFailure
+                    ? ToolStructuredOutput.merging(
+                        newer: merged[index].structuredOutput,
+                        preserving: overlay.structuredOutput)
+                    : ToolStructuredOutput.merging(
+                        newer: overlay.structuredOutput,
+                        preserving: merged[index].structuredOutput)
+                if merged[index].name.isEmpty || merged[index].name == "Tool" {
+                    merged[index].deferredStructuredOutput = ToolStructuredOutput.merging(
+                        newer: overlay.deferredStructuredOutput,
+                        preserving: merged[index].deferredStructuredOutput)
+                } else {
+                    merged[index].deferredStructuredOutput = nil
+                }
+            }
             if var liveDiff = overlay.fileDiff ?? overlay.deferredFileDiff,
                ToolDiffCodec.isFileEditTool(merged[index].name) {
                 // The live event owns the current body. Raw storage may enrich
@@ -401,6 +435,13 @@ enum TranscriptHydrationMerge {
                stored[index].state == .failed, overlay.state != .failed {
                 // Stored failure comes only from PR57's meaningful protocol
                 // error decoder. A stale running/success overlay cannot erase it.
+                merged[index].state = .failed
+            }
+            if storedHadStructuredEvidence || overlayStructuredEvidence != nil,
+               stored[index].state == .failed, overlay.state != .failed {
+                // Exact stored failure evidence is monotonic. A sparse or
+                // stale success overlay may enrich missing streams, but it
+                // cannot repaint the invocation as successful.
                 merged[index].state = .failed
             }
             if merged[index].diagnostic == nil { merged[index].diagnostic = overlay.diagnostic }

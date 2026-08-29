@@ -1217,7 +1217,10 @@ extension AppModel {
             let completionBeforeStart = calls[existing].provenance == .unmatchedResult
                 && calls[existing].state != .running
                 && (calls[existing].deferredFileDiff != nil
-                    || calls[existing].fileDiff != nil || calls[existing].result != nil)
+                    || calls[existing].fileDiff != nil
+                    || calls[existing].structuredOutput != nil
+                    || calls[existing].deferredStructuredOutput != nil
+                    || calls[existing].result != nil)
             if completionBeforeStart {
                 admitsStartMetadata = true
                 // Exact completion-before-start ownership beats its one
@@ -1247,6 +1250,7 @@ extension AppModel {
                 }
                 calls[exact].gatewayToolID = tool.toolID.isEmpty ? nil : tool.toolID
                 calls[exact].arguments = tool.arguments ?? calls[exact].arguments
+                calls[exact].provenance = .live
             }
         } else if let pending = calls.firstIndex(where: {
             $0.id.hasPrefix(ChatRuntime.generatingPrefix) && $0.name == tool.name && $0.state == .running
@@ -1284,6 +1288,14 @@ extension AppModel {
             } else if !establishedName.isEmpty, establishedName != "Tool" {
                 calls[exact].deferredFileDiff = nil
             }
+            if ToolOutputCodec.isStructuredTool(establishedName) {
+                calls[exact].structuredOutput = ToolStructuredOutput.merging(
+                    newer: calls[exact].deferredStructuredOutput,
+                    preserving: calls[exact].structuredOutput)
+                calls[exact].deferredStructuredOutput = nil
+            } else if !establishedName.isEmpty, establishedName != "Tool" {
+                calls[exact].deferredStructuredOutput = nil
+            }
         }
         chat.messages[index].toolCalls = calls
     }
@@ -1305,6 +1317,14 @@ extension AppModel {
                !tool.name.isEmpty {
                 calls[hit].name = tool.name
             }
+            let establishedName = (calls[hit].name.isEmpty || calls[hit].name == "Tool")
+                ? tool.name : calls[hit].name
+            let rawResult = payload?["result"] ?? payload?["result_text"]
+            let outputAdmission = ToolOutputCodec.admit(
+                toolName: establishedName, result: rawResult)
+            let completionOutput = outputAdmission.output ?? tool.structuredOutput
+            let completionResult = completionOutput == nil
+                ? tool.result : (outputAdmission.genericResult ?? tool.result)
             let completionFailed = Self.toolFailed(
                 payload: payload, summary: tool.summary, resultText: tool.resultText)
             let preservesFailedEvidence = calls[hit].state == .failed && !completionFailed
@@ -1315,13 +1335,32 @@ extension AppModel {
             }
             // result_text only rides along in verbose mode; `result` is always
             // there, so fall back to a readable rendering of it.
-            if !preservesFailedEvidence, let result = tool.result {
+            if !preservesFailedEvidence, let result = completionResult {
                 calls[hit].result = result
-                calls[hit].resultText = tool.resultText
+                calls[hit].resultText = result.displayText
                     ?? Self.describeResult(payload?["result"])
             }
             calls[hit].durationSeconds = tool.durationSeconds ?? calls[hit].durationSeconds
             calls[hit].arguments = calls[hit].arguments ?? tool.arguments
+            calls[hit].structuredOutput = preservesFailedEvidence
+                ? ToolStructuredOutput.merging(
+                    newer: calls[hit].structuredOutput, preserving: completionOutput)
+                : ToolStructuredOutput.merging(
+                    newer: completionOutput, preserving: calls[hit].structuredOutput)
+            let deferredOutput = tool.deferredStructuredOutput
+            if ToolOutputCodec.isStructuredTool(establishedName) {
+                calls[hit].structuredOutput = preservesFailedEvidence
+                    ? ToolStructuredOutput.merging(
+                        newer: calls[hit].structuredOutput, preserving: deferredOutput)
+                    : ToolStructuredOutput.merging(
+                        newer: deferredOutput, preserving: calls[hit].structuredOutput)
+                calls[hit].deferredStructuredOutput = nil
+            } else if establishedName.isEmpty || establishedName == "Tool" {
+                calls[hit].deferredStructuredOutput = ToolStructuredOutput.merging(
+                    newer: deferredOutput, preserving: calls[hit].deferredStructuredOutput)
+            } else {
+                calls[hit].deferredStructuredOutput = nil
+            }
             if !preservesFailedEvidence {
                 let establishedName = ToolDiffCodec.isFileEditTool(calls[hit].name)
                     ? calls[hit].name : tool.name
@@ -1357,6 +1396,8 @@ extension AppModel {
             gatewayToolID: tool.toolID.isEmpty ? nil : tool.toolID,
             arguments: tool.arguments, result: result,
             fileDiff: tool.fileDiff,
+            structuredOutput: tool.structuredOutput,
+            deferredStructuredOutput: tool.deferredStructuredOutput,
             deferredFileDiff: tool.fileDiff == nil ? tool.deferredFileDiff : nil,
             provenance: .unmatchedResult,
             diagnostic: "No exact live tool-call id matched this completion; Talaria did not pair it by name."))
