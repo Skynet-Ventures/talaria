@@ -616,8 +616,9 @@ public actor GatewayClient {
 
     public init(baseURL: URL, credential: GatewayCredential,
                 keychain: KeychainStore = KeychainStore()) {
-        self.baseURL = baseURL
-        self.auth = GatewayAuthClient(baseURL: baseURL)
+        let wire = GatewayURL.normalize(baseURL.absoluteString) ?? baseURL
+        self.baseURL = wire
+        self.auth = GatewayAuthClient(baseURL: wire)
         self.credential = credential
         self.keychain = keychain
         self.restExecutor = { request, limit in
@@ -634,8 +635,9 @@ public actor GatewayClient {
     init(baseURL: URL, credential: GatewayCredential,
          keychain: KeychainStore = KeychainStore(),
          restExecutor: @escaping RESTExecutor) {
-        self.baseURL = baseURL
-        self.auth = GatewayAuthClient(baseURL: baseURL)
+        let wire = GatewayURL.normalize(baseURL.absoluteString) ?? baseURL
+        self.baseURL = wire
+        self.auth = GatewayAuthClient(baseURL: wire)
         self.credential = credential
         self.keychain = keychain
         self.restExecutor = restExecutor
@@ -760,13 +762,28 @@ public actor GatewayClient {
     /// host fails into the next visible try instead of one frozen 15s wait.
     public func connect(readyTimeout: TimeInterval = 15) async throws {
         try Task.checkCancellation()
+        // Session-token connects used to go straight to WebSocket and wait
+        // 15s for gateway.ready. Mini never logged the phone: no HTTP, and a
+        // missing :9119 hit :80. Probe /api/status first (unauthenticated,
+        // finite) so the journal names the exact origin and serve.log sees
+        // the client before any ready wait.
+        let wire = GatewayURL.normalize(baseURL.absoluteString) ?? baseURL
+        let wireAuth = GatewayAuthClient(baseURL: wire)
+        let probeTimeout = min(3, readyTimeout)
+        do {
+            _ = try await wireAuth.status(timeout: probeTimeout)
+        } catch {
+            throw GatewayError(
+                code: -2,
+                message: "status \(GatewayURL.originForDisplay(wire)): \(error.localizedDescription)")
+        }
         if case .oauth(let tokens) = credential, tokens.needsRefresh {
             do {
-                let refreshed = try await auth.refresh(tokens)
+                let refreshed = try await wireAuth.refresh(tokens)
                 credential = .oauth(refreshed)
-                try? keychain.save(credential, for: baseURL)
+                try? keychain.save(credential, for: wire)
             } catch AuthError.sessionExpired {
-                keychain.delete(for: baseURL)
+                keychain.delete(for: wire)
                 throw AuthError.sessionExpired
             } catch AuthError.providerUnreachable {
                 // Keep tokens; the access token may still be valid.
@@ -775,13 +792,13 @@ public actor GatewayClient {
 
         let ticket: String?
         if case .oauth = credential {
-            ticket = try await auth.mintWSTicket(credential: credential)
+            ticket = try await wireAuth.mintWSTicket(credential: credential)
         } else {
             ticket = nil
         }
 
         try Task.checkCancellation()
-        let url = try auth.webSocketURL(credential: credential, ticket: ticket)
+        let url = try wireAuth.webSocketURL(credential: credential, ticket: ticket)
         // A reconnect must retire the previous receive loop and event stream
         // before a replacement transport is published. Leaving them running
         // makes the old pump finish later and look like a fresh drop.

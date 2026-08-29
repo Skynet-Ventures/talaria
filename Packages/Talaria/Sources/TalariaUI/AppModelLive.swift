@@ -320,11 +320,12 @@ extension AppModel {
 
     /// Deterministic focused seam preserving the production transition order.
     func connectGateway(
-        baseURL: URL,
+        baseURL rawBase: URL,
         credential: GatewayCredential,
         connectionOperation: (GatewayClient) async throws -> Void,
         adoptionOperations: ConnectedGatewayAdoptionOperations
     ) async throws {
+        let baseURL = ConnectionRegistry.shared.repairStoredBase(matching: rawBase)
         invalidateManagedCloudBootEpisodeUnlessOwnedByCurrentTask(sourceURL: baseURL)
         let runtime = LiveRuntime.shared
 
@@ -572,6 +573,13 @@ extension AppModel {
             LiveRuntime.shared.generation == generation
                 && self.client.map(ObjectIdentifier.init) == ObjectIdentifier(client)
                 && LiveRuntime.shared.gatewayID == gatewayID
+        }
+        guard stillThisLink() else { return }
+        // Launch/first-paint no longer awaits connect. If the user already
+        // opened a chat while we were live+offline, bind it now — do not
+        // leave them on an empty transcript until a second tap.
+        if let openBotID {
+            await enterCanonicalChat(botID: openBotID)
         }
         guard stillThisLink() else { return }
         try? await operations.refreshRoster()

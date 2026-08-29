@@ -131,6 +131,9 @@ public final class AppModel {
     var launchSavedGatewaysOverrideForTesting: [SavedGateway]?
     var launchConnectOverrideForTesting:
         (@MainActor (URL, GatewayCredential) async throws -> Void)?
+    /// Background launch dial when last-known roster or local history already
+    /// painted. Tests await this; production does not.
+    var launchDialTask: Task<Void, Never>?
 
     public init() {
         showOnboarding = !UserDefaults.standard.bool(forKey: "talaria-onboarded")
@@ -218,16 +221,34 @@ public final class AppModel {
         }.first
 
         if let selected {
+            let wire = registry.repairStoredBase(matching: selected.base)
+            let painted = paintLastKnownRosterIfAvailable(gatewayID: selected.gateway.id)
+            let hasLocalHistory = chats.values.contains { !$0.messages.isEmpty }
+            // Local history / last-known roster must paint before any
+            // connect()/ready wait. The dial runs after return.
+            if painted || hasLocalHistory {
+                mode = .live
+                isOffline = true
+                registry.noteState(.offline, forURL: wire)
+                connections = registry.rows
+                let dial = Task { @MainActor [weak self] in
+                    await self?.dialLaunchGateway(
+                        base: wire, credential: selected.credential,
+                        gatewayID: selected.gateway.id)
+                }
+                launchDialTask = dial
+                return
+            }
             do {
                 try await runManagedCloudBootEpisode(
-                    sourceURL: selected.base, gatewayID: selected.gateway.id
+                    sourceURL: wire, gatewayID: selected.gateway.id
                 ) {
                     if let launchConnectOverrideForTesting = self.launchConnectOverrideForTesting {
                         try await launchConnectOverrideForTesting(
-                            selected.base, selected.credential)
+                            wire, selected.credential)
                     } else {
                         try await self.connectGateway(
-                            baseURL: selected.base, credential: selected.credential)
+                            baseURL: wire, credential: selected.credential)
                     }
                 }
             } catch is ManagedCloudBootSupersededError {
@@ -238,7 +259,7 @@ public final class AppModel {
                 // The selected saved source outranks demo. Keep its honest
                 // offline row visible and stop; another saved gateway is not
                 // an implicit failover target.
-                registry.noteState(.offline, forURL: selected.base)
+                registry.noteState(.offline, forURL: wire)
                 connections = registry.rows
                 if mode == .live, client != nil {
                     isOffline = true
@@ -254,6 +275,29 @@ public final class AppModel {
             enterDemoMode()
         } else {
             connections = registry.rows
+        }
+    }
+
+    func dialLaunchGateway(base: URL, credential: GatewayCredential,
+                           gatewayID: String) async {
+        do {
+            try await runManagedCloudBootEpisode(
+                sourceURL: base, gatewayID: gatewayID
+            ) {
+                if let launchConnectOverrideForTesting = self.launchConnectOverrideForTesting {
+                    try await launchConnectOverrideForTesting(base, credential)
+                } else {
+                    try await self.connectGateway(baseURL: base, credential: credential)
+                }
+            }
+        } catch is ManagedCloudBootSupersededError {
+        } catch {
+            ConnectionRegistry.shared.noteState(.offline, forURL: base)
+            connections = ConnectionRegistry.shared.rows
+            if mode == .live, client != nil {
+                isOffline = true
+                scheduleSupervisedReconnect()
+            }
         }
     }
 

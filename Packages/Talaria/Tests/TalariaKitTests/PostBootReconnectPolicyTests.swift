@@ -70,4 +70,12 @@ final class PostBootReconnectPolicyTests: XCTestCase {
         XCTAssertEqual(PostBootReconnectPolicy.redialReadyTimeout, 5)
         XCTAssertLessThan(PostBootReconnectPolicy.redialReadyTimeout, 15)
     }
+
+    func testGatewayClientStoresRepairedHermesOrigin() async {
+        let client = GatewayClient(
+            baseURL: URL(string: "http://100.87.108.5")!,
+            credential: .sessionToken("x"))
+        let origin = await client.baseURL
+        XCTAssertEqual(origin.absoluteString, "http://100.87.108.5:9119")
+    }
 }

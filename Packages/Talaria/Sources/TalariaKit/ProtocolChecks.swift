@@ -102,8 +102,23 @@ public enum ProtocolChecks {
     static func gatewayURLNormalization() throws {
         try expect(GatewayURL.normalize("100.84.12.9:9119")?.absoluteString == "http://100.84.12.9:9119",
                    "scheme-less input gets http:// prefix")
+        try expect(GatewayURL.normalize("100.87.108.5")?.absoluteString == "http://100.87.108.5:9119",
+                   "tailnet IP without a port is hermes :9119, not implicit :80")
+        try expect(GatewayURL.normalize("192.168.1.24")?.absoluteString == "http://192.168.1.24:9119",
+                   "LAN IP without a port is hermes :9119")
         try expect(GatewayURL.normalize("https://gw.example.com/hermes/")?.absoluteString == "https://gw.example.com/hermes",
                    "trailing slash stripped, path prefix kept")
+        try expect(GatewayURL.originForDisplay(GatewayURL.normalize("100.87.108.5")!)
+                    == "http://100.87.108.5:9119",
+                   "journal/banner origin includes scheme and port")
+        try expect(GatewayURL.normalize("mini.tailnet.ts.net")?.absoluteString
+                    == "http://mini.tailnet.ts.net",
+                   "named MagicDNS hosts keep their implicit port")
+        try expect(GatewayURL.normalize("http://100.87.108.5:8443")?.absoluteString
+                    == "http://100.87.108.5:8443",
+                   "an explicit non-default port is kept")
+        try expect(GatewayURL.normalize("http://[fd7a:115c:a1e0::2]")?.port == 9119,
+                   "Tailscale ULA without a port is hermes :9119")
         try expect(GatewayURL.normalize("") == nil, "empty input rejected")
         try expect(GatewayURL.normalize("ftp://x") == nil, "non-http scheme rejected")
     }

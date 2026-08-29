@@ -387,11 +387,12 @@ public extension AppModel {
         // Link health — the disconnect monitor only flips `isOffline`.
         if isOffline != runtime.wasOffline {
             runtime.wasOffline = isOffline
-            let host = LiveRuntime.shared.baseURL?.host() ?? "gateway"
+            let origin = LiveRuntime.shared.baseURL.map(GatewayURL.originForDisplay)
+                ?? "gateway"
             recordActivity(kind: .gateway, botID: "gateway",
                            text: isOffline ? theme.copy.feedGatewayDown(theme.themeID)
                                            : theme.copy.feedGatewayUp(theme.themeID),
-                           subtext: host)
+                           subtext: origin)
             // A reconnect re-runs the stock (id-less) routine refresh; re-read
             // the jobs afterwards so the canonical ids come back.
             if !isOffline {

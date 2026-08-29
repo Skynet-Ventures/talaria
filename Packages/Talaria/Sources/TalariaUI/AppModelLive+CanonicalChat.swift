@@ -402,9 +402,12 @@ extension AppModel {
               !isOffline || GatewayBotRoute(qualifiedID: botID) != nil else { return }
         let runtime = CanonicalChatRuntime.shared
 
+        let hasLocalHistory = !(chats[botID]?.messages.isEmpty ?? true)
         // Coalesce: a double tap, or a tap racing a deep link, must resolve
-        // once (plugin.js:2742).
+        // once (plugin.js:2742). Local history is already first paint — do
+        // not sit on the inflight attach's connect/ready wait.
         if let inflight = runtime.opens[botID] {
+            if hasLocalHistory { return }
             await inflight.value
             return
         }
@@ -461,6 +464,14 @@ extension AppModel {
             }
         }
         runtime.opens[botID] = task
+        if hasLocalHistory {
+            // Bind in the background. The transcript is already on screen.
+            Task { @MainActor in
+                await task.value
+                if runtime.opens[botID] == task { runtime.opens[botID] = nil }
+            }
+            return
+        }
         // Released in a defer, and only if the slot is still ours: a tap that
         // arrived between this task finishing and the slot being cleared would
         // otherwise await an already-finished resolution and return having

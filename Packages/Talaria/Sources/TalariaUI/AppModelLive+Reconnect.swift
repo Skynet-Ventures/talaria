@@ -48,10 +48,14 @@ public extension Notification.Name {
 //      the monitor; open-chat attach awaited the 30s REST latest page after
 //      defer_history was already on the wire.
 //      Device journal (2026-08-29): repeated `Gateway unreachable` /
-//      `100.87.108.5`, last recovered 2026-08-28. Mini and a same-tailnet
-//      MacBook are healthy. First paint now uses last-known roster without
-//      waiting on ready; redials use a 5s ready bound and show try N
-//      instead of one frozen 15s connect().
+//      `100.87.108.5`, last recovered 2026-08-28. Mini `serve.log` never
+//      saw the phone (100.74.26.48) while tailnet pings and MacBook
+//      `/api/status` were fine. Journal `subtext` was `URL.host()` so a
+//      missing :9119 looked like the right host; session-token connect()
+//      went straight to WS and waited 15s for ready with no HTTP. Repair
+//      the stored origin to :9119, probe `/api/status` first (3s), paint
+//      cache/history without awaiting connect, and redial with a 5s ready
+//      bound plus try N instead of one frozen 15s wait.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -806,9 +810,16 @@ extension AppModel {
         guard supervisor.reconnectGeneration == attemptGeneration else { return .stale }
 
         let registry = ConnectionRegistry.shared
+        let wire = registry.repairStoredBase(matching: authority.baseURL)
+        if wire.absoluteString != authority.baseURL.absoluteString {
+            LiveRuntime.shared.baseURL = wire
+            supervisor.noteReconnect("url.repaired", GatewayURL.originForDisplay(wire))
+        }
         do {
             let tryNumber = supervisor.episodeAttempt + 1
-            supervisor.noteReconnect("connect.started", "try \(tryNumber)")
+            supervisor.noteReconnect(
+                "connect.started",
+                "try \(tryNumber) \(GatewayURL.originForDisplay(wire))")
             try await supervisor.dial(authority.client)
             supervisor.noteReconnect("gateway.ready")
         } catch AuthError.sessionExpired {
