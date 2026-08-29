@@ -181,6 +181,77 @@ final class OpenChatHydrationTests: XCTestCase {
         XCTAssertEqual(AppModel.attachRestTarget("Bot Chat", durableID: "root"), "root")
         XCTAssertEqual(AppModel.attachRestTarget("stored-1", durableID: nil), "stored-1")
     }
+
+    func testDeferredResumeDropsGiantGatewayDump() {
+        let dump = (1...20).map { index -> JSONValue in
+            .object([
+                "role": .string("assistant"),
+                "text": .string("m\(index)"),
+                "row_id": .number(Double(index)),
+            ])
+        }
+        XCTAssertTrue(
+            OpenChatHistoryPolicy.openChatResumeMessages(dump, historyDeferred: true).isEmpty,
+            "Mini dumped a 584-msg forever-chat despite defer_history; drop it")
+        XCTAssertEqual(
+            OpenChatHistoryPolicy.openChatResumeMessages(dump, historyDeferred: false).count, 20)
+    }
+
+    @MainActor
+    func testEnterCanonicalChatDoesNotAwaitInflightAttach() async {
+        let model = AppModel()
+        model.mode = .live
+        model.isOffline = false
+        defer {
+            CanonicalChatRuntime.shared.opens.removeValue(forKey: "hermes")
+            LiveRuntime.shared.attachTasks.removeValue(forKey: "hermes")
+        }
+
+        var held: CheckedContinuation<Void, Never>?
+        let hung = Task<Void, Never> { @MainActor in
+            await withCheckedContinuation { held = $0 }
+        }
+        // A hung attach (fat resume) must not block the open path.
+        LiveRuntime.shared.attachTasks["hermes"] = Task { @MainActor in
+            await hung.value
+            return "sid"
+        }
+        CanonicalChatRuntime.shared.opens["hermes"] = Task { @MainActor in
+            await hung.value
+        }
+
+        let started = ContinuousClock.now
+        await model.enterCanonicalChat(botID: "hermes")
+        let elapsed = ContinuousClock.now - started
+        XCTAssertLessThan(elapsed, .milliseconds(500),
+                          "default-chat open must not wait on a fat resume attach")
+
+        for _ in 0..<50 where held == nil { await Task.yield() }
+        held?.resume()
+        hung.cancel()
+    }
+
+    @MainActor
+    func testEnterCanonicalChatReturnsBeforeBackgroundAttachFinishes() async {
+        let model = AppModel()
+        model.mode = .live
+        model.isOffline = false
+        model.bots = [Bot(id: "hermes", job: "home", shape: .circle, hue: .blue,
+                          preview: "cached")]
+        defer {
+            CanonicalChatRuntime.shared.opens.removeValue(forKey: "hermes")
+        }
+
+        let started = ContinuousClock.now
+        await model.enterCanonicalChat(botID: "hermes")
+        let elapsed = ContinuousClock.now - started
+        XCTAssertLessThan(elapsed, .milliseconds(500),
+                          "open must return before attachCanonicalSession/resume")
+        // Open schedules background attach and returns; the slot is set
+        // before return even when the attach later fails for no-route.
+        XCTAssertNotNil(CanonicalChatRuntime.shared.opens["hermes"])
+        await CanonicalChatRuntime.shared.opens["hermes"]?.value
+    }
 }
 
 private actor OpenChatPageBarrier {

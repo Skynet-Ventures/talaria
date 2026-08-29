@@ -48,14 +48,13 @@ public extension Notification.Name {
 //      the monitor; open-chat attach awaited the 30s REST latest page after
 //      defer_history was already on the wire.
 //      Device journal (2026-08-29): repeated `Gateway unreachable` /
-//      `100.87.108.5`, last recovered 2026-08-28. Mini `serve.log` never
-//      saw the phone (100.74.26.48) while tailnet pings and MacBook
-//      `/api/status` were fine. Journal `subtext` was `URL.host()` so a
-//      missing :9119 looked like the right host; session-token connect()
-//      went straight to WS and waited 15s for ready with no HTTP. Repair
-//      the stored origin to :9119, probe `/api/status` first (3s), paint
-//      cache/history without awaiting connect, and redial with a 5s ready
-//      bound plus try N instead of one frozen 15s wait.
+//      `100.87.108.5`, last recovered 2026-08-28. Port repair to :9119
+//      worked (Mini saw the phone; Connections shows :9119 · 570ms). Wake
+//      still skipped redial with banner `didBecomeActive already-active`
+//      while HTTP was healthy and the live socket stayed offline. Opening
+//      the Hermes default chat still stalled: Mini `ws write slow >10s`
+//      dumping a 584-msg / ~360k-token resume frame. Already-active must
+//      redial when offline; canonical open must not await that fat frame.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -514,10 +513,25 @@ extension AppModel {
     /// Scene-phase / UIKit wake hook. After the process was parked, always
     /// hard-redial. Never probe the old socket, and never wait on HTTP
     /// diagnostics or roster refresh before the replacement link is adopted.
+    ///
+    /// Device (5497344): banner `didBecomeActive already-active` while the
+    /// Connections HTTP probe was healthy (`:9119`, 570ms) and the live
+    /// socket stayed offline. "Already-active" must not skip redial when
+    /// unreachable — HTTP health is not a live WebSocket.
     public func applicationDidBecomeActive() {
         startLinkSupervision()
         let supervisor = ConnectionSupervisor.shared
-        guard supervisor.foregroundValidationTask == nil else { return }
+        // A prior already-active refresh must not hold a lease that blocks
+        // redial when we are offline or were backgrounded.
+        if supervisor.foregroundValidationTask != nil {
+            if supervisor.suspendedForBackground || isOffline {
+                supervisor.foregroundValidationTask?.cancel()
+                supervisor.foregroundValidationTask = nil
+                supervisor.foregroundValidationToken = nil
+            } else {
+                return
+            }
+        }
         let token = UUID()
         supervisor.foregroundValidationToken = token
         supervisor.foregroundValidationTask = Task { @MainActor [weak self] in
@@ -539,22 +553,24 @@ extension AppModel {
             if wasBackgrounded {
                 // Resign already dropped the socket. Hard-redial; do not
                 // write onto whatever transport is still installed.
-                supervisor.noteReconnect("redial.scheduled")
+                supervisor.noteReconnect("redial.scheduled", "after-background")
+                reconnectNow()
+                return
+            }
+
+            // Already-active + offline/unreachable: always redial. Clearing
+            // isOffline here (pre-5497344) left the banner dark while HTTP
+            // still painted LIVE · 570ms on Connections.
+            if isOffline {
+                supervisor.noteReconnect("redial.scheduled", "already-active-offline")
                 reconnectNow()
                 return
             }
 
             guard let client, await client.isConnected else {
+                supervisor.noteReconnect("redial.scheduled", "already-active-not-ready")
                 reconnectNow()
                 return
-            }
-            if isOffline {
-                isOffline = false
-                if let base = LiveRuntime.shared.baseURL {
-                    ConnectionRegistry.shared.noteState(.connected, forURL: base)
-                    connections = ConnectionRegistry.shared.rows
-                }
-                await flushComposeQueue()
             }
             foregroundReseed()
             await refreshConnectionHealth()

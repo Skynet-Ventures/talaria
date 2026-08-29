@@ -485,6 +485,71 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
+    func testAlreadyActiveWhileOfflineAlwaysRedials() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        // Device 5497344: HTTP healthy, transport offline, wake said
+        // already-active and skipped hard-redial.
+        fixture.model.isOffline = true
+        supervisor.suspendedForBackground = false
+        await fixture.client.setForegroundReadinessForTesting(true)
+        await fixture.client.setRPCExecutorForTesting { method, _, _ in
+            XCTAssertNotEqual(method, "gateway.ping",
+                              "already-active offline must redial, not ping")
+            return .object(["ok": .bool(true)])
+        }
+
+        var dialCount = 0
+        supervisor.dial = { _ in
+            dialCount += 1
+            throw URLError(.cannotConnectToHost)
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { dialCount > 0 }
+        await LiveRuntime.shared.reconnectTask?.value
+
+        XCTAssertGreaterThanOrEqual(dialCount, 1)
+        XCTAssertTrue(fixture.model.reconnectTraceForTesting.contains("didBecomeActive"))
+        XCTAssertTrue(
+            fixture.model.reconnectTraceForTesting.contains("redial.scheduled"),
+            fixture.model.reconnectTraceForTesting.joined(separator: ","))
+        XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
+    func testAlreadyActiveOfflineSupersedesStaleForegroundLease() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        fixture.model.isOffline = true
+        supervisor.suspendedForBackground = false
+        var hung: CheckedContinuation<Void, Never>?
+        supervisor.foregroundValidationTask = Task { @MainActor in
+            await withCheckedContinuation { hung = $0 }
+        }
+        supervisor.foregroundValidationToken = UUID()
+
+        var dialCount = 0
+        supervisor.dial = { _ in
+            dialCount += 1
+            throw URLError(.cannotConnectToHost)
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { dialCount > 0 }
+        hung?.resume()
+        await LiveRuntime.shared.reconnectTask?.value
+
+        XCTAssertGreaterThanOrEqual(dialCount, 1)
+        XCTAssertTrue(
+            fixture.model.lastReconnectStep.contains("already-active")
+                || fixture.model.reconnectTraceForTesting.contains("redial.scheduled"),
+            fixture.model.lastReconnectStep)
+    }
+
+    @MainActor
     func testWakeSupersedesHungDialAndKeepsTranscript() async throws {
         let fixture = try fixture()
         defer { cleanup(fixture) }

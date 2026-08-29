@@ -27,6 +27,15 @@ public enum OpenChatHistoryPolicy {
         return .object(params)
     }
 
+    /// `defer_history` asks the gateway for identity + inflight only. Mini
+    /// still dumped a 584-message / ~360k-token forever-chat onto the WS
+    /// (`ws write slow >10s`). That payload is not first paint — drop it and
+    /// use the REST latest page.
+    public static func openChatResumeMessages(_ messages: [JSONValue],
+                                              historyDeferred: Bool) -> [JSONValue] {
+        historyDeferred ? [] : messages
+    }
+
     public static func latestMessagesQuery(profile: String?,
                                            limit: Int = firstPageLimit,
                                            offset: Int = 0) -> [URLQueryItem] {

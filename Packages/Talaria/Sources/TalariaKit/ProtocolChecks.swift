@@ -49,6 +49,13 @@ public enum ProtocolChecks {
         let full = GatewayClient.resumeSessionParams("stored-1", deferHistory: false)
         try expect(full["defer_history"] == nil,
                    "mutation-proof resume omits defer_history")
+        let dumped = (1...8).map { JSONValue.object(["row_id": .number(Double($0))]) }
+        try expect(OpenChatHistoryPolicy.openChatResumeMessages(
+            dumped, historyDeferred: true).isEmpty,
+                   "a deferred resume must not keep a forever-chat WS dump")
+        try expect(OpenChatHistoryPolicy.openChatResumeMessages(
+            dumped, historyDeferred: false).count == 8,
+                   "a full resume still carries its projection")
         try expect(OpenChatHistoryPolicy.needsLatestPage(
             historyDeferred: true, resumeMessageCount: 6),
                    "a deferred stub still loads the REST latest page")

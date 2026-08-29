@@ -402,15 +402,13 @@ extension AppModel {
               !isOffline || GatewayBotRoute(qualifiedID: botID) != nil else { return }
         let runtime = CanonicalChatRuntime.shared
 
-        let hasLocalHistory = !(chats[botID]?.messages.isEmpty ?? true)
         // Coalesce: a double tap, or a tap racing a deep link, must resolve
-        // once (plugin.js:2742). Local history is already first paint — do
-        // not sit on the inflight attach's connect/ready wait.
-        if let inflight = runtime.opens[botID] {
-            if hasLocalHistory { return }
-            await inflight.value
-            return
-        }
+        // once (plugin.js:2742). Never await that resolution — the Hermes
+        // default forever-chat is hundreds of messages; Mini stalled >10s
+        // writing the resume frame (`ws write slow`). First paint is local
+        // rows or the REST latest page, not that WS payload.
+        if runtime.opens[botID] != nil { return }
+        kickOpenChatLatestPageIfPossible(botID: botID)
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -452,8 +450,8 @@ extension AppModel {
                 _ = try await self.attachCanonicalSession(
                     botID: botID, route: route, client: client,
                     hydrate: true, honorsExplicitBinding: false)
-                // Context meter is ancillary. Do not hold first paint or a
-                // coalesced second tap behind session.context_breakdown.
+                // Context meter is ancillary. Never hold first paint behind
+                // session.context_breakdown of a 360k-token default chat.
                 Task { @MainActor [weak self] in
                     await self?.refreshContext(botID: botID)
                 }
@@ -464,20 +462,10 @@ extension AppModel {
             }
         }
         runtime.opens[botID] = task
-        if hasLocalHistory {
-            // Bind in the background. The transcript is already on screen.
-            Task { @MainActor in
-                await task.value
-                if runtime.opens[botID] == task { runtime.opens[botID] = nil }
-            }
-            return
+        Task { @MainActor in
+            await task.value
+            if runtime.opens[botID] == task { runtime.opens[botID] = nil }
         }
-        // Released in a defer, and only if the slot is still ours: a tap that
-        // arrived between this task finishing and the slot being cleared would
-        // otherwise await an already-finished resolution and return having
-        // done nothing, leaving that tap on whatever chat was bound.
-        defer { if runtime.opens[botID] == task { runtime.opens[botID] = nil } }
-        await task.value
     }
 
     func ambiguousCanonicalKickoffOwning(botID: String,
@@ -917,6 +905,14 @@ extension AppModel {
                         storedID: restTarget ?? target, profile: route.profile)
                 }
                 : nil
+            // REST latest page is first paint. Do not wait for session.resume
+            // of the 584-msg default chat (Mini `ws write slow >10s`).
+            if hydrate, let restTarget {
+                Task { @MainActor [weak self] in
+                    let page = try? await pageTask?.value
+                    self?.paintOpenChatLatestPage(page, botID: botID)
+                }
+            }
             let live = try await client.resumeSession(
                 target, profile: route.profile,
                 deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
@@ -934,14 +930,10 @@ extension AppModel {
             let stored = durableID ?? (live.storedSessionID.isEmpty ? target : live.storedSessionID)
             adopt(live, storedID: stored, botID: botID,
                   sourceGatewayID: route.gatewayID)
-            // Seed the resume snapshot before REST yields. Any message.delta
-            // that lands during fallback then extends this exact live row and
-            // hydration's merge preserves the newer value.
+            // Identity + inflight only. A gateway that ignored defer_history
+            // must not replace the REST/local window with the full dump.
             replayInflight(live, botID: botID, replacingTranscript: rebinding)
             if hydrate {
-                // REST latest page is 30s. First paint is the bind + stub/cache,
-                // not this read. Awaiting it is the 20s empty-chat wait after
-                // defer_history is already on the wire.
                 Task { @MainActor [weak self] in
                     try? await self?.hydrateOpenChat(
                         live, botID: botID, profile: route.profile,
@@ -1180,6 +1172,59 @@ extension AppModel {
 
     // MARK: Hydration
 
+    /// Last-known durable key so open-chat can fetch the REST latest page
+    /// before `session.resume` returns — or without waiting for it at all.
+    func cachedOpenChatStoredID(botID: String) -> String? {
+        if let stored = chats[botID]?.storedSessionID, !stored.isEmpty { return stored }
+        if let identity = LiveRuntime.shared.canonicalSessionByBot[botID] {
+            let id = identity.resolvedID ?? identity.id
+            if !id.isEmpty { return id }
+        }
+        if let last = LiveRuntime.shared.lastSessionByBot[botID], !last.isEmpty {
+            return last
+        }
+        let profile = GatewayBotRoute(qualifiedID: botID)?.profile ?? botID
+        if let gatewayID = LiveRuntime.shared.gatewayID,
+           let row = ConnectionRegistry.shared.secondaryRosters[gatewayID]?.profiles
+            .first(where: { $0.name == profile }) {
+            let id = row.canonicalResolvedID ?? row.canonicalSessionID
+            if let id, !id.isEmpty { return id }
+        }
+        return nil
+    }
+
+    func kickOpenChatLatestPageIfPossible(botID: String) {
+        guard let stored = cachedOpenChatStoredID(botID: botID) else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let route = self.gatewayRoute(for: botID) ?? self.stateRoute(for: botID)
+            else { return }
+            let client: GatewayClient
+            do {
+                client = try await self.routedClient(for: route)
+            } catch {
+                return
+            }
+            let page = try? await client.latestSessionMessages(
+                storedID: stored, profile: route.profile)
+            self.paintOpenChatLatestPage(page, botID: botID)
+        }
+    }
+
+    func paintOpenChatLatestPage(_ payload: JSONValue?, botID: String) {
+        guard let payload else { return }
+        let chat = chat(for: botID)
+        let page = Self.chatMessages(fromTranscript: payload)
+        guard !page.isEmpty else { return }
+        Self.applyHydratedHistory(
+            page, to: chat, baseline: chat.messages, clearWhenEmpty: false)
+        chat.transcriptHasOlder = OpenChatHistoryPolicy.hasOlderMessages(
+            pageCount: page.count, limit: OpenChatHistoryPolicy.firstPageLimit,
+            source: .latestPage)
+        chat.transcriptOlderOffset = page.count
+        chat.isLoadingOlderTranscript = false
+    }
+
     /// Durable key we can address REST with before `session.resume` returns.
     /// A title-only target has to wait for the ack; using "Bot Chat" as a
     /// path segment would 404.
@@ -1219,7 +1264,9 @@ extension AppModel {
             do {
                 try await Self.hydrateOpenChatTranscript(
                     chat: chat,
-                    resumeMessages: live.messages,
+                    resumeMessages: OpenChatHistoryPolicy.openChatResumeMessages(
+                        live.messages,
+                        historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory),
                     historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory,
                     clearWhenEmpty: clearWhenEmpty,
                     latestPage: {
