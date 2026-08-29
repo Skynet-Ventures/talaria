@@ -70,6 +70,29 @@ public enum OpenChatHistoryPolicy {
         source == .latestPage && pageCount >= limit
     }
 
+    /// Durable key we can address REST with before `session.resume` returns.
+    /// A title-only target has to wait for the ack; using "Bot Chat" as a
+    /// path segment would 404.
+    public static func attachRestTarget(_ target: String, durableID: String?,
+                                        canonicalTitle: String) -> String? {
+        if let durableID {
+            let trimmed = durableID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == canonicalTitle { return nil }
+        return trimmed
+    }
+
+    /// Root id, resume tip, and the bound stored key are the same conversation.
+    public static func sameBinding(_ stored: String?, target: String,
+                                   durableID: String?) -> Bool {
+        guard let stored, !stored.isEmpty else { return false }
+        if stored == target { return true }
+        if let durableID, stored == durableID { return true }
+        return false
+    }
+
     /// Older pages arrive oldest-first after `chatMessages` normalization.
     /// Drop rows the visible transcript already owns by durable id.
     public static func prepend(existing: [ChatMessage],

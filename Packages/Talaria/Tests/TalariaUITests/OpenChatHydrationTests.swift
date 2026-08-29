@@ -146,22 +146,6 @@ final class OpenChatHydrationTests: XCTestCase {
         XCTAssertTrue(chat.messages.contains(where: { $0.text == "already on screen" }))
     }
 
-    func testSameBindingTreatsRootAndResumeTipAsOneConversation() {
-        XCTAssertTrue(AppModel.sameOpenChatBinding(
-            "root", target: "tip", durableID: "root"))
-        XCTAssertTrue(AppModel.sameOpenChatBinding(
-            "tip", target: "tip", durableID: "root"))
-        XCTAssertFalse(AppModel.sameOpenChatBinding(
-            "other", target: "tip", durableID: "root"))
-        XCTAssertFalse(AppModel.sameOpenChatBinding(
-            nil, target: "tip", durableID: "root"))
-    }
-
-    func testTitleOnlyResumeDoesNotPrefetchREST() {
-        XCTAssertNil(AppModel.attachRestTarget("Bot Chat", durableID: nil))
-        XCTAssertEqual(AppModel.attachRestTarget("Bot Chat", durableID: "root"), "root")
-        XCTAssertEqual(AppModel.attachRestTarget("stored-1", durableID: nil), "stored-1")
-    }
 }
 
 private actor OpenChatPageBarrier {

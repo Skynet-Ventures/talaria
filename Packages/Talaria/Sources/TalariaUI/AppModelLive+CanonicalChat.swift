@@ -885,7 +885,7 @@ extension AppModel {
                         gatewayGeneration: Int,
                         durableID: String? = nil) async -> CanonicalAttach {
         let chat = chat(for: botID)
-        let rebinding = !Self.sameOpenChatBinding(
+        let rebinding = !OpenChatHistoryPolicy.sameBinding(
             chat.storedSessionID, target: target, durableID: durableID)
         do {
             try Task.checkCancellation()
@@ -894,7 +894,8 @@ extension AppModel {
             // history window; a flaky REST read keeps the stub/cache instead
             // of failing the open. Mutation-proof paths still request a
             // full projection.
-            let restTarget = Self.attachRestTarget(target, durableID: durableID)
+            let restTarget = OpenChatHistoryPolicy.attachRestTarget(
+                target, durableID: durableID, canonicalTitle: Self.canonicalChatTitle)
             let pageTask: Task<JSONValue?, Error>? = hydrate && restTarget != nil
                 ? Task {
                     try await client.latestSessionMessages(
@@ -1157,28 +1158,6 @@ extension AppModel {
     }
 
     // MARK: Hydration
-
-    /// Durable key we can address REST with before `session.resume` returns.
-    /// A title-only target has to wait for the ack; using "Bot Chat" as a
-    /// path segment would 404.
-    static func attachRestTarget(_ target: String, durableID: String?) -> String? {
-        if let durableID {
-            let trimmed = durableID.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == canonicalChatTitle { return nil }
-        return trimmed
-    }
-
-    /// Root id, resume tip, and the bound stored key are the same conversation.
-    static func sameOpenChatBinding(_ stored: String?, target: String,
-                                    durableID: String?) -> Bool {
-        guard let stored, !stored.isEmpty else { return false }
-        if stored == target { return true }
-        if let durableID, stored == durableID { return true }
-        return false
-    }
 
     /// Open-chat hydration: paint the deferred stub immediately, then merge
     /// the newest REST page. A REST failure must not fail the bind.

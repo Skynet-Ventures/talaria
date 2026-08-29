@@ -55,6 +55,26 @@ final class OpenChatHistoryPolicyTests: XCTestCase {
             pageCount: 800, limit: 200, source: .resumeProjection))
     }
 
+    func testSameBindingTreatsRootAndResumeTipAsOneConversation() {
+        XCTAssertTrue(OpenChatHistoryPolicy.sameBinding(
+            "root", target: "tip", durableID: "root"))
+        XCTAssertTrue(OpenChatHistoryPolicy.sameBinding(
+            "tip", target: "tip", durableID: "root"))
+        XCTAssertFalse(OpenChatHistoryPolicy.sameBinding(
+            "other", target: "tip", durableID: "root"))
+        XCTAssertFalse(OpenChatHistoryPolicy.sameBinding(
+            nil, target: "tip", durableID: "root"))
+    }
+
+    func testTitleOnlyResumeDoesNotPrefetchREST() {
+        XCTAssertNil(OpenChatHistoryPolicy.attachRestTarget(
+            "Bot Chat", durableID: nil, canonicalTitle: "Bot Chat"))
+        XCTAssertEqual(OpenChatHistoryPolicy.attachRestTarget(
+            "Bot Chat", durableID: "root", canonicalTitle: "Bot Chat"), "root")
+        XCTAssertEqual(OpenChatHistoryPolicy.attachRestTarget(
+            "stored-1", durableID: nil, canonicalTitle: "Bot Chat"), "stored-1")
+    }
+
     func testPrependDropsDuplicateDurableRows() {
         let visible = [
             ChatMessage(author: .user, text: "later", rowID: 3),
