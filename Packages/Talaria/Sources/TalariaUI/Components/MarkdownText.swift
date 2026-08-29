@@ -51,7 +51,8 @@ struct MarkdownListItem: Identifiable {
 
 enum MarkdownParser {
 
-    static func parse(_ source: String) -> [MarkdownBlock] {
+    static func parse(_ source: String,
+                      isCancelled: () -> Bool = { false }) -> [MarkdownBlock] {
         let lines = source.components(separatedBy: .newlines)
         var blocks: [MarkdownBlock] = []
         var paragraph: [String] = []
@@ -64,6 +65,7 @@ enum MarkdownParser {
         }
 
         while index < lines.count {
+            if isCancelled() { break }
             let raw = lines[index]
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
 
@@ -76,7 +78,7 @@ enum MarkdownParser {
                     .trimmingCharacters(in: .whitespaces)
                 var body: [String] = []
                 index += 1
-                while index < lines.count {
+                while index < lines.count, !isCancelled() {
                     if lines[index].trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
                         index += 1
                         break
@@ -112,7 +114,7 @@ enum MarkdownParser {
             if trimmed.hasPrefix(">") {
                 flushParagraph()
                 var quoted: [String] = []
-                while index < lines.count {
+                while index < lines.count, !isCancelled() {
                     let line = lines[index].trimmingCharacters(in: .whitespaces)
                     guard line.hasPrefix(">") else { break }
                     var stripped = String(line.dropFirst())
@@ -120,11 +122,12 @@ enum MarkdownParser {
                     quoted.append(stripped)
                     index += 1
                 }
-                blocks.append(MarkdownBlock(kind: .quote(parse(quoted.joined(separator: "\n")))))
+                blocks.append(MarkdownBlock(kind: .quote(parse(
+                    quoted.joined(separator: "\n"), isCancelled: isCancelled))))
                 continue
             }
 
-            if let table = parseTable(lines, from: &index) {
+            if let table = parseTable(lines, from: &index, isCancelled: isCancelled) {
                 flushParagraph()
                 blocks.append(table)
                 continue
@@ -134,14 +137,16 @@ enum MarkdownParser {
                 flushParagraph()
                 var items: [MarkdownListItem] = []
                 var ordered = false
-                while index < lines.count, let marker = listMarker(lines[index]) {
+                while index < lines.count, !isCancelled(),
+                      let marker = listMarker(lines[index]) {
                     ordered = ordered || marker.ordinal != nil
                     items.append(MarkdownListItem(indent: marker.indent, ordinal: marker.ordinal,
                                                   checked: marker.checked,
                                                   content: inline(marker.content)))
                     index += 1
                     // Indented continuation lines belong to the item above.
-                    while index < lines.count, listMarker(lines[index]) == nil,
+                    while index < lines.count, !isCancelled(),
+                          listMarker(lines[index]) == nil,
                           lines[index].hasPrefix(" ") || lines[index].hasPrefix("\t"),
                           !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
                         let more = lines[index].trimmingCharacters(in: .whitespaces)
@@ -214,7 +219,8 @@ enum MarkdownParser {
     }
 
     /// GFM pipe table: a header row followed by a `|---|:--:|` separator.
-    private static func parseTable(_ lines: [String], from index: inout Int) -> MarkdownBlock? {
+    private static func parseTable(_ lines: [String], from index: inout Int,
+                                   isCancelled: () -> Bool) -> MarkdownBlock? {
         let header = lines[index].trimmingCharacters(in: .whitespaces)
         guard header.hasPrefix("|"), index + 1 < lines.count else { return nil }
         let divider = lines[index + 1].trimmingCharacters(in: .whitespaces)
@@ -224,7 +230,7 @@ enum MarkdownParser {
         let headerCells = cells(header).map(inline)
         var rows: [[AttributedString]] = []
         index += 2
-        while index < lines.count {
+        while index < lines.count, !isCancelled() {
             let line = lines[index].trimmingCharacters(in: .whitespaces)
             guard line.hasPrefix("|") else { break }
             rows.append(cells(line).map(inline))
@@ -249,6 +255,45 @@ enum MarkdownParser {
         options.interpretedSyntax = .inlineOnlyPreservingWhitespace
         options.failurePolicy = .returnPartiallyParsedIfPossible
         return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+    }
+
+    /// Foreground strings painted by MarkdownText, in exact segment order.
+    /// Markdown delimiters and link destinations are absent because the
+    /// projection uses the same parsed AttributedString characters as the UI.
+    static func searchSegments(_ source: String,
+                               isCancelled: () -> Bool = { false }) -> [String] {
+        searchSegments(in: parse(source, isCancelled: isCancelled))
+    }
+
+    private static func searchSegments(in blocks: [MarkdownBlock]) -> [String] {
+        blocks.flatMap { block in
+            switch block.kind {
+            case .paragraph(let text), .heading(_, let text):
+                return [String(text.characters)]
+            case .list(let items, _):
+                return items.map { String($0.content.characters) }
+            case .code(_, let source):
+                return [source]
+            case .quote(let nested):
+                return searchSegments(in: nested)
+            case .rule:
+                return []
+            case .table(let header, let rows):
+                return header.map { String($0.characters) }
+                    + rows.flatMap { $0.map { String($0.characters) } }
+            }
+        }
+    }
+
+    static func segmentCount(_ block: MarkdownBlock) -> Int {
+        switch block.kind {
+        case .paragraph, .heading, .code: return 1
+        case .list(let items, _): return items.count
+        case .quote(let nested): return nested.reduce(0) { $0 + segmentCount($1) }
+        case .rule: return 0
+        case .table(let header, let rows):
+            return header.count + rows.reduce(0) { $0 + $1.count }
+        }
     }
 }
 
@@ -282,6 +327,22 @@ func chatMarkdown(_ text: String) -> AttributedString {
     MarkdownParser.inline(text)
 }
 
+func transcriptFindHighlighted(_ attributed: AttributedString, query: String,
+                               occurrence: Int, color: Color,
+                               foreground: Color = .black) -> AttributedString {
+    let plain = String(attributed.characters)
+    guard let selected = TranscriptFindPolicy.range(
+        of: query, occurrence: occurrence, in: plain) else { return attributed }
+    let lowerOffset = plain.distance(from: plain.startIndex, to: selected.lowerBound)
+    let upperOffset = plain.distance(from: plain.startIndex, to: selected.upperBound)
+    var output = attributed
+    let lower = output.characters.index(output.characters.startIndex, offsetBy: lowerOffset)
+    let upper = output.characters.index(output.characters.startIndex, offsetBy: upperOffset)
+    output[lower..<upper].backgroundColor = color
+    output[lower..<upper].foregroundColor = foreground
+    return output
+}
+
 // MARK: - Pasteboard
 
 /// Copy helper shared by the code-block button and the message long-press menu.
@@ -306,6 +367,7 @@ public struct MarkdownText: View {
     /// code panels and rules are then derived from the text color, not the
     /// page tokens, so they stay legible on the gradient.
     private let onAccent: Bool
+    private let findHighlight: TranscriptFindSelection?
 
     public init(_ text: String, theme: ThemePack, size: CGFloat, color: Color,
                 lineSpacing: CGFloat = 3, onAccent: Bool = false) {
@@ -315,6 +377,19 @@ public struct MarkdownText: View {
         self.color = color
         self.lineSpacing = lineSpacing
         self.onAccent = onAccent
+        self.findHighlight = nil
+    }
+
+    init(_ text: String, theme: ThemePack, size: CGFloat, color: Color,
+         lineSpacing: CGFloat = 3, onAccent: Bool = false,
+         findHighlight: TranscriptFindSelection?) {
+        self.source = text
+        self.theme = theme
+        self.size = size
+        self.color = color
+        self.lineSpacing = lineSpacing
+        self.onAccent = onAccent
+        self.findHighlight = findHighlight
     }
 
     public var body: some View {
@@ -322,11 +397,12 @@ public struct MarkdownText: View {
         // The overwhelmingly common case is one paragraph — render it as the
         // bare Text it was before block support, so bubbles keep hugging.
         if blocks.count == 1, case .paragraph(let text) = blocks[0].kind {
-            paragraphText(text)
+            paragraphText(text, segment: 0)
         } else {
             VStack(alignment: .leading, spacing: blockSpacing) {
-                ForEach(blocks) { block in
-                    blockView(block)
+                ForEach(Array(blocks.enumerated()), id: \.element.id) { index, block in
+                    blockView(block, segmentStart: findHighlight == nil
+                        ? 0 : segmentStart(for: index, in: blocks))
                 }
             }
         }
@@ -335,35 +411,37 @@ public struct MarkdownText: View {
     // MARK: Blocks
 
     /// AnyView because a blockquote renders blocks recursively.
-    private func blockView(_ block: MarkdownBlock) -> AnyView {
+    private func blockView(_ block: MarkdownBlock, segmentStart: Int) -> AnyView {
         switch block.kind {
         case .paragraph(let text):
-            return AnyView(paragraphText(text))
+            return AnyView(paragraphText(text, segment: segmentStart))
         case .heading(let level, let text):
-            return AnyView(headingText(text, level: level))
+            return AnyView(headingText(text, level: level, segment: segmentStart))
         case .list(let items, let ordered):
-            return AnyView(listView(items, ordered: ordered))
+            return AnyView(listView(items, ordered: ordered, segmentStart: segmentStart))
         case .code(let language, let source):
             return AnyView(CodeBlock(source: source, language: language, theme: theme,
-                                     size: size, color: color, onAccent: onAccent))
+                                     size: size, color: color, onAccent: onAccent,
+                                     findHighlight: findHighlight, segment: segmentStart))
         case .quote(let nested):
-            return AnyView(quoteView(nested))
+            return AnyView(quoteView(nested, segmentStart: segmentStart))
         case .rule:
             return AnyView(ruleView)
         case .table(let header, let rows):
-            return AnyView(tableView(header: header, rows: rows))
+            return AnyView(tableView(header: header, rows: rows,
+                                     segmentStart: segmentStart))
         }
     }
 
-    private func paragraphText(_ text: AttributedString) -> some View {
-        Text(styled(text))
+    private func paragraphText(_ text: AttributedString, segment: Int) -> some View {
+        Text(highlighted(styled(text), segment: segment))
             .font(theme.body(size))
             .lineSpacing(lineSpacing)
             .foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func headingText(_ text: AttributedString, level: Int) -> some View {
+    private func headingText(_ text: AttributedString, level: Int, segment: Int) -> some View {
         let scale: CGFloat = switch level {
         case 1: 6
         case 2: 3.5
@@ -373,16 +451,16 @@ public struct MarkdownText: View {
         return Group {
             switch theme.id {
             case .soft:
-                Text(styled(text))
+                Text(highlighted(styled(text), segment: segment))
                     .font(theme.body(size + scale, weight: .bold))
                     .tracking(-0.2)
             case .control:
-                Text(styled(text))
+                Text(highlighted(styled(text), segment: segment))
                     .font(theme.mono(size + scale - 1.5, weight: .bold))
                     .tracking(level <= 2 ? 1.2 : 0.6)
                     .textCase(level <= 2 ? .uppercase : nil)
             case .ink:
-                Text(styled(text))
+                Text(highlighted(styled(text), segment: segment))
                     .font(theme.display(size + scale + 1).smallCaps())
                     .tracking(0.6)
             }
@@ -392,16 +470,17 @@ public struct MarkdownText: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func listView(_ items: [MarkdownListItem], ordered: Bool) -> some View {
+    private func listView(_ items: [MarkdownListItem], ordered: Bool,
+                          segmentStart: Int) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(items) { item in
+            ForEach(Array(items.enumerated()), id: \.element.id) { offset, item in
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text(marker(for: item, ordered: ordered))
                         .font(markerFont)
                         .foregroundStyle(markerColor)
                         .frame(minWidth: ordered ? 16 : 9, alignment: .leading)
                         .monospacedDigit()
-                    Text(styled(item.content))
+                    Text(highlighted(styled(item.content), segment: segmentStart + offset))
                         .font(theme.body(size))
                         .lineSpacing(lineSpacing)
                         .foregroundStyle(color)
@@ -423,14 +502,15 @@ public struct MarkdownText: View {
         }
     }
 
-    private func quoteView(_ nested: [MarkdownBlock]) -> some View {
+    private func quoteView(_ nested: [MarkdownBlock], segmentStart: Int) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Rectangle()
                 .fill(onAccent ? color.opacity(0.35) : theme.lineStrong)
                 .frame(width: 2)
             VStack(alignment: .leading, spacing: blockSpacing) {
-                ForEach(nested) { block in
-                    blockView(block)
+                ForEach(Array(nested.enumerated()), id: \.element.id) { index, block in
+                    blockView(block, segmentStart: findHighlight == nil ? 0
+                        : segmentStart + self.segmentStart(for: index, in: nested))
                 }
             }
             .opacity(0.86)
@@ -456,22 +536,25 @@ public struct MarkdownText: View {
         .padding(.vertical, 2)
     }
 
-    private func tableView(header: [AttributedString], rows: [[AttributedString]]) -> some View {
+    private func tableView(header: [AttributedString], rows: [[AttributedString]],
+                           segmentStart: Int) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 5) {
                 GridRow {
-                    ForEach(Array(header.enumerated()), id: \.offset) { _, cell in
-                        Text(styled(cell))
+                    ForEach(Array(header.enumerated()), id: \.offset) { offset, cell in
+                        Text(highlighted(styled(cell), segment: segmentStart + offset))
                             .font(theme.body(size - 0.5, weight: .bold))
                             .foregroundStyle(color)
                     }
                 }
                 Rectangle().fill(ruleColor).frame(height: 1)
                     .gridCellColumns(max(header.count, 1))
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                ForEach(Array(rows.enumerated()), id: \.offset) { rowOffset, row in
                     GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            Text(styled(cell))
+                        ForEach(Array(row.enumerated()), id: \.offset) { cellOffset, cell in
+                            let priorCells = rows.prefix(rowOffset).reduce(0) { $0 + $1.count }
+                            Text(highlighted(styled(cell), segment: segmentStart
+                                + header.count + priorCells + cellOffset))
                                 .font(theme.body(size - 0.5))
                                 .foregroundStyle(color.opacity(0.88))
                         }
@@ -508,6 +591,19 @@ public struct MarkdownText: View {
             }
         }
         return out
+    }
+
+    private func highlighted(_ attributed: AttributedString, segment: Int) -> AttributedString {
+        guard let findHighlight,
+              findHighlight.address.segment == segment else { return attributed }
+        return transcriptFindHighlighted(
+            attributed, query: findHighlight.query,
+            occurrence: findHighlight.occurrenceInSegment,
+            color: theme.warn, foreground: theme.bg)
+    }
+
+    private func segmentStart(for index: Int, in blocks: [MarkdownBlock]) -> Int {
+        blocks.prefix(index).reduce(0) { $0 + MarkdownParser.segmentCount($1) }
     }
 
     // MARK: Tokens
@@ -548,6 +644,8 @@ private struct CodeBlock: View {
     var size: CGFloat
     var color: Color
     var onAccent: Bool
+    var findHighlight: TranscriptFindSelection?
+    var segment: Int
 
     @State private var copied = false
 
@@ -565,7 +663,7 @@ private struct CodeBlock: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(source)
+                Text(codeText)
                     .font(theme.mono(size - 1.5))
                     .lineSpacing(2.5)
                     .foregroundStyle(color.opacity(0.92))
@@ -577,6 +675,16 @@ private struct CodeBlock: View {
         }
         .background(fill, in: RoundedRectangle(cornerRadius: radius))
         .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(border, lineWidth: 1))
+    }
+
+    private var codeText: AttributedString {
+        let plain = AttributedString(source)
+        guard let findHighlight,
+              findHighlight.address.segment == segment else { return plain }
+        return transcriptFindHighlighted(
+            plain, query: findHighlight.query,
+            occurrence: findHighlight.occurrenceInSegment,
+            color: theme.warn, foreground: theme.bg)
     }
 
     private var header: some View {
