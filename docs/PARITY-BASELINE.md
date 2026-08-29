@@ -274,9 +274,12 @@ partial until the unchecked certification gates are recorded.
       implemented and focused-test covered; its gateway/device certification is
       still open.
 - [ ] Finish mobile management for providers, models, profiles, tools, skills,
-      MCP, plugins, messaging, learned-memory curation/import/export, auxiliary
-      slots, and subagent depth. Routine per-job reasoning effort is implemented
-      but remains live-certification pending.
+      MCP, plugins, learned-memory curation/import/export, auxiliary slots, and
+      subagent depth. The profile-scoped messaging-platform lifecycle is now
+      implemented with write-only credential handling and exact-source live
+      refresh; webhook/relay deployment and real-gateway certification remain.
+      Routine per-job reasoning effort is implemented but remains
+      live-certification pending.
 - [ ] Finish artifact pagination and deeper Git/System UI. Exact retained-source
       discovery, explicit bounded/stale/failure state, and conditionally locked
       retained-body reads are implemented. Gateways returning `locked_root: nil`
@@ -328,6 +331,11 @@ Multi-connection implementation checkpoints:
       runtime/image/memory controls, and authenticated log reads are implemented
       with captured-target/generation fencing. Live-gateway certification is
       still required before the delivery-ledger management row can close.
+- [x] Source-qualified, profile-scoped messaging-platform catalog, credential
+      save/clear, enable/disable, connection check, and `platforms.changed`
+      refresh. IDs and env keys come only from the bounded gateway snapshot;
+      secrets never enter model/toast/retry state, and restart remains an
+      explicit operator action through the existing fenced maintenance surface.
 
 ## Crash-recovery snapshot disposition
 

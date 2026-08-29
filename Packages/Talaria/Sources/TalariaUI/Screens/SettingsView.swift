@@ -29,7 +29,7 @@ enum SettingsDestination: String, CaseIterable, Hashable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .connections: "Gateways, APNs and notification routing"
+        case .connections: "Gateways, messaging platforms, APNs and notification routing"
         case .appearance: "Theme, text, motion and transcript detail"
         case .intelligence: "Inference providers, OAuth, voice and memory"
         case .agents: "Rename, delete and manage Hermes profiles"
@@ -55,7 +55,7 @@ enum SettingsDestination: String, CaseIterable, Hashable, Identifiable {
 
     var keywords: String {
         switch self {
-        case .connections: "gateway cloud tailscale push apns approval mention notification"
+        case .connections: "gateway cloud tailscale messaging channels slack discord telegram push apns approval mention notification"
         case .appearance: "theme color font text size motion reduce tools reasoning transcript avatar"
         case .intelligence: "model provider oauth endpoint api key voice speech memory stt tts"
         case .agents: "bot profile rename delete lifecycle"
@@ -245,6 +245,7 @@ private struct SettingsDetailPage: View {
                 switch destination {
                 case .connections:
                     GatewaySettingsSection(model: model, onAddGateway: onAddGateway)
+                    MessagingPlatformSettingsSection(model: model)
                     NotificationSettingsSection(model: model)
                 case .appearance:
                     AppearanceSettingsSection(model: model)
