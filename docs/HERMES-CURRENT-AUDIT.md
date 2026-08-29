@@ -209,6 +209,52 @@ slice. Persisting attachment bytes needs a separate quota, lifecycle, and
 orphan-cleanup contract; inventing a second draft identity such as member route
 or editable thread label would weaken the one-immutable-room requirement.
 
+## Targeted durable room-member hold audit at `057dcdf23`
+
+Hermes exact `057dcdf236f8a6a26721c10fcc6ccb72726e272a` was audited at
+`classifyGroupHoldDirective`, `applyGroupHoldDirective`,
+`heldMemberWatermarkAdvance`, `sendToGroupChat`, `runGroupChatRounds`, and
+`group-member-hold.test.mjs`. Desktop's stop/pause directive is first a sticky
+room-local scheduling hold keyed by its exact source-qualified member key. A
+held member receives no new turn; its exact thread/member watermark advances
+to the current log length once, and one held activity row prevents spin and
+replay. The state survives hydration and room rename and disappears with the
+room. Desktop does not hard-interrupt an already running member from this
+path.
+
+Talaria preserves that portable scheduling truth with one bounded local hold
+per immutable `RoomID` plus exact `GatewayBotRoute`. The durable row also binds
+its creation drive epoch and, only when one authoritative unfinished submitted
+attempt exists, the exact attempt, thread, stored session, and observed runtime
+session. It is not shared in the room projection. Room rename preserves it;
+profile rename migrates the exact route under the existing lifecycle fence;
+route collision fails closed by purging actionable holds; member removal,
+route retirement, disband/tombstone, and privacy erase purge it; same-name or
+same-profile recreation inherits nothing.
+
+The mobile Hold control persists scheduling authority before any network side
+effect, releases the room mutation gate so peers continue, and reacquires it
+only to settle the same still-continuous hold/attempt. A resumed, removed, or
+recreated hold wins over any late interrupt result. If an exact submitted
+attempt exists, Talaria captures the source pool
+generation, holds both pool and profile-traffic leases, resumes the exact
+stored session on the exact profile, proves the attempt anchor/body in that
+session, revalidates room/epoch/member/attempt/profile/pool authority, and only
+then interrupts the refreshed runtime session id. Definite, stale, or ambiguous
+stop outcomes never remove the hold or claim that work stopped. Resume is an
+accessible explicit action naming the exact hold id and member route; reconnect
+and runtime-session rebinding never resume implicitly. This is deliberately
+stricter than Desktop because mobile offers a separately disclosed stop-current
+turn action rather than describing a local scheduling hold as proven remote
+cancellation.
+
+An interrupt task is process-local. On protected-store hydration, every valid
+hold left in `pending` by a crash is atomically normalized to `ambiguous` with
+its exact room/member/attempt/session identity intact. Talaria never retries
+that interrupt and never clears the scheduling hold; held-member arbitration
+continues until the user explicitly resumes. Already terminal interrupt states
+are preserved byte-for-byte.
+
 ## Current-source corrections
 
 | Contract | Talaria disposition | Automated evidence | Remaining certification |
@@ -222,6 +268,7 @@ or editable thread label would weaken the one-immutable-room requirement.
 | Room pending deadline/recovery | Implemented. A blocked non-running session cannot become a pass. Busy or awaiting-user state extends the sliding 180-second deadline up to the 20-minute hard cap; the cap clears transient prompt UI while leaving durable timed-out work for later harvest/re-mirroring. | `RoomRoutingTests` | Background/relaunch near both deadlines; rename, member removal, and disband while a prompt is open |
 | Immutable room member-session identity | Implemented with the durable Talaria `RoomID`, independent of the editable room name. Rename preserves identity; delete and same-name recreation mint a different identity and cannot resume the deleted room's title-based sessions. Existing durable session IDs remain first authority and legacy name-titled rooms retain an explicit migration fallback. | `RoomRoutingTests` | Rename and same-name recreation against real primary and foreign profiles |
 | Durable room composer draft | Implemented against exact Desktop `057dcdf23` identity/failure semantics as one bounded, protected, local-only main-composer text row per immutable Talaria `RoomID`. Rename survives; disband, remote tombstone, and privacy erase purge; same-name recreation cannot inherit; successful exact-snapshot send clears while failure/uncertainty preserves. Drafts never enter shared profile metadata. | `RoomComposerDraftTests`, `RoomComposerDraftRuntimeTests`, focused `RoomStoreTests`, and `RoomRoutingTests.testOfflineCreateAndDisbandKeepSourceQualifiedMetadataOutbox` | Real device: type/background/terminate/relaunch restore, rapid room switching, rename, failed and successful sends, remote tombstone, disband/same-name recreation, and Delete Local Data |
+| Durable exact-member room hold | Implemented against exact Desktop `057dcdf23` scheduling semantics as local-only `RoomID` + source-qualified member authority. Held members deterministically consume their current delta once while peers continue. Explicit mobile Resume removes only the exact hold. Optional current-turn interruption additionally requires exact attempt/thread/epoch/stored-session proof, a refreshed anchored runtime session, pool generation, and profile lifecycle leases; every failure keeps the hold. | `RoomMemberHoldTests`, `RoomMemberHoldRuntimeTests`, focused `RoomEngineTests` and `RoomStoreTests` | Real device with two members: hold during an active turn, ambiguous disconnect, reconnect/runtime rebind, peer progress, relaunch, profile rename, member removal/re-add, disband/same-name recreation, and privacy erase |
 | Shared gateway room projection and profile-metadata CAS | Implemented. Talaria combines its bounded, separately persisted ledger with safe rich-room hydration, reachable-credentialed-gateway fan-out, per-gateway serialization/retry, exact CAS read-back, bounded legacy fallback, and adoption/reconnect/foreground reseeding. Foreign client-local routes hydrate as frozen view-only seats until exact local authority exists. Privacy deletion fences suspended sync, and startup applies cached tombstones before network recovery. | Focused `RoomStoreTests`, `RoomEngineTests`, `RoomProjectionRuntimeTests`, `ProfileUIMetaCASTests`, and cached-tombstone/settings `RoomRoutingTests` regressions cover storage and scheduler policy. Production target discovery and lifecycle-hook wiring are source-reviewed but remain part of live certification; upstream group-room and profile-CAS suites remain the pinned authority. | Run and retain all six live Desktop/phone/gateway cases in `TESTING.md` |
 | Source-qualified slash commands | Implemented. Catalog/completion/resolve caches are per physical gateway; `slash.exec` captures the client and session that own the selected bot and connection generation. Typed output/send/skill/prefill/alias results are decoded without an unsafe unconditional `command.dispatch` fallback. Follow-up send failure retains a recoverable draft without replaying the first RPC. | `SourceQualifiedRoutingTests` | Two live gateways with the same runtime session id; supported structured results; plugin/quick-command collision remains rejected |
 | Source-qualified MCP setup prompts | Implemented with `(gateway, request_id)` identity, secondary event routing, exact-source expiration and response. | `SourceQualifiedRoutingTests` | Same request id on two live gateways and one expired response |

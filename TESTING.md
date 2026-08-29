@@ -328,11 +328,23 @@ Retain a two-Desktop/one-phone report covering:
    old text; an authoritative remote tombstone and Settings → Delete Local
    Data must also purge it. Confirm no draft text appears in either gateway's
    shared `hermes-bots-groups` profile metadata.
+8. In a two-member room, start an exact member turn, open Member controls,
+   choose Hold, and confirm. The selected member must remain held while the
+   peer keeps receiving rounds; relaunch and reconnect must retain the hold.
+   Force a disconnect after interrupt dispatch and verify the UI reports an
+   uncertain stop without resuming or retrying it. Reconnect with a rebound
+   runtime session and verify it remains held. Also terminate the app while
+   the row says the stop is pending; relaunch must show an uncertain result,
+   issue no automatic interrupt retry, and keep skipping that member. Explicit
+   Resume must release only that exact member. Repeat across room rename and
+   exact profile rename, then prove member removal/re-add, disband/same-name
+   recreation, remote
+   tombstone, and Delete Local Data inherit no actionable hold.
 
 The projection limit is 48,000 bytes with at most 16 recent messages per room,
 1,200 text characters per projected message, and a 24,000-character image.
 Exceed each bound in the fixture and verify graceful trimming, never implicit
-deletion. Until all six cases are retained, cross-client shared rooms remain
+deletion. Until all eight cases are retained, cross-client shared rooms remain
 uncertified even if standalone room routing passes.
 
 ---
