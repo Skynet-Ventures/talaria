@@ -232,7 +232,8 @@ public final class AppModel {
                 registry.noteState(.offline, forURL: wire)
                 connections = registry.rows
                 let dial = Task { @MainActor [weak self] in
-                    await self?.dialLaunchGateway(
+                    guard let self else { return }
+                    await self.dialLaunchGateway(
                         base: wire, credential: selected.credential,
                         gatewayID: selected.gateway.id)
                 }
