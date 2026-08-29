@@ -274,6 +274,19 @@ final class ArtifactBodyAuthorityTests: XCTestCase {
         body.data
     }
 
+    /// URLSession resumes the async loader from its delegate completion before
+    /// it is required to invoke URLProtocol.stopLoading(). Await that separate
+    /// cancellation callback instead of racing it with an immediate snapshot.
+    private func boundedProtocolStoppedState()
+        async -> (delivered: Int, stopped: Bool) {
+        for _ in 0..<200 {
+            let state = ArtifactBodyBoundedURLProtocol.state()
+            if state.stopped { return state }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return ArtifactBodyBoundedURLProtocol.state()
+    }
+
     private func withFixture(
         path: String = "/srv/hermes-managed/report.txt",
         data: Data = Data("retained body".utf8),
@@ -762,7 +775,7 @@ final class ArtifactBodyAuthorityTests: XCTestCase {
         } catch let error as GatewayError {
             XCTAssertEqual(error.code, 413)
         }
-        let declared = ArtifactBodyBoundedURLProtocol.state()
+        let declared = await boundedProtocolStoppedState()
         XCTAssertTrue(declared.stopped)
         XCTAssertEqual(declared.delivered, 0,
                        "Content-Length must abort before URLProtocol delivers body bytes")
@@ -779,7 +792,7 @@ final class ArtifactBodyAuthorityTests: XCTestCase {
         } catch let error as GatewayError {
             XCTAssertEqual(error.code, 413)
         }
-        let cumulative = ArtifactBodyBoundedURLProtocol.state()
+        let cumulative = await boundedProtocolStoppedState()
         XCTAssertTrue(cumulative.stopped)
         XCTAssertEqual(cumulative.delivered, 2,
                        "the task must cancel on the crossing chunk before the full body arrives")
@@ -812,7 +825,7 @@ final class ArtifactBodyAuthorityTests: XCTestCase {
 
             XCTAssertEqual(unavailable(declaredBody), .unproven,
                            "an oversized proof is not evidence that the artifact body is large")
-            let declared = ArtifactBodyBoundedURLProtocol.state()
+            let declared = await boundedProtocolStoppedState()
             XCTAssertTrue(declared.stopped)
             XCTAssertEqual(declared.delivered, 0,
                            "declared oversize root proof must stop before buffering body bytes")
@@ -828,7 +841,7 @@ final class ArtifactBodyAuthorityTests: XCTestCase {
 
             XCTAssertEqual(unavailable(cumulativeBody), .unproven,
                            "root-proof overflow must remain a capability failure")
-            let cumulative = ArtifactBodyBoundedURLProtocol.state()
+            let cumulative = await boundedProtocolStoppedState()
             XCTAssertTrue(cumulative.stopped)
             XCTAssertEqual(cumulative.delivered, 2,
                            "the crossing root-proof chunk must cancel before full buffering")
