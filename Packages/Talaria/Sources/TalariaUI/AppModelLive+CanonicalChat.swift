@@ -1369,12 +1369,14 @@ extension AppModel {
         accepts: @MainActor () -> Bool
     ) async throws {
         let stub = Self.chatMessages(fromTranscript: .array(resumeMessages))
+        var stubSnapshot: [ChatMessage] = []
         if !stub.isEmpty {
             try Task.checkCancellation()
             guard accepts() else { throw CancellationError() }
             applyHydratedHistory(
                 stub, to: chat, baseline: chat.messages,
                 clearWhenEmpty: false)
+            stubSnapshot = chat.messages
         }
 
         guard OpenChatHistoryPolicy.needsLatestPage(
@@ -1384,14 +1386,13 @@ extension AppModel {
             return
         }
 
-        let baseline = chat.messages
         let payload = try await latestPage()
         try Task.checkCancellation()
         guard accepts() else { throw CancellationError() }
         guard let payload else {
             if stub.isEmpty {
                 applyHydratedHistory(
-                    [], to: chat, baseline: baseline,
+                    [], to: chat, baseline: chat.messages,
                     clearWhenEmpty: clearWhenEmpty)
             }
             return
@@ -1404,9 +1405,20 @@ extension AppModel {
             chat.resetTranscriptWindow()
             return
         }
-        applyHydratedHistory(
-            page, to: chat, baseline: baseline,
-            clearWhenEmpty: clearWhenEmpty)
+        // The stub is already on screen. Only rows that arrived or changed
+        // after that paint are newer than the REST window.
+        let live = OpenChatHistoryPolicy.rowsNewerThanStub(
+            current: chat.messages, stubSnapshot: stubSnapshot)
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+        chat.messages = TranscriptHydrationMerge.merge(
+            history: page, baseline: live, current: live,
+            clearWhenEmpty: clearWhenEmpty, protectedIDs: protectedIDs)
+        if !protectedIDs.isEmpty {
+            let visible = Set(chat.messages.map(\.id))
+            ChatRuntime.shared.retainedFailureRows[chatID] =
+                protectedIDs.intersection(visible)
+        }
         chat.transcriptHasOlder = OpenChatHistoryPolicy.hasOlderMessages(
             pageCount: page.count, limit: firstPageLimit, source: source)
         chat.transcriptOlderOffset = page.count

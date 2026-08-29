@@ -93,6 +93,18 @@ public enum OpenChatHistoryPolicy {
         return false
     }
 
+    /// Rows that appeared or changed after the deferred stub was painted.
+    /// Unchanged stub rows are first-paint placeholders and must not ride
+    /// through as optimistic sends when the REST page arrives.
+    public static func rowsNewerThanStub(current: [ChatMessage],
+                                         stubSnapshot: [ChatMessage]) -> [ChatMessage] {
+        let painted = Dictionary(uniqueKeysWithValues: stubSnapshot.map { ($0.id, $0) })
+        return current.filter { message in
+            guard let original = painted[message.id] else { return true }
+            return original != message
+        }
+    }
+
     /// Older pages arrive oldest-first after `chatMessages` normalization.
     /// Drop rows the visible transcript already owns by durable id.
     public static func prepend(existing: [ChatMessage],
