@@ -7,15 +7,15 @@ are not current until they are regenerated against this baseline.
 ## Exact authority
 
 - Hermes repository: <https://github.com/nousresearch/hermes-agent>
-- Hermes commit: `299c652a66bcc915a2a1e10cd2b648f196ec4bba`
+- Hermes commit: `9d9f44d63826b18503f44c754e48e1f4f83b3a6e`
 - Talaria baseline: `f2f97ee4cc0ba973f162b0a3df3011639f5fd7c2`
-- Audited cutoff: 2026-08-29, exact `299c652a` snapshot
+- Audited cutoff: 2026-08-29, exact `9d9f44d6` snapshot
 - Machine-readable pin and authority-file hashes:
   [`parity/hermes-upstream.json`](../parity/hermes-upstream.json)
 - Audited contract delta and remaining certification:
   [`docs/HERMES-299C652-AUDIT.md`](HERMES-299C652-AUDIT.md)
 
-The current `02c7ae95..299c652a` audit spans 919 upstream commits and a Bot
+The current `02c7ae95..9d9f44d6` audit spans 920 upstream commits and a Bot
 Mode source split from one `plugin.js` into typed modules. Portable deltas are
 bounded: Bot-owned sessions follow current profile configuration, legacy
 session ownership gains an exact-profile backfill endpoint plus read-only

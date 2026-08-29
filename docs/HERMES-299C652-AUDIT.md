@@ -1,17 +1,23 @@
-# Hermes `299c652` architecture audit
+# Hermes `9d9f44d` architecture audit
 
 This is Talaria's exact-source audit of official Hermes main at
-`299c652a66bcc915a2a1e10cd2b648f196ec4bba`, performed 2026-08-29 against
+`9d9f44d63826b18503f44c754e48e1f4f83b3a6e`, performed 2026-08-29 against
 Talaria main `f2f97ee4cc0ba973f162b0a3df3011639f5fd7c2`. It supersedes the moving-head
 cutoff in `HERMES-CURRENT-AUDIT.md`; that document remains the historical
 implementation ledger for earlier ranges.
 
 The prior audited Hermes endpoint was
 `02c7ae956e42891d5e337a921b45de0a6067146d`. It is an ancestor of this pin;
-the exact range contains 919 commits. Bot Mode was split from the former
+the exact range contains 920 commits. Bot Mode was split from the former
 single `plugin.js` into typed modules. The machine-readable authority therefore
 pins the new module boundary rather than pretending the deleted monolith is
 still the source of truth.
+
+The final `299c652a..9d9f44d6` commit edits only `agent/prompt_builder.py` to
+shorten Desktop widget/MCP teaching. It changes none of the ten pinned Bot
+Mode/Desktop authority files and introduces no client wire or portable iOS
+behavior. It is included so this audit and the updated mini gateway share one
+exact upstream head.
 
 ## Portable client changes
 
