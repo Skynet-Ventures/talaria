@@ -351,10 +351,16 @@ public struct SessionListPage: Sendable, Equatable {
     public static let maximumRows = 200
 
     public var sessions: [StoredSession]
+    /// Count before the client-side safety cap. Destructive consumers must
+    /// retain this evidence so an over-cap payload cannot masquerade as a
+    /// complete 200-row page with a lying `total`.
+    public var originalRowCount: Int
     public var total: Int?
     public var hasMore: Bool
 
-    public init(sessions: [StoredSession], total: Int? = nil, hasMore: Bool = false) {
+    public init(sessions: [StoredSession], originalRowCount: Int? = nil,
+                total: Int? = nil, hasMore: Bool = false) {
+        self.originalRowCount = max(sessions.count, originalRowCount ?? sessions.count)
         self.sessions = Array(sessions.prefix(Self.maximumRows))
         self.total = total.map { max(0, $0) }
         self.hasMore = hasMore
@@ -994,7 +1000,8 @@ public actor GatewayClient {
         // continuation from a full page: doing so can make an old peer drive
         // an unbounded fetch loop.
         let hasMore = result["has_more"]?.boolValue ?? false
-        return SessionListPage(sessions: rows, total: total, hasMore: hasMore)
+        return SessionListPage(sessions: rows, originalRowCount: rawRows.count,
+                               total: total, hasMore: hasMore)
     }
 
     /// Compatibility spelling for tests and callers that use the response's
@@ -1091,12 +1098,23 @@ public actor GatewayClient {
     /// chats and room member sessions out of shared recents while remaining
     /// resumable from the per-bot browser. Older gateways reject the RPC;
     /// callers must treat that as unsupported, not as a user-visible failure.
+    /// `profile` is mandatory because durable ids can collide across profile
+    /// databases on one gateway; the mutation must repeat list authority.
     @discardableResult
-    public func setSessionHidden(_ sessionID: String, hidden: Bool) async throws -> Bool {
-        let result = try await rpc("session.set_hidden",
-                                   ["session_id": .string(sessionID),
-                                    "hidden": .bool(hidden)])
+    public func setSessionHidden(
+        _ sessionID: String, hidden: Bool, profile: String
+    ) async throws -> Bool {
+        let result = try await rpc(
+            "session.set_hidden",
+            Self.sessionHiddenParams(sessionID: sessionID, hidden: hidden, profile: profile))
         return result["hidden"]?.boolValue ?? hidden
+    }
+
+    static func sessionHiddenParams(
+        sessionID: String, hidden: Bool, profile: String
+    ) -> JSONValue {
+        ["session_id": .string(sessionID), "hidden": .bool(hidden),
+         "profile": .string(profile)]
     }
 
     public func createSession(profile: String? = nil, title: String? = nil,
