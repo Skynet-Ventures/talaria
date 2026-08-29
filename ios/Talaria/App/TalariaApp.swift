@@ -19,7 +19,6 @@ import UIKit
 struct TalariaApp: App {
 
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @Environment(\.scenePhase) private var scenePhase
 
     /// The single observable state tree for the whole app (demo or live).
     @State private var model: AppModel
@@ -53,12 +52,6 @@ struct TalariaApp: App {
                 .onOpenURL { url in
                     DeepLinkRouter(model: model).open(url)
                 }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            // Refresh saved-gateway health whenever we come to the front so
-            // the network chip and Connections rows are honest.
-            Task { await ConnectionRegistry.shared.probeAll() }
         }
     }
 }

@@ -1,10 +1,5 @@
 import Foundation
 import TalariaKit
-#if canImport(UIKit)
-import UIKit
-#elseif canImport(AppKit)
-import AppKit
-#endif
 
 // Liveness: keeping "what is actually running" honest on a device that stops
 // running.
@@ -163,7 +158,7 @@ final class LivenessRuntime {
     /// produced nothing addressable for that long is wedged, not working.
     static let unverifiableGrace: Duration = .seconds(45)
 
-    /// Lifecycle observer + monitors installed once per process.
+    /// Network/liveness monitors installed once per process.
     var armed = false
     /// Cleared for a gateway that answers -32601. Everything here reads
     /// absence as authority; without the snapshot there is nothing honest to
@@ -178,7 +173,6 @@ final class LivenessRuntime {
 
     var reconcileTask: Task<Void, Never>?
     var reaperTask: Task<Void, Never>?
-    var lifecycleObserver: NSObjectProtocol?
 
     /// bot id → first snapshot that reported its turn finished while we still
     /// showed it working. A second agreeing snapshot settles it.
@@ -253,21 +247,12 @@ extension AppModel {
         guard !liveness.armed else { return }
         liveness.armed = true
 
-        // Own foreground detection rather than depending on a scene-phase hook
-        // in a view: the re-seed has to run when the process wakes, whatever is
-        // on screen, and this way it survives any view being rebuilt.
-        #if canImport(UIKit)
-        let activation = UIApplication.didBecomeActiveNotification
-        #elseif canImport(AppKit)
-        let activation = NSApplication.didBecomeActiveNotification
-        #endif
-        #if canImport(UIKit) || canImport(AppKit)
-        liveness.lifecycleObserver = NotificationCenter.default.addObserver(
-            forName: activation, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.foregroundReseed() }
-        }
-        #endif
+        // Foreground ownership lives in `applicationDidBecomeActive()`. UIKit
+        // and SwiftUI both feed that one coalesced coordinator, which proves
+        // the authenticated socket with `gateway.ping` before it may reseed
+        // liveness or refresh HTTP diagnostics. A second lifecycle observer
+        // here used to bypass that ordering and race reconciliation onto a
+        // half-open socket.
     }
 
     /// Tear every liveness watch down. Called from `disconnectGateway()`: with
@@ -279,10 +264,6 @@ extension AppModel {
         let liveness = LivenessRuntime.shared
         liveness.reaperTask?.cancel(); liveness.reaperTask = nil
         liveness.reconcileTask?.cancel(); liveness.reconcileTask = nil
-        if let observer = liveness.lifecycleObserver {
-            NotificationCenter.default.removeObserver(observer)
-            liveness.lifecycleObserver = nil
-        }
         liveness.armed = false
         NetworkMonitor.shared.stop()
         // Session ids, settle timers and the -32601 verdict all belong to the

@@ -1041,6 +1041,32 @@ final class WorkspaceCommandCenterTests: XCTestCase {
     }
 
     @MainActor
+    func testSwitchingPrimaryClearsOldGatewayLiveTransportProjection() throws {
+        let defaults = UserDefaults(suiteName: "talaria-primary-switch-\(UUID().uuidString)")!
+        let registry = ConnectionRegistry(defaults: defaults)
+        let first = try XCTUnwrap(registry.upsert(
+            urlString: "https://switch-first-\(UUID().uuidString).example",
+            name: "First", credential: nil))
+        let second = try XCTUnwrap(registry.upsert(
+            urlString: "https://switch-second-\(UUID().uuidString).example",
+            name: "Second", credential: nil))
+        let firstURL = try XCTUnwrap(first.baseURL)
+        let secondURL = try XCTUnwrap(second.baseURL)
+
+        registry.noteProbeHealth(.init(state: .asleep), forURL: firstURL)
+        registry.noteState(.connected, forURL: firstURL)
+        XCTAssertEqual(registry.health[first.id]?.state, .connected)
+
+        registry.noteState(.connected, forURL: secondURL)
+
+        XCTAssertEqual(registry.liveGatewayURL, secondURL)
+        XCTAssertNil(registry.health[first.id]?.liveTransportState)
+        XCTAssertEqual(registry.health[first.id]?.state, .asleep,
+                       "the former primary must return to its host-reachability projection")
+        XCTAssertEqual(registry.health[second.id]?.liveTransportState, .connected)
+    }
+
+    @MainActor
     func testRefreshConnectionHealthKeepsHealthySecondaryDiagnosticOnly() async throws {
         let model = AppModel()
         let registry = ConnectionRegistry.shared
@@ -1103,6 +1129,61 @@ final class WorkspaceCommandCenterTests: XCTestCase {
         XCTAssertEqual(registry.health[secondary.id]?.pingMS, 11)
         XCTAssertEqual(registry.health[secondary.id]?.version, "secondary")
         XCTAssertTrue(registry.health[secondary.id]?.authRequired == true)
+    }
+
+    @MainActor
+    func testHealthyStatusProbeCannotRelabelOfflinePrimaryTransportConnected() async throws {
+        let model = AppModel()
+        let registry = ConnectionRegistry.shared
+        let supervisor = ConnectionSupervisor.shared
+        let runtime = LiveRuntime.shared
+        let gateway = try XCTUnwrap(registry.upsert(
+            urlString: "https://split-health-\(UUID().uuidString).example",
+            name: "Split health", credential: nil))
+        let baseURL = try XCTUnwrap(gateway.baseURL)
+        let previousProbe = supervisor.healthProbe
+        let previousDiagnostics = supervisor.diagnostics[gateway.id]
+        let previousMode = model.mode
+        let previousClient = model.client
+        let previousOffline = model.isOffline
+        let previousBaseURL = runtime.baseURL
+        let previousGatewayID = runtime.gatewayID
+
+        defer {
+            supervisor.healthProbe = previousProbe
+            supervisor.diagnostics[gateway.id] = previousDiagnostics
+            model.mode = previousMode
+            model.client = previousClient
+            model.isOffline = previousOffline
+            runtime.baseURL = previousBaseURL
+            runtime.gatewayID = previousGatewayID
+            registry.remove(id: gateway.id)
+            _ = AppModel()
+        }
+
+        model.mode = .live
+        model.client = GatewayClient(baseURL: baseURL,
+                                     credential: .sessionToken("unused"))
+        model.isOffline = true
+        runtime.baseURL = baseURL
+        runtime.gatewayID = gateway.id
+        registry.noteState(.offline, forURL: baseURL)
+        supervisor.healthProbe = { _ in
+            (.connected, GatewayDiagnostics(version: "reachable-host",
+                                             authMode: .oauth,
+                                             pingMS: 7))
+        }
+
+        await model.refreshConnectionHealth()
+
+        let health = try XCTUnwrap(registry.health[gateway.id])
+        XCTAssertEqual(health.hostState, .connected,
+                       "the diagnostics surface must retain HTTP reachability")
+        XCTAssertEqual(health.liveTransportState, .offline,
+                       "the active authenticated transport remains authoritative")
+        XCTAssertEqual(health.state, .offline)
+        XCTAssertEqual(model.connections.first { $0.id == gateway.id }?.state, .offline)
+        XCTAssertTrue(model.isOffline)
     }
 
     @MainActor

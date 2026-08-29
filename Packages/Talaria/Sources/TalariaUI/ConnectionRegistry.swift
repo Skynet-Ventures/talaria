@@ -219,9 +219,23 @@ public final class ConnectionRegistry {
     /// only — never credentials, canonical ids, or transcript text.
     public static let rostersKey = "talaria-gateway-rosters"
 
-    /// Latest health-probe result for one saved gateway.
+    /// Latest connection facts for one saved gateway.
+    ///
+    /// Host reachability and authenticated live-transport readiness are
+    /// deliberately separate. `GET /api/status` can succeed while the primary
+    /// WebSocket is half-open, expired, or reconnecting; folding both answers
+    /// into one stored state made the Connections screen claim "connected"
+    /// while chat correctly remained offline.
     public struct Health: Sendable, Equatable {
-        public var state: ConnectionState
+        /// Result of the bounded HTTP status probe. This is the only dimension
+        /// status polling may mutate.
+        public var hostState: ConnectionState
+        /// Authenticated WebSocket state for the gateway currently owned by
+        /// the live runtime. Nil for saved secondary gateways.
+        public var liveTransportState: ConnectionState?
+        /// UI projection: an active live transport is authoritative for its
+        /// gateway; otherwise the saved gateway falls back to host reachability.
+        public var state: ConnectionState { liveTransportState ?? hostState }
         /// Measured round trip of GET /api/status, when reachable.
         public var pingMS: Int?
         public var version: String?
@@ -229,7 +243,8 @@ public final class ConnectionRegistry {
 
         public init(state: ConnectionState, pingMS: Int? = nil,
                     version: String? = nil, authRequired: Bool = false) {
-            self.state = state; self.pingMS = pingMS
+            self.hostState = state; self.liveTransportState = nil
+            self.pingMS = pingMS
             self.version = version; self.authRequired = authRequired
         }
     }
@@ -377,7 +392,7 @@ public final class ConnectionRegistry {
         // Only the live link reports its own roster size, so this doubles as
         // the "this is the gateway we are bound to" beacon the secondary
         // enumerator needs in order to skip it.
-        liveGatewayURL = url
+        moveLiveGateway(to: url)
         guard let idx = saved.firstIndex(where: { $0.urlString == url.absoluteString }),
               saved[idx].lastBotCount != count else { return }
         saved[idx].lastBotCount = count
@@ -392,13 +407,24 @@ public final class ConnectionRegistry {
         // Deliberately not cleared on .offline — a dropped socket is still the
         // gateway this app is bound to, and dialling it as a "secondary" while
         // reconnect is racing would open a second socket to the same host.
-        if state == .connected { liveGatewayURL = url }
+        if state == .connected { moveLiveGateway(to: url) }
         guard let row = gateway(forURL: url) else { return }
         var h = health[row.id] ?? Health(state: state)
-        h.state = state
+        h.liveTransportState = state
         if let pingMS { h.pingMS = pingMS }
         if state == .offline || state == .asleep { h.pingMS = nil }
         health[row.id] = h
+    }
+
+    private func moveLiveGateway(to url: URL) {
+        if let previous = liveGatewayURL, previous.absoluteString != url.absoluteString,
+           let previousRow = gateway(forURL: previous), var previousHealth = health[previousRow.id] {
+            // The old primary is now a saved secondary. Its next display state
+            // comes from host reachability, never from a stale socket.
+            previousHealth.liveTransportState = nil
+            health[previousRow.id] = previousHealth
+        }
+        liveGatewayURL = url
     }
 
     /// Record a status-probe answer without changing the live-source beacon.
@@ -406,7 +432,14 @@ public final class ConnectionRegistry {
     /// `noteBotCount`; a healthy secondary must remain diagnostic state only.
     internal func noteProbeHealth(_ value: Health, forURL url: URL) {
         guard let row = gateway(forURL: url) else { return }
-        health[row.id] = value
+        var merged = health[row.id] ?? value
+        merged.hostState = value.hostState
+        merged.pingMS = value.pingMS
+        merged.version = value.version
+        merged.authRequired = value.authRequired
+        // Never mutate liveTransportState here. A reachable HTTP endpoint is
+        // not proof that the authenticated event/chat transport is usable.
+        health[row.id] = merged
     }
 
     // MARK: - Health probes
