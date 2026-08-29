@@ -260,7 +260,10 @@ extension AppModel {
         liveness.lifecycleObserver = NotificationCenter.default.addObserver(
             forName: activation, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.foregroundReseed() }
+            // Reseed alone cannot restore a socket that died while parked.
+            // Route the reliable UIKit edge through the same coalesced
+            // validate-then-reconnect path scenePhase uses.
+            Task { @MainActor in self?.applicationDidBecomeActive() }
         }
         #endif
     }
@@ -302,11 +305,18 @@ extension AppModel {
         guard mode == .live, LiveRuntime.shared.baseURL != nil else { return }
         Task { @MainActor in
             // A handoff kills the socket without the transport noticing
-            // immediately, so trust the transport's own state rather than the
-            // offline flag alone: `.ready` means the link genuinely survived.
-            if !self.isOffline, let client = self.client, await client.isConnected {
-                await self.reconcileLiveness(trigger: .networkRestored)
-                return
+            // immediately. `.ready` is not enough — prove the current
+            // transport with the same bounded ping the foreground path uses.
+            if !self.isOffline, let client = self.client {
+                switch await client.validateForegroundLiveness() {
+                case .healthy:
+                    await self.reconcileLiveness(trigger: .networkRestored)
+                    return
+                case .trafficFenced:
+                    return
+                case .reconnectRequired:
+                    break
+                }
             }
             self.reconnectNow()
         }

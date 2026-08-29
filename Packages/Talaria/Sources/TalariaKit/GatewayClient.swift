@@ -600,7 +600,15 @@ public actor GatewayClient {
     private let keychain: KeychainStore
     private var trafficAdmission: TrafficAdmission?
     typealias RESTExecutor = @Sendable (URLRequest, Int?) async throws -> (Data, URLResponse)
+    typealias RPCExecutor = @Sendable (String, JSONValue?, TimeInterval) async throws -> JSONValue
     private let restExecutor: RESTExecutor
+    /// Package-test readiness seam. Production always reads the exact current
+    /// transport state; this only makes half-open/closed wake policy
+    /// deterministic without opening a real WebSocket.
+    private var foregroundReadinessForTesting: Bool?
+    /// Package-test RPC seam used by foreground liveness and other
+    /// transport-free lifecycle tests.
+    private var rpcExecutorForTesting: RPCExecutor?
 
     /// Re-published stream of all events from the current transport.
     public private(set) var eventsTask: Task<Void, Never>?
@@ -675,6 +683,9 @@ public actor GatewayClient {
 
     public var isConnected: Bool {
         get async {
+            if let foregroundReadinessForTesting {
+                return foregroundReadinessForTesting
+            }
             guard let transport else { return false }
             return await transport.state == .ready
         }
@@ -691,6 +702,43 @@ public actor GatewayClient {
     /// Deterministic seam for credential-rotation lifecycle tests.
     func replaceCredentialForTesting(_ replacement: GatewayCredential) {
         credential = replacement
+    }
+
+    func setForegroundReadinessForTesting(_ ready: Bool?) {
+        foregroundReadinessForTesting = ready
+    }
+
+    func setRPCExecutorForTesting(_ executor: RPCExecutor?) {
+        rpcExecutorForTesting = executor
+    }
+
+    /// Validate a socket immediately after iOS foregrounds the app. This is a
+    /// short, bounded application RPC rather than a belief based on
+    /// URLSessionWebSocketTask state: suspended half-open links often still
+    /// report ready until their first write/response boundary.
+    ///
+    /// Current Hermes answers `{ "ok": true }`. A JSON-RPC method-not-found
+    /// reply still proves the link is alive (older gateways). Timeouts,
+    /// malformed replies, and transport errors enter supervised reconnect.
+    /// Local lifecycle traffic rejection is not a link failure.
+    public func validateForegroundLiveness() async -> ForegroundSocketLiveness {
+        let ready: Bool
+        if let foregroundReadinessForTesting {
+            ready = foregroundReadinessForTesting
+        } else if let transport {
+            ready = await transport.state == .ready
+        } else {
+            ready = false
+        }
+        guard ready else { return .reconnectRequired }
+
+        do {
+            let result = try await rpc(
+                "gateway.ping", .object([:]), timeout: ForegroundSocketPolicy.pingTimeout)
+            return ForegroundSocketPolicy.outcome(transportReady: true, result: .success(result))
+        } catch {
+            return ForegroundSocketPolicy.outcome(transportReady: true, result: .failure(error))
+        }
     }
 
     /// Connect (or reconnect). Refreshes OAuth tokens when near expiry and
@@ -717,11 +765,20 @@ public actor GatewayClient {
         }
 
         let url = try auth.webSocketURL(credential: credential, ticket: ticket)
+        // A reconnect must retire the previous receive loop and event stream
+        // before a replacement transport is published. Leaving them running
+        // makes the old pump finish later and look like a fresh drop.
+        if let previous = transport {
+            await previous.close()
+            self.transport = nil
+        }
+        eventsTask?.cancel()
+        eventsTask = nil
+
         let transport = GatewayTransport(url: url)
         self.transport = transport
         try await transport.connect()
 
-        eventsTask?.cancel()
         eventsTask = Task {
             for await event in transport.events {
                 for handler in self.handlerSnapshot() {
@@ -746,8 +803,13 @@ public actor GatewayClient {
                     timeout: TimeInterval = 120) async throws -> JSONValue {
         let lease = try await acquireTrafficLease()
         do {
-            guard let transport else { throw GatewayError(code: -3, message: "not connected") }
-            let result = try await transport.request(method, params: params, timeout: timeout)
+            let result: JSONValue
+            if let rpcExecutorForTesting {
+                result = try await rpcExecutorForTesting(method, params, timeout)
+            } else {
+                guard let transport else { throw GatewayError(code: -3, message: "not connected") }
+                result = try await transport.request(method, params: params, timeout: timeout)
+            }
             await lease?.release()
             return result
         } catch {

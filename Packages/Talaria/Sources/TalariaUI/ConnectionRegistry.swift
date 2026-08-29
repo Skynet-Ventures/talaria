@@ -404,8 +404,26 @@ public final class ConnectionRegistry {
     /// Record a status-probe answer without changing the live-source beacon.
     /// Only the primary WebSocket calls `noteState(.connected)` or
     /// `noteBotCount`; a healthy secondary must remain diagnostic state only.
+    ///
+    /// HTTP `GET /api/status` must not overwrite the live socket's state:
+    /// a reachable host after lock can look connected while the WebSocket is
+    /// half-open, and a brief status blip must not mark a live socket offline.
     internal func noteProbeHealth(_ value: Health, forURL url: URL) {
         guard let row = gateway(forURL: url) else { return }
+        if liveGatewayURL?.absoluteString == url.absoluteString,
+           let current = health[row.id] {
+            let liveOwnsState = current.state == .connected
+                || current.state == .offline
+                || current.state == .asleep
+            if liveOwnsState, value.state != current.state {
+                var merged = current
+                if let pingMS = value.pingMS { merged.pingMS = pingMS }
+                if let version = value.version { merged.version = version }
+                merged.authRequired = value.authRequired
+                health[row.id] = merged
+                return
+            }
+        }
         health[row.id] = value
     }
 
