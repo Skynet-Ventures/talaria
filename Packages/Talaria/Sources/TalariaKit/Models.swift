@@ -687,15 +687,20 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     /// Terminal failure metadata belongs to the assistant turn rather than a
     /// separate system row. Optional preserves decoding of older snapshots.
     public var failure: TurnFailure?
+    /// Whole-turn wall-clock duration measured while this process observed
+    /// the turn live. Hermes history does not carry this field, so hydrated
+    /// historical rows intentionally remain nil.
+    public var turnDurationSeconds: Int?
 
     public init(id: UUID = UUID(), author: MessageAuthor, time: String? = nil,
                 text: String, card: MessageCard? = nil, isStreaming: Bool = false,
                 reasoning: String? = nil, toolCalls: [ToolCall] = [], rowID: Int? = nil,
-                failure: TurnFailure? = nil) {
+                failure: TurnFailure? = nil, turnDurationSeconds: Int? = nil) {
         self.id = id; self.author = author; self.time = time
         self.text = text; self.card = card; self.isStreaming = isStreaming
         self.reasoning = reasoning; self.toolCalls = toolCalls; self.rowID = rowID
         self.failure = failure
+        self.turnDurationSeconds = turnDurationSeconds
     }
 }
 

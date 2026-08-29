@@ -166,6 +166,11 @@ public struct ChatView: View {
         (chat?.isRunning ?? false) || (chat?.isTyping ?? false)
     }
 
+    private var activeTurnStartedAt: Date? {
+        guard turnRunning else { return nil }
+        return chat?.turnStartedAt
+    }
+
     private var hasUnresolvedFailedTurnRetry: Bool {
         model.hasUnresolvedFailedTurnRetry(in: botID)
     }
@@ -953,7 +958,10 @@ public struct ChatView: View {
     }
 
     private var transcriptAnchorID: String {
-        ChatTranscriptLayoutPolicy.anchorID(
+        if activeTurnStartedAt != nil {
+            return TurnElapsedTimingPresentation.liveAnchorID
+        }
+        return ChatTranscriptLayoutPolicy.anchorID(
             lastMessageID: messages.last?.id,
             showingWorkingAvatar: showingWorkingAvatar
         )
@@ -975,6 +983,9 @@ public struct ChatView: View {
                                     label: copy.workingLabel(theme.id))
                 .modifier(ChatEntrance())
                 .id(ChatTranscriptLayoutPolicy.workingAnchorID)
+        }
+        if let activeTurnStartedAt {
+            LiveTurnElapsedTimingView(startedAt: activeTurnStartedAt, theme: theme)
         }
         Color.clear.frame(height: 1).id(ChatTranscriptLayoutPolicy.emptyAnchorID)
             .background(
@@ -1236,6 +1247,11 @@ public struct ChatView: View {
                     )
                     .padding(.top, 8)
                     .padding(.leading, theme.id == .ink ? 12 : 0)
+                }
+                if let duration = message.turnDurationSeconds {
+                    SettledTurnDurationView(seconds: duration, theme: theme)
+                        .padding(.top, 5)
+                        .padding(.leading, theme.id == .ink ? 12 : 0)
                 }
                 if !archived, let emoji = model.reaction(for: message) {
                     reactionBadge(emoji)
