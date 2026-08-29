@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+#if canImport(os)
+import os
+#endif
 import SwiftUI
 import TalariaKit
 import TalariaTheme
@@ -29,13 +32,15 @@ public extension Notification.Name {
 //      #10). A missing credential for the connected base URL is therefore an
 //      exact, side-effect-free signal that reconnect gave up on auth — the
 //      supervisor polls for it and raises ReauthBanner.
-//   2. Foreground recovery. iOS parks the process; writing a ping onto the
-//      parked URLSessionWebSocket wedges `URLSession` and a later dial on
-//      that same session never comes back. Device evidence (PR #108 f3ad5b6):
-//      the ping-then-reconnect path left the link dead and a hung
-//      `isReconnecting` dial made `reconnectNow()` a no-op. The repair drops
-//      the socket on resign (no RPC), hard-redials on the next active edge
-//      with a fresh URLSession, and lets a wake supersede a hung attempt.
+//   2. Foreground recovery. Device evidence, in order:
+//      f3ad5b6 — ping-first on a parked URLSession.shared socket wedged
+//      the session; hung `isReconnecting` made `reconnectNow()` a no-op.
+//      5923674 — hard-redial + ephemeral session still looked dead because
+//      adopt waited on a full `session.resume` of every parked forever-chat
+//      (hydrate: false still downloaded history). Same 20s stall as first
+//      open. This pass binds with `defer_history`, detaches roster/rooms
+//      from the live path, and records a client-side trace so the next
+//      fail names the last step.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -121,6 +126,13 @@ final class ConnectionSupervisor {
     /// True after the process left the foreground. The next active edge
     /// always hard-redials; it must not write to the parked socket.
     @ObservationIgnored var suspendedForBackground = false
+    /// Resign closes the transport off the wake path. The next dial waits
+    /// for this so connect() does not race the teardown.
+    @ObservationIgnored var backgroundInvalidateTask: Task<Void, Never>?
+    /// Client-side breadcrumbs for the next device fail: resign, wake,
+    /// connect, ready, resume, adopt. Shown on the offline banner.
+    var reconnectTrace: [ReconnectTraceEvent] = []
+    var lastReconnectStep = ""
     /// Single-flight foreground wake. UIKit and SwiftUI publish the same
     /// edge a few milliseconds apart.
     @ObservationIgnored var foregroundValidationTask: Task<Void, Never>?
@@ -161,6 +173,9 @@ final class ConnectionSupervisor {
         reconnectTaskToken = nil
         reconnectGeneration = 0
         suspendedForBackground = false
+        backgroundInvalidateTask = nil
+        reconnectTrace = []
+        lastReconnectStep = ""
         foregroundValidationTask?.cancel()
         foregroundValidationTask = nil
         foregroundValidationToken = nil
@@ -176,7 +191,32 @@ final class ConnectionSupervisor {
         entry.checkedAt = Date()
         diagnostics[id] = entry
     }
+
+    func noteReconnect(_ step: String, _ detail: String = "") {
+        let label = detail.isEmpty ? step : "\(step) \(detail)"
+        lastReconnectStep = label
+        reconnectTrace.append(ReconnectTraceEvent(step: step, detail: detail))
+        if reconnectTrace.count > 32 {
+            reconnectTrace.removeFirst(reconnectTrace.count - 32)
+        }
+        #if canImport(os)
+        ReconnectTraceLog.logger.info("\(label, privacy: .public)")
+        #endif
+    }
 }
+
+/// One breadcrumb on the reconnect path. Device verify of 5923674 had no
+/// client-side reason; the next fail must say which step ran last.
+struct ReconnectTraceEvent: Equatable, Sendable {
+    var step: String
+    var detail: String
+}
+
+#if canImport(os)
+private enum ReconnectTraceLog {
+    static let logger = Logger(subsystem: "bot.talaria", category: "reconnect")
+}
+#endif
 
 /// What the Connections health row shows for one saved gateway: the public
 /// `GET /api/status` answer plus the measured round trip and the last failure.
@@ -299,6 +339,15 @@ extension AppModel {
     /// A supervised (manual / foreground) reconnect is dialing right now.
     public var isReconnecting: Bool { ConnectionSupervisor.shared.isReconnecting }
 
+    /// Last reconnect breadcrumb (resign / wake / connect / resume / adopt).
+    /// Rendered on the offline banner so a device fail has a client-side reason.
+    public var lastReconnectStep: String { ConnectionSupervisor.shared.lastReconnectStep }
+
+    /// Package-test projection of the reconnect breadcrumb log.
+    var reconnectTraceForTesting: [String] {
+        ConnectionSupervisor.shared.reconnectTrace.map(\.step)
+    }
+
     /// Exact saved source whose host-agnostic post-boot reconnect episode has
     /// crossed the recovery escalation threshold.
     public var postBootReconnectRecovery: PostBootReconnectRecovery? {
@@ -392,8 +441,10 @@ extension AppModel {
         supervisor.foregroundValidationTask?.cancel()
         supervisor.foregroundValidationTask = nil
         supervisor.foregroundValidationToken = nil
-        Task { @MainActor [weak self] in
+        supervisor.noteReconnect("resign")
+        supervisor.backgroundInvalidateTask = Task { @MainActor [weak self] in
             await self?.invalidateLiveTransportForBackground()
+            ConnectionSupervisor.shared.noteReconnect("transport.dropped")
         }
     }
 
@@ -425,9 +476,12 @@ extension AppModel {
 
             let wasBackgrounded = supervisor.suspendedForBackground
             supervisor.suspendedForBackground = false
+            supervisor.noteReconnect(
+                "didBecomeActive", wasBackgrounded ? "after-background" : "already-active")
 
             guard mode == .live, client != nil,
                   currentReconnectAuthority() != nil else {
+                supervisor.noteReconnect("wake.skipped", "no-authority")
                 await refreshConnectionHealth()
                 return
             }
@@ -435,6 +489,7 @@ extension AppModel {
             if wasBackgrounded {
                 // Resign already dropped the socket. Hard-redial; do not
                 // write onto whatever transport is still installed.
+                supervisor.noteReconnect("redial.scheduled")
                 reconnectNow()
                 return
             }
@@ -696,12 +751,23 @@ extension AppModel {
         // remains in force on every exact-source failure path.
         OperatorSettingsRuntime.shared.beginReconnectAttempt()
 
+        if let pending = supervisor.backgroundInvalidateTask {
+            await pending.value
+            if supervisor.backgroundInvalidateTask != nil {
+                supervisor.backgroundInvalidateTask = nil
+            }
+        }
+        guard supervisor.reconnectGeneration == attemptGeneration else { return .stale }
+
         let registry = ConnectionRegistry.shared
         do {
+            supervisor.noteReconnect("connect.started")
             try await supervisor.dial(authority.client)
+            supervisor.noteReconnect("gateway.ready")
         } catch AuthError.sessionExpired {
             guard supervisor.reconnectGeneration == attemptGeneration,
                   reconnectSessionExpiryIsCurrent(authority) else { return .stale }
+            supervisor.noteReconnect("connect.failed", "session-expired")
             supervisor.reauthGateway = authority.baseURL
             supervisor.note(error: AuthError.sessionExpired,
                             forGatewayID: authority.gatewayID)
@@ -710,6 +776,7 @@ extension AppModel {
         } catch {
             guard supervisor.reconnectGeneration == attemptGeneration,
                   await reconnectAuthorityIsCurrent(authority) else { return .stale }
+            supervisor.noteReconnect("connect.failed", GatewayDiagnostics.shortMessage(for: error))
             isOffline = true
             registry.noteState(.offline, forURL: authority.baseURL)
             supervisor.note(error: error, forGatewayID: authority.gatewayID)
@@ -764,38 +831,58 @@ extension AppModel {
 
         startSupervisedMonitor(for: authority.client, generation: adoptedGeneration)
 
-        // ensureSession does the whole reattach: resume by durable key, bind the
-        // new sid, replay the inflight snapshot and any pending approval. The
-        // transcript is already in memory, so history is never re-hydrated.
-        for botID in parked {
+        // Bind with defer_history (open-chat policy). The 5923674 device fail
+        // waited here on a full session.resume of every parked forever-chat
+        // (hydrate: false still downloaded history, then threw it away). That
+        // is the same 20s MainActor stall as first-open. Do not hydrate.
+        let bindOrder = parked.sorted { left, right in
+            left == openBotID && right != openBotID
+        }
+        for botID in bindOrder {
             guard await adoptedReconnectAuthorityIsCurrent(
                 authority, generation: adoptedGeneration) else { return false }
+            ConnectionSupervisor.shared.noteReconnect("resume.sent", botID)
             _ = try? await ensureSession(botID: botID, hydrate: false)
+            let bound = chats[botID]?.sessionID?.isEmpty == false
+            ConnectionSupervisor.shared.noteReconnect(
+                bound ? "resume.ack" : "resume.failed", botID)
             guard await adoptedReconnectAuthorityIsCurrent(
                 authority, generation: adoptedGeneration) else { return false }
         }
 
-        try? await refreshRoster()
-        guard await adoptedReconnectAuthorityIsCurrent(
-            authority, generation: adoptedGeneration) else { return false }
-        await refreshRoutinesLive(force: true)
-        guard await adoptedReconnectAuthorityIsCurrent(
-            authority, generation: adoptedGeneration) else { return false }
-        await hideOwnedBotSessions()
-        guard await adoptedReconnectAuthorityIsCurrent(
-            authority, generation: adoptedGeneration) else { return false }
         connections = ConnectionRegistry.shared.rows
         await flushComposeQueue()
         guard await adoptedReconnectAuthorityIsCurrent(
             authority, generation: adoptedGeneration) else { return false }
         exactStoredSessionSourceDidReconnect()
-        if let gatewayID = runtime.gatewayID {
-            await pullAndReseedRoomProjection(gatewayID: gatewayID)
-            guard await adoptedReconnectAuthorityIsCurrent(
-                authority, generation: adoptedGeneration) else { return false }
-        }
         ConnectionSupervisor.shared.resetEpisode(for: .cleanOpen)
+        ConnectionSupervisor.shared.noteReconnect("adopted")
+        // Roster / routines / hide / rooms must not hold the live link.
+        Task { @MainActor [weak self] in
+            await self?.resyncSurfacesAfterReconnect(
+                authority: authority, generation: adoptedGeneration)
+        }
         return true
+    }
+
+    private func resyncSurfacesAfterReconnect(
+        authority: SupervisedReconnectAuthority, generation: Int
+    ) async {
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        try? await refreshRoster()
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        await refreshRoutinesLive(force: true)
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        await hideOwnedBotSessions()
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        connections = ConnectionRegistry.shared.rows
+        if let gatewayID = LiveRuntime.shared.gatewayID {
+            await pullAndReseedRoomProjection(gatewayID: gatewayID)
+        }
     }
 
     /// Supervised reconnect finishes after the foreground/network callbacks
@@ -1203,17 +1290,26 @@ public struct ReauthBanner: View {
     /// sentence, and this card follows the user onto every other screen. What
     /// it adds is the manual retry.
     private var offlineContent: some View {
-        HStack(spacing: 10) {
-            headline(copy.linkDownTitle(theme.id), tone: theme.warn)
-            Spacer(minLength: 8)
-            LinkBannerButton(theme: theme,
-                             label: model.isReconnecting ? copy.reconnecting(theme.id)
-                                                         : copy.reconnectCTA(theme.id),
-                             role: .primary) {
-                model.reconnectNow()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                headline(copy.linkDownTitle(theme.id), tone: theme.warn)
+                Spacer(minLength: 8)
+                LinkBannerButton(theme: theme,
+                                 label: model.isReconnecting ? copy.reconnecting(theme.id)
+                                                             : copy.reconnectCTA(theme.id),
+                                 role: .primary) {
+                    model.reconnectNow()
+                }
+                .disabled(model.isReconnecting)
+                .opacity(model.isReconnecting ? 0.6 : 1)
             }
-            .disabled(model.isReconnecting)
-            .opacity(model.isReconnecting ? 0.6 : 1)
+            if !model.lastReconnectStep.isEmpty {
+                Text(model.lastReconnectStep)
+                    .font(bodyFont)
+                    .foregroundStyle(theme.sub)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(Text(model.lastReconnectStep))
+            }
         }
     }
 

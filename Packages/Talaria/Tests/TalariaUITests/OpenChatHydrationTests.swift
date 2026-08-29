@@ -128,6 +128,25 @@ final class OpenChatHydrationTests: XCTestCase {
     }
 
     @MainActor
+    func testEmptyLatestPageDoesNotClobberPopulatedLocalRows() async throws {
+        let cached = [
+            ChatMessage(author: .user, text: "still on the phone"),
+            ChatMessage(author: .bot, text: "gateway still has this"),
+        ]
+        let chat = ChatState(messages: cached)
+
+        try await AppModel.hydrateOpenChatTranscript(
+            chat: chat,
+            resumeMessages: [],
+            historyDeferred: true,
+            clearWhenEmpty: true,
+            latestPage: { ["messages": []] },
+            accepts: { true })
+
+        XCTAssertEqual(chat.messages.map(\.text), cached.map(\.text))
+    }
+
+    @MainActor
     func testFailedLatestPageKeepsCachedOrStubRows() async throws {
         let cached = ChatMessage(author: .bot, text: "already on screen", rowID: 7)
         let chat = ChatState(messages: [cached])

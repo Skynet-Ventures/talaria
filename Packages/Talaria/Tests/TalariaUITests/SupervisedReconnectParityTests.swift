@@ -525,6 +525,57 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
+    func testBackgroundWakeTraceNamesEachClientStep() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        ConnectionSupervisor.shared.dial = { _ in
+            throw URLError(.cannotConnectToHost)
+        }
+
+        fixture.model.applicationWillResignActive()
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil {
+            fixture.model.reconnectTraceForTesting.contains("connect.failed")
+        }
+        await LiveRuntime.shared.reconnectTask?.value
+
+        let steps = fixture.model.reconnectTraceForTesting
+        XCTAssertTrue(steps.contains("resign"))
+        XCTAssertTrue(steps.contains("didBecomeActive"))
+        XCTAssertTrue(steps.contains("redial.scheduled"))
+        XCTAssertTrue(steps.contains("connect.started"))
+        XCTAssertTrue(steps.contains("connect.failed"))
+        XCTAssertTrue(fixture.model.lastReconnectStep.contains("connect.failed"))
+    }
+
+    @MainActor
+    func testSuccessfulReconnectTraceReachesAdopted() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        ConnectionSupervisor.shared.dial = { _ in }
+
+        let outcome = await fixture.model.attemptReconnectOutcome()
+
+        XCTAssertEqual(outcome, .success)
+        let steps = fixture.model.reconnectTraceForTesting
+        XCTAssertTrue(steps.contains("connect.started"))
+        XCTAssertTrue(steps.contains("gateway.ready"))
+        XCTAssertTrue(steps.contains("adopted"))
+        XCTAssertEqual(fixture.model.lastReconnectStep, "adopted")
+    }
+
+    @MainActor
+    func testOpenChatResumeDefersHistoryOnTheWire() {
+        XCTAssertTrue(OpenChatHistoryPolicy.resumeDefersHistory)
+        let params = GatewayClient.resumeSessionParams(
+            "durable-bot-chat", profile: "main",
+            deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
+        XCTAssertEqual(params["defer_history"]?.boolValue, true)
+        XCTAssertNil(GatewayClient.resumeSessionParams(
+            "durable-bot-chat", deferHistory: false)["defer_history"])
+    }
+
+    @MainActor
     func testRecoveryProjectionStripsHostileURLComponents() {
         let url = URL(string:
             "https://user:secret@Gateway.Example:8443/private?q=token#fragment")!
