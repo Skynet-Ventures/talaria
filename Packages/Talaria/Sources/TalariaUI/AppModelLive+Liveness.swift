@@ -185,6 +185,10 @@ final class LivenessRuntime {
     var settledSince: [String: ContinuousClock.Instant] = [:]
     /// bot id → since when it has been working with nothing to verify against.
     var unverifiableSince: [String: ContinuousClock.Instant] = [:]
+    /// Source-qualified stored-session observation from active-list. A busy →
+    /// idle/reaped edge is an authoritative chance to drain a local next-turn
+    /// row without guessing from a stale visible ChatState.
+    var observedTurnByStoredID: [String: Bool] = [:]
     /// A trigger arrived while the link was down. The reaper picks it up once
     /// the link is back, so a foreground-while-offline still gets its re-seed.
     var reseedPending = false
@@ -208,6 +212,7 @@ final class LivenessRuntime {
         supported = true
         settledSince.removeAll()
         unverifiableSince.removeAll()
+        observedTurnByStoredID.removeAll()
         // A re-seed owed to the gateway we just left is not owed by the one we
         // arrived at; carrying it would spend the next tick's request
         // reconciling a world that no longer exists.
@@ -291,6 +296,7 @@ extension AppModel {
         startLivenessSupervision()
         retryExactStoredSessionNavigation()
         guard mode == .live else { return }
+        requestComposeQueueFlush()
         Task { @MainActor in await self.reconcileLiveness(trigger: .foreground) }
     }
 
@@ -305,6 +311,7 @@ extension AppModel {
             // immediately, so trust the transport's own state rather than the
             // offline flag alone: `.ready` means the link genuinely survived.
             if !self.isOffline, let client = self.client, await client.isConnected {
+                self.requestComposeQueueFlush()
                 await self.reconcileLiveness(trigger: .networkRestored)
                 return
             }
@@ -322,7 +329,16 @@ extension AppModel {
             while !Task.isCancelled {
                 try? await Task.sleep(for: LivenessRuntime.reaperTick)
                 guard !Task.isCancelled, let self else { return }
-                guard self.mode == .live, self.client != nil, !self.isOffline else { continue }
+                guard self.mode == .live else { continue }
+                if self.durableComposerQueueStore.allEntries().contains(where: {
+                    $0.state == .localReady
+                }) {
+                    // A retained secondary can be live even while the primary
+                    // is down. The drain itself resolves the exact source
+                    // client; do not treat this as a primary liveness result.
+                    self.requestComposeQueueFlush()
+                }
+                guard self.client != nil, !self.isOffline else { continue }
                 guard LivenessRuntime.shared.reseedPending
                         || !LiveRuntime.shared.workingBotIDs.isEmpty else { continue }
                 await self.reconcileLiveness(trigger: .reaper)
@@ -538,9 +554,36 @@ extension AppModel {
         let liveness = LivenessRuntime.shared
         var byKey: [String: LiveSessionRow] = [:]
         var bySID: [String: LiveSessionRow] = [:]
+        var queueSettleObserved = false
+        var observedStoredIDs = Set<String>()
         for row in rows {
             if !row.sessionKey.isEmpty { byKey[row.sessionKey] = row }
             if !row.sessionID.isEmpty { bySID[row.sessionID] = row }
+            guard !row.sessionKey.isEmpty else { continue }
+            let observationID = sourceGatewayID + "::" + row.sessionKey
+            observedStoredIDs.insert(observationID)
+            let turnBit: Bool?
+            switch row.turn {
+            case .busy: turnBit = true
+            case .idle: turnBit = false
+            case .building: turnBit = nil
+            }
+            guard let turnBit else { continue }
+            if liveness.observedTurnByStoredID[observationID] == true, !turnBit {
+                queueSettleObserved = true
+            }
+            liveness.observedTurnByStoredID[observationID] = turnBit
+        }
+        // A previously busy stored session disappearing from this source's
+        // active list is also a settle edge. Never infer it for a first-seen
+        // absence or from another gateway's snapshot.
+        let sourcePrefix = sourceGatewayID + "::"
+        let reaped = liveness.observedTurnByStoredID.compactMap { id, wasBusy in
+            wasBusy && id.hasPrefix(sourcePrefix) && !observedStoredIDs.contains(id) ? id : nil
+        }
+        if !reaped.isEmpty {
+            queueSettleObserved = true
+            for id in reaped { liveness.observedTurnByStoredID[id] = nil }
         }
 
         for botID in botIDs {
@@ -668,6 +711,11 @@ extension AppModel {
                     refresh.append((botID, nil, client))
                 }
             }
+        }
+        if queueSettleObserved {
+            // Only schedules a coalesced source-qualified pass. It does not
+            // borrow the primary client that supplied no answer for this row.
+            requestComposeQueueFlush()
         }
     }
 }

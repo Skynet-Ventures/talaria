@@ -42,6 +42,11 @@ private final class ProfileLifecycleRuntime {
     var routeGenerations: [GatewayBotRoute: UInt64] = [:]
     var blockedRoutes: Set<GatewayBotRoute> = []
     var ordinaryTrafficCounts: [String: Int] = [:]
+    private struct TrafficWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
+    private var trafficWaiters: [String: [TrafficWaiter]] = [:]
     /// The active-primary profile is parked under a qualified key before its
     /// gateway-wide retirement disconnect. Keep only that exact stop intent
     /// outside ChatRuntime so disconnectGateway's source scrub cannot erase it
@@ -57,6 +62,51 @@ private final class ProfileLifecycleRuntime {
               ordinaryTrafficCounts[gatewayID, default: 0] == 0 else { return false }
         gatewaysInFlight.insert(gatewayID)
         return true
+    }
+
+    /// A gateway removal must block *new* ordinary traffic immediately, but
+    /// can safely wait for an already-issued exact-source operation to finish.
+    /// This differs from a profile mutation, which refuses to start while
+    /// traffic is live because it has a remote route transition to protect.
+    func beginGatewayTeardown(gatewayID: String) -> Bool {
+        guard !heldGateways.contains(gatewayID),
+              !gatewaysInFlight.contains(gatewayID) else { return false }
+        gatewaysInFlight.insert(gatewayID)
+        return true
+    }
+
+    func awaitGatewayTrafficQuiescence(gatewayID: String) async {
+        guard ordinaryTrafficCounts[gatewayID, default: 0] > 0 else { return }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled || ordinaryTrafficCounts[gatewayID, default: 0] == 0 {
+                    continuation.resume()
+                } else {
+                    trafficWaiters[gatewayID, default: []].append(
+                        TrafficWaiter(id: waiterID, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in
+                ProfileLifecycleRuntime.shared.cancelTrafficWaiter(
+                    gatewayID: gatewayID, waiterID: waiterID)
+            }
+        }
+    }
+
+    private func cancelTrafficWaiter(gatewayID: String, waiterID: UUID) {
+        guard var waiters = trafficWaiters[gatewayID],
+              let index = waiters.firstIndex(where: { $0.id == waiterID }) else { return }
+        let waiter = waiters.remove(at: index)
+        trafficWaiters[gatewayID] = waiters.isEmpty ? nil : waiters
+        waiter.continuation.resume()
+    }
+
+    private func resumeTrafficWaitersIfQuiescent(gatewayID: String) {
+        guard ordinaryTrafficCounts[gatewayID, default: 0] == 0,
+              let waiters = trafficWaiters.removeValue(forKey: gatewayID) else { return }
+        for waiter in waiters { waiter.continuation.resume() }
     }
 
     func acquireOrdinaryTraffic(gatewayID: String) -> GatewayClient.TrafficLease? {
@@ -83,6 +133,7 @@ private final class ProfileLifecycleRuntime {
                     runtime.ordinaryTrafficCounts[gatewayID] = remaining
                 } else {
                     runtime.ordinaryTrafficCounts.removeValue(forKey: gatewayID)
+                    runtime.resumeTrafficWaitersIfQuiescent(gatewayID: gatewayID)
                 }
             }
         }
@@ -108,6 +159,18 @@ private final class ProfileLifecycleRuntime {
 enum ProfileLifecycleTrafficAdmission {
     static func beginLifecycle(_ gatewayID: String) -> Bool {
         ProfileLifecycleRuntime.shared.beginLifecycle(gatewayID: gatewayID)
+    }
+
+    static func beginGatewayTeardown(_ gatewayID: String) -> Bool {
+        ProfileLifecycleRuntime.shared.beginGatewayTeardown(gatewayID: gatewayID)
+    }
+
+    static func awaitGatewayTrafficQuiescence(_ gatewayID: String) async {
+        await ProfileLifecycleRuntime.shared.awaitGatewayTrafficQuiescence(gatewayID: gatewayID)
+    }
+
+    static func endGatewayTeardown(_ gatewayID: String) {
+        ProfileLifecycleRuntime.shared.gatewaysInFlight.remove(gatewayID)
     }
 
     static func endLifecycle(_ gatewayID: String) {
@@ -347,6 +410,13 @@ extension AppModel {
                 return .refused("Room state could not be durably fenced before the profile rename.")
             }
         } else { roomLifecycleToken = nil }
+        // A default-profile rename still changes the source-qualified profile
+        // identity used by the queue reconciliation below, even though it does
+        // not have a room-directory mutation. Park before every remote rename
+        // so no local-ready row can race its route transition.
+        guard parkDurableComposerQueueForLifecycle(route: target.route) else {
+            return .refused("Queued prompts could not be durably parked before the profile rename.")
+        }
         let preserved = captureProfileLifecycleState(target)
         if changesDirectory {
             parkProfileLifecycleCanonicalState(target)
@@ -434,6 +504,10 @@ extension AppModel {
                     originalError: "Hermes returned an inconsistent default-profile rename result.",
                     baseURL: baseURL, credential: credential, exclusive: exclusive)
             }
+            guard resumeDurableComposerQueueForLifecycle(route: target.route) else {
+                ProfileLifecycleRuntime.shared.heldGateways.insert(target.route.gatewayID)
+                return .refused("The default profile changed, but queued prompts remain parked because local storage could not resume them.")
+            }
             A2ARuntime.shared.restoreProfileRoute(
                 target.route, sourceBotIDs: profileLifecycleSourceIDs(target))
             ProfileLifecycleRuntime.shared.restore(target.route)
@@ -462,10 +536,13 @@ extension AppModel {
             holdIndeterminateLifecycle(target)
             return .refused("The profile was renamed remotely, but its room state could not be migrated. The gateway remains fenced until it is verified.")
         }
-        reconcileProfileRoute(target, canonicalNewName: canonical,
-                              scope: baseURL, preserved: preserved,
-                              restorePrimaryIfUnclaimed:
-                                  mayRestoreRetiredPrimary(retirement))
+        guard reconcileProfileRoute(target, canonicalNewName: canonical,
+                                    scope: baseURL, preserved: preserved,
+                                    restorePrimaryIfUnclaimed:
+                                        mayRestoreRetiredPrimary(retirement)) else {
+            holdIndeterminateLifecycle(target)
+            return .refused("The profile was renamed remotely, but queued prompts remain parked until their durable route is reconciled.")
+        }
         let recoveryLease = exclusive.finishAuthoritativeReconciliation()
         await releaseProfileLifecycleFence(gatewayID: target.route.gatewayID,
                                             retirement: retirement, baseURL: baseURL,
@@ -514,6 +591,9 @@ extension AppModel {
         } catch {
             return .refused("Room state could not be durably fenced before profile deletion.")
         }
+        guard parkDurableComposerQueueForLifecycle(route: target.route) else {
+            return .refused("Queued prompts could not be durably parked before profile deletion.")
+        }
         let preserved = captureProfileLifecycleState(target)
         parkProfileLifecycleCanonicalState(target)
         parkProfileLifecycleState(target)
@@ -542,10 +622,13 @@ extension AppModel {
                 roomLifecycleToken: roomLifecycleToken)
         }
 
-        reconcileProfileRoute(target, canonicalNewName: nil,
-                              scope: baseURL, preserved: preserved,
-                              restorePrimaryIfUnclaimed:
-                                  mayRestoreRetiredPrimary(retirement))
+        guard reconcileProfileRoute(target, canonicalNewName: nil,
+                                    scope: baseURL, preserved: preserved,
+                                    restorePrimaryIfUnclaimed:
+                                        mayRestoreRetiredPrimary(retirement)) else {
+            holdIndeterminateLifecycle(target)
+            return .refused("The profile was deleted remotely, but queued prompts remain parked until their durable cleanup is reconciled.")
+        }
         do {
             try await commitRoomProfileRemoval(roomLifecycleToken)
         } catch {
@@ -607,10 +690,13 @@ extension AppModel {
                 holdIndeterminateLifecycle(target)
                 return .refused("The profile was renamed remotely, but its room state could not be migrated. The gateway remains fenced until it is verified.")
             }
-            reconcileProfileRoute(target, canonicalNewName: requested, scope: baseURL,
-                                  preserved: preserved,
-                                  restorePrimaryIfUnclaimed:
-                                      mayRestoreRetiredPrimary(retirement))
+            guard reconcileProfileRoute(target, canonicalNewName: requested, scope: baseURL,
+                                        preserved: preserved,
+                                        restorePrimaryIfUnclaimed:
+                                            mayRestoreRetiredPrimary(retirement)) else {
+                holdIndeterminateLifecycle(target)
+                return .refused("The profile was renamed remotely, but queued prompts remain parked until their durable route is reconciled.")
+            }
             let recoveryLease = exclusive.finishAuthoritativeReconciliation()
             await releaseProfileLifecycleFence(gatewayID: target.route.gatewayID,
                                                 retirement: retirement, baseURL: baseURL,
@@ -624,6 +710,10 @@ extension AppModel {
         case .notCommitted:
             if let roomLifecycleToken {
                 await abortRoomProfileLifecycle(roomLifecycleToken)
+            }
+            guard resumeDurableComposerQueueForLifecycle(route: target.route) else {
+                ProfileLifecycleRuntime.shared.heldGateways.insert(target.route.gatewayID)
+                return .refused("The profile rename was not committed, but queued prompts remain parked because local storage could not resume them.")
             }
             let restorePrimary = mayRestoreRetiredPrimary(retirement)
             restoreParkedProfileLifecycleCanonicalStateIfNeeded(
@@ -659,6 +749,10 @@ extension AppModel {
         } ?? .indeterminate
         switch verdict {
         case .committed:
+            guard resumeDurableComposerQueueForLifecycle(route: target.route) else {
+                ProfileLifecycleRuntime.shared.heldGateways.insert(target.route.gatewayID)
+                return .refused("The default profile changed, but queued prompts remain parked because local storage could not resume them.")
+            }
             A2ARuntime.shared.restoreProfileRoute(
                 target.route, sourceBotIDs: profileLifecycleSourceIDs(target))
             ProfileLifecycleRuntime.shared.restore(target.route)
@@ -668,6 +762,10 @@ extension AppModel {
             rearmDeferredRoomProfileWork()
             return .renamed(canonicalName: target.route.profile, displayName: requested)
         case .notCommitted:
+            guard resumeDurableComposerQueueForLifecycle(route: target.route) else {
+                ProfileLifecycleRuntime.shared.heldGateways.insert(target.route.gatewayID)
+                return .refused("The default profile rename was not committed, but queued prompts remain parked because local storage could not resume them.")
+            }
             A2ARuntime.shared.restoreProfileRoute(
                 target.route, sourceBotIDs: profileLifecycleSourceIDs(target))
             ProfileLifecycleRuntime.shared.restore(target.route)
@@ -702,10 +800,13 @@ extension AppModel {
                 holdIndeterminateLifecycle(target)
                 return .refused("The profile was deleted remotely, but its room tombstone could not be committed. The gateway remains fenced until it is verified.")
             }
-            reconcileProfileRoute(target, canonicalNewName: nil, scope: baseURL,
-                                  preserved: preserved,
-                                  restorePrimaryIfUnclaimed:
-                                      mayRestoreRetiredPrimary(retirement))
+            guard reconcileProfileRoute(target, canonicalNewName: nil, scope: baseURL,
+                                        preserved: preserved,
+                                        restorePrimaryIfUnclaimed:
+                                            mayRestoreRetiredPrimary(retirement)) else {
+                holdIndeterminateLifecycle(target)
+                return .refused("The profile was deleted remotely, but queued prompts remain parked until their durable cleanup is reconciled.")
+            }
             let recoveryLease = exclusive.finishAuthoritativeReconciliation()
             await releaseProfileLifecycleFence(gatewayID: target.route.gatewayID,
                                                 retirement: retirement, baseURL: baseURL,
@@ -718,6 +819,10 @@ extension AppModel {
             return .deleted
         case .notCommitted:
             await abortRoomProfileLifecycle(roomLifecycleToken)
+            guard resumeDurableComposerQueueForLifecycle(route: target.route) else {
+                ProfileLifecycleRuntime.shared.heldGateways.insert(target.route.gatewayID)
+                return .refused("The profile deletion was not committed, but queued prompts remain parked because local storage could not resume them.")
+            }
             let restorePrimary = mayRestoreRetiredPrimary(retirement)
             restoreParkedProfileLifecycleCanonicalStateIfNeeded(
                 target, preferPrimary: restorePrimary)
@@ -1446,7 +1551,19 @@ extension AppModel {
     private func reconcileProfileRoute(_ target: ProfileLifecycleTarget,
                                        canonicalNewName: String?, scope: URL,
                                        preserved: ProfileLifecyclePreservedState,
-                                       restorePrimaryIfUnclaimed: Bool) {
+                                       restorePrimaryIfUnclaimed: Bool) -> Bool {
+        let destinationRoute = canonicalNewName.map {
+            GatewayBotRoute(gatewayID: target.route.gatewayID, profile: $0)
+        }
+        do {
+            try commitDurableComposerQueueLifecycle(
+                from: target.route, to: destinationRoute)
+        } catch {
+            // Hermes has already changed the source, but no local row may be
+            // replayed into its replacement. Leave the parked source envelope
+            // intact and let the caller keep the lifecycle authority fenced.
+            return false
+        }
         let currentPrimaryGatewayID = LiveRuntime.shared.gatewayID
         let plan = ProfileLifecycleStatePlan(target: target,
                                              canonicalNewName: canonicalNewName,
@@ -1569,17 +1686,17 @@ extension AppModel {
         // deletion.
         restoreParkedProfileLifecycleCanonicalState(
             target, destinationID: plan.destinationID)
-        let destinationRoute = plan.destinationID.flatMap { destinationID in
+        let presentationDestinationRoute = plan.destinationID.flatMap { _ in
             canonicalNewName.map {
                 GatewayBotRoute(gatewayID: target.route.gatewayID, profile: $0)
             }
         }
-        if let destinationID = plan.destinationID, let destinationRoute {
+        if let destinationID = plan.destinationID, let presentationDestinationRoute {
             rekeyComposeQueueRoute(from: plan.sourceIDs[0], to: destinationID,
-                                   fromRoute: target.route, toRoute: destinationRoute)
+                                   fromRoute: target.route, toRoute: presentationDestinationRoute)
             migrateRetainedProfileMutationFences(
                 fromBotIDs: retainedSourceIDs, fromRoute: target.route,
-                toBotID: destinationID, toRoute: destinationRoute,
+                toBotID: destinationID, toRoute: presentationDestinationRoute,
                 chatID: sourceChat.map { ObjectIdentifier($0) },
                 storedID: sourceChat?.storedSessionID)
         } else {
@@ -1703,6 +1820,7 @@ extension AppModel {
                                    scope: scope, preserved: preserved,
                                    destinationIsPrimary: plan.destinationIsPrimary)
         scrubProfileEditorCaches(route: target.route, newProfile: canonicalNewName)
+        return true
     }
 
     /// Move accepted-unknown mutation fences only after a rename is

@@ -144,6 +144,16 @@ portable management depth (including auxiliary goal-judge controls), workspace
 depth, and artifact pagination/unlocked-root exceptions. The authenticated gateway PTY is now
 implemented, with live-gateway and real-device certification still open:
 
+- The composer has an explicit, source-qualified durable Queue control for
+  text-only work intended for a later turn. It persists exact
+  gateway/profile/stored-session rows, drains only after an authoritative idle
+  resume, parks local rows on Stop, and fails closed on an ambiguous receipt.
+  Normal mid-turn Send remains steer-first. The panel deliberately supports
+  only its implemented local actions (scoped text edit, pause/resume,
+  local removal, uncertain acknowledgement, and accepted-mirror hiding), not
+  attachment replay or arbitrary send-now/steer-now actions. Focused local
+  tests pass; live-gateway and real-device certification remain open.
+
 - Talaria retains authenticated clients for multiple gateways and routes chat,
   events, sessions, full approval recovery/prompts, and unread state by source.
   Routine listing, detail/history, create/edit/run/delete, and toggles are also
@@ -248,8 +258,10 @@ partial until the unchecked certification gates are recorded.
       Multiline full-width capped composition, edit/rewind/regenerate, and
       message-level child creation are implemented; remaining work includes the
       N/M alternative-branch picker and lineage presentation, persistent rich
-      media, grouped tool runs, advanced renderers, per-message TTS/timing, and
-      a durable prompt queue.
+      media, grouped tool runs, advanced renderers, and per-message TTS/timing.
+      The separate source-qualified, text-only durable composer queue is
+      implemented and focused-test covered; its gateway/device certification is
+      still open.
 - [ ] Finish mobile management for providers, models, profiles, tools, skills,
       MCP, plugins, messaging, learned-memory curation/import/export, auxiliary
       slots, and subagent depth. Routine per-job reasoning effort is implemented

@@ -86,8 +86,35 @@ public final class AppModel {
     }
     var composeQueueBindings: [UUID: ComposeQueueBinding] = [:]
     var composeFlushActive = false
+    var composeFlushRequested = false
+    /// Compare-and-swap claims for dispatch. They remain in memory so Stop can
+    /// synchronously park the durable row while pre-wire work is suspended.
+    var durableComposerQueueClaims: Set<UUID> = []
+    /// A text editor reserves exactly one source-qualified row. A reservation
+    /// is intentionally distinct from a dispatch claim: it blocks FIFO drain
+    /// at that row without treating the row as in-flight work.
+    struct DurableComposerQueueEditReservation: Equatable {
+        var botID: String
+        var key: DurableComposerQueueKey
+    }
+    var durableComposerQueueEditReservations: [UUID: DurableComposerQueueEditReservation] = [:]
+    struct DurableComposerQueueWireSubmission: Equatable {
+        var id: UUID
+        var key: DurableComposerQueueKey
+        var runtimeSessionID: String
+    }
+    /// Exact pre-receipt wire attempts. message.start may precede the RPC
+    /// acknowledgement, including for a chat that is not currently visible.
+    var durableComposerQueueWireSubmissions: [UUID: DurableComposerQueueWireSubmission] = [:]
+    var durableComposerQueueStartsBeforeReceipt: Set<UUID> = []
     /// Live prompts the gateway parked behind the current turn (`queued: true`).
     public var promptQueue: [(id: UUID, botID: String, text: String)] = []
+    /// The durable authority for local queue rows and accepted gateway mirrors.
+    public let durableComposerQueueStore: DurableComposerQueueStore
+    public internal(set) var durableComposerQueueEntries: [DurableComposerQueueEntry] = []
+    /// Accepted gateway work can be hidden from the current panel but remains
+    /// persisted until authoritative execution/transcript proof removes it.
+    var hiddenAcceptedQueueIDs: Set<UUID> = []
 
     // Live mode
     public var client: GatewayClient?
@@ -120,7 +147,19 @@ public final class AppModel {
     var launchConnectOverrideForTesting:
         (@MainActor (URL, GatewayCredential) async throws -> Void)?
 
-    public init() {
+    public init(queueStore: DurableComposerQueueStore? = nil) {
+        if let queueStore {
+            durableComposerQueueStore = queueStore
+        } else if NSClassFromString("XCTestCase") != nil {
+            // Keep unrelated UI tests independent from a developer device's
+            // Application Support envelope. Durable-queue tests inject their
+            // own URL and therefore still exercise real persistence.
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("talaria-test-queue-\(UUID().uuidString).json")
+            durableComposerQueueStore = DurableComposerQueueStore(fileURL: url)
+        } else {
+            durableComposerQueueStore = DurableComposerQueueStore.shared
+        }
         showOnboarding = !UserDefaults.standard.bool(forKey: "talaria-onboarded")
         ConnectionRegistry.shared.setSecondaryTeardown { [weak self] gatewayID, expected in
             await self?.detachRoutedEvents(gatewayID: gatewayID, expected: expected)
@@ -134,6 +173,7 @@ public final class AppModel {
                 }
             }
         }
+        reloadDurableComposerQueueProjection()
     }
 
     // MARK: - Demo mode
@@ -259,7 +299,13 @@ public final class AppModel {
         composeQueue = []
         composeQueueIDs = []
         composeQueueBindings = [:]
+        composeFlushRequested = false
+        durableComposerQueueClaims = []
+        durableComposerQueueEditReservations = [:]
         promptQueue = []
+        // Source-qualified entries deliberately survive a demo/live world
+        // transition. Only their visible compatibility projection resets.
+        durableComposerQueueEntries = durableComposerQueueStore.allEntries()
         openBotID = nil
         selectedTab = .home
         // A toast is an answer about a world that no longer exists once this
@@ -293,12 +339,250 @@ public final class AppModel {
                             sessionID: String? = nil, chatID: ObjectIdentifier? = nil) {
         normalizeComposeQueueIDs()
         guard !composeQueueIDs.contains(id) else { return }
+        // Compatibility callers (normal Send/Steer/offline recovery) retain
+        // their existing optimistic, in-memory lifecycle. Only the explicit
+        // Queue control may create replayable durable authority.
         composeQueue.append((botID: botID, text: text))
         composeQueueIDs.append(id)
         if route != nil || storedID != nil || sessionID != nil || chatID != nil {
             composeQueueBindings[id] = ComposeQueueBinding(botID: botID, route: route,
                 storedID: storedID, sessionID: sessionID, chatID: chatID)
         }
+    }
+
+    /// Rebuild the legacy tuples as a projection of the durable authority.
+    /// Source-qualified rows are never rebound by bare profile name.
+    func reloadDurableComposerQueueProjection() {
+        normalizeComposeQueueIDs()
+        let persisted = durableComposerQueueStore.allEntries()
+        let previousDurableIDs = Set(durableComposerQueueEntries.map(\.id))
+        let persistedIDs = Set(persisted.map(\.id))
+        // Attachment-bearing recovery rows and ordinary steer mirrors remain
+        // intentionally in-memory: Hermes cannot prove their replayable
+        // attachment/session ownership. A durable projection refresh must
+        // merge around them, never erase them as collateral damage.
+        let legacyCompose = zip(composeQueue, composeQueueIDs).filter {
+            !previousDurableIDs.contains($0.1) && !persistedIDs.contains($0.1)
+        }
+        let legacyComposeIDs = Set(legacyCompose.map(\.1))
+        let legacyComposeBindings = composeQueueBindings.filter {
+            legacyComposeIDs.contains($0.key)
+        }
+        let legacyPrompt = promptQueue.filter {
+            !previousDurableIDs.contains($0.id) && !persistedIDs.contains($0.id)
+        }
+        for id in previousDurableIDs.subtracting(persistedIDs) {
+            ChatRuntime.shared.queuedBindings[id] = nil
+        }
+        durableComposerQueueEntries = persisted
+        let local = persisted.filter { $0.state != .acceptedGatewayOwned }
+        composeQueue = legacyCompose.map(\.0)
+            + local.map { (botID: durableBotID(for: $0.key), text: $0.text) }
+        composeQueueIDs = legacyCompose.map(\.1) + local.map(\.id)
+        composeQueueBindings = legacyComposeBindings
+        for (id, binding) in local.map({ entry in
+            (entry.id, ComposeQueueBinding(
+                botID: durableBotID(for: entry.key), route: entry.key.route,
+                storedID: entry.key.storedSessionID, sessionID: nil, chatID: nil))
+        }) {
+            composeQueueBindings[id] = binding
+        }
+        let accepted = persisted.filter {
+            $0.state == .acceptedGatewayOwned && !hiddenAcceptedQueueIDs.contains($0.id)
+        }
+        promptQueue = legacyPrompt
+            + accepted.map { (id: $0.id, botID: durableBotID(for: $0.key), text: $0.text) }
+        // Retain identity-bearing execution bindings across a projection
+        // rebuild. An accepted row is gateway-owned, but an exact subsequent
+        // start event still needs this source/session proof to retire only its
+        // matching local mirror; never match by text.
+        for entry in accepted {
+            let botID = durableBotID(for: entry.key)
+            ChatRuntime.shared.queuedBindings[entry.id] = QueuedPromptBinding(
+                botID: botID, sessionID: chats[botID]?.sessionID ?? "",
+                storedID: entry.key.storedSessionID, route: entry.key.route,
+                eligibleAfterCurrentTurn: true, order: entry.order)
+        }
+    }
+
+    private func durableBotID(for key: DurableComposerQueueKey) -> String {
+        if LiveRuntime.shared.gatewayID == key.gatewayID { return key.profile }
+        return key.route.qualifiedID
+    }
+
+    /// The exact current source/session fence for a local queue row.
+    func durableQueueKey(botID: String, chat: ChatState? = nil) -> DurableComposerQueueKey? {
+        let route = stateRoute(for: botID) ?? gatewayRoute(for: botID)
+            ?? GatewayBotRoute(qualifiedID: botID)
+        let storedID = (chat ?? chats[botID])?.storedSessionID
+        guard let route, let storedID, !storedID.isEmpty else { return nil }
+        return DurableComposerQueueKey(route: route, storedSessionID: storedID)
+    }
+
+    /// Persist before showing any queued presentation. This is intentionally
+    /// text-only and never creates a transcript bubble.
+    @discardableResult
+    func enqueueDurableLocalPrompt(_ text: String, botID: String,
+                                   chat: ChatState, attachments: Int = 0) -> UUID? {
+        guard let key = durableQueueKey(botID: botID, chat: chat) else {
+            chat.messages.append(ChatMessage(author: .system,
+                text: "This prompt cannot be queued until the exact durable session is available."))
+            return nil
+        }
+        do {
+            let entry = try durableComposerQueueStore.enqueue(
+                key: key, text: text, attachments: attachments)
+            reloadDurableComposerQueueProjection()
+            if composeFlushActive { composeFlushRequested = true }
+            return entry.id
+        } catch {
+            chat.messages.append(ChatMessage(author: .system, text: error.localizedDescription))
+            return nil
+        }
+    }
+
+    /// Dispatch claims and edit reservations both block a FIFO head. A row
+    /// being edited must not be skipped or sent with stale text.
+    @discardableResult
+    func claimDurableComposerEntry(id: UUID) -> Bool {
+        guard let entry = durableComposerQueueStore.entry(id: id),
+              entry.state.isAutomaticallyReplayable,
+              durableComposerQueueEditReservations[id] == nil,
+              durableComposerQueueClaims.insert(id).inserted else { return false }
+        return true
+    }
+
+    func releaseDurableComposerEntryClaim(_ id: UUID) {
+        durableComposerQueueClaims.remove(id)
+    }
+
+    func registerDurableComposerWireSubmission(
+        id: UUID, key: DurableComposerQueueKey, runtimeSessionID: String
+    ) {
+        durableComposerQueueWireSubmissions[id] = DurableComposerQueueWireSubmission(
+            id: id, key: key, runtimeSessionID: runtimeSessionID)
+        durableComposerQueueStartsBeforeReceipt.remove(id)
+    }
+
+    /// Runs before visible-chat event admission. A queued prompt may execute
+    /// while its chat is closed, and message.start can race ahead of the RPC
+    /// receipt; source + runtime sid + FIFO order identify the exact attempt.
+    func noteDurableComposerQueueStart(
+        runtimeSessionID: String, sourceGatewayID: String?
+    ) {
+        guard let sourceGatewayID else { return }
+        let candidate = durableComposerQueueWireSubmissions.values
+            .filter {
+                $0.runtimeSessionID == runtimeSessionID
+                    && $0.key.gatewayID == sourceGatewayID
+            }
+            .min {
+                (durableComposerQueueStore.entry(id: $0.id)?.order ?? UInt64.max)
+                    < (durableComposerQueueStore.entry(id: $1.id)?.order ?? UInt64.max)
+            }
+        if let candidate { durableComposerQueueStartsBeforeReceipt.insert(candidate.id) }
+    }
+
+    /// Release the pre-receipt token and report whether message.start already
+    /// proved gateway execution for this exact durable identity.
+    func finishDurableComposerWireSubmission(id: UUID) -> Bool {
+        durableComposerQueueWireSubmissions[id] = nil
+        return durableComposerQueueStartsBeforeReceipt.remove(id) != nil
+    }
+
+    /// Begin an edit only for the exact source/session currently displayed.
+    /// Returning the entry gives the view a snapshot but the reservation, not
+    /// that snapshot, is the authority for a later save.
+    @discardableResult
+    public func beginEditingDurableQueuedPrompt(id: UUID, botID: String)
+        -> DurableComposerQueueEntry? {
+        guard let key = durableQueueKey(botID: botID),
+              let entry = durableComposerQueueStore.entry(id: id),
+              entry.key == key, entry.state.isLocallyEditable,
+              !durableComposerQueueClaims.contains(id),
+              durableComposerQueueEditReservations[id] == nil else { return nil }
+        durableComposerQueueEditReservations[id] = DurableComposerQueueEditReservation(
+            botID: botID, key: key)
+        return entry
+    }
+
+    /// Save only the reservation's exact source/session. Any lifecycle or
+    /// session replacement invalidates the edit rather than rewriting another
+    /// row. Reservations release on both success and failure.
+    @discardableResult
+    public func saveEditingDurableQueuedPrompt(id: UUID, botID: String,
+                                               text: String) -> Bool {
+        guard let reservation = durableComposerQueueEditReservations[id] else { return false }
+        defer { durableComposerQueueEditReservations[id] = nil }
+        guard reservation.botID == botID,
+              durableQueueKey(botID: botID) == reservation.key,
+              durableComposerQueueStore.entry(id: id)?.key == reservation.key else { return false }
+        do {
+            _ = try durableComposerQueueStore.replaceLocalText(id: id, text: text)
+            reloadDurableComposerQueueProjection()
+            if composeFlushActive { composeFlushRequested = true }
+            return true
+        } catch {
+            chat(for: botID).messages.append(ChatMessage(author: .system,
+                text: "That queued prompt was not changed: \(error.localizedDescription)"))
+            reloadDurableComposerQueueProjection()
+            return false
+        }
+    }
+
+    /// Cancel is intentionally fence-aware: a reused UUID from another queue
+    /// key cannot release an unrelated reservation.
+    public func cancelEditingDurableQueuedPrompt(id: UUID, botID: String) {
+        guard let reservation = durableComposerQueueEditReservations[id],
+              reservation.botID == botID else { return }
+        durableComposerQueueEditReservations[id] = nil
+    }
+
+    /// Profile/gateway lifecycle calls this before its first remote mutation.
+    /// If the write fails, the lifecycle must not proceed with replayable rows
+    /// still committed under an about-to-change source route.
+    @discardableResult
+    func parkDurableComposerQueueForLifecycle(route: GatewayBotRoute) -> Bool {
+        do {
+            try durableComposerQueueStore.park(route: route)
+            reloadDurableComposerQueueProjection()
+            return true
+        } catch {
+            durableComposerQueueEntries = durableComposerQueueStore.allEntries()
+            return false
+        }
+    }
+
+    /// A definitively refused lifecycle operation leaves its original route
+    /// authoritative. Re-open only rows that were parked by that exact route;
+    /// a persistence failure keeps them parked and lets the caller retain its
+    /// lifecycle fence rather than silently turning local work replayable.
+    @discardableResult
+    func resumeDurableComposerQueueForLifecycle(route: GatewayBotRoute) -> Bool {
+        do {
+            try durableComposerQueueStore.resume(route: route)
+            reloadDurableComposerQueueProjection()
+            return true
+        } catch {
+            durableComposerQueueEntries = durableComposerQueueStore.allEntries()
+            return false
+        }
+    }
+
+    /// Commit the source-qualified half only after Hermes has authoritatively
+    /// accepted the lifecycle operation. Rename preserves FIFO/order; delete
+    /// removes the exact source rows. A failed write leaves parked source rows
+    /// in place rather than replaying them under a guessed destination.
+    func commitDurableComposerQueueLifecycle(
+        from source: GatewayBotRoute, to destination: GatewayBotRoute? = nil
+    ) throws {
+        if let destination {
+            try durableComposerQueueStore.migrateRouteAndResume(
+                from: source, to: destination)
+        } else {
+            try durableComposerQueueStore.remove(route: source)
+        }
+        reloadDurableComposerQueueProjection()
     }
 
     func reconcileComposeQueueIDs(sources: Set<String>, destination: String?) {
@@ -376,25 +660,32 @@ public final class AppModel {
         bots.first { $0.id == id }
     }
 
-    public func send(text: String, to botID: String) {
-        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+    @discardableResult
+    public func send(text: String, to botID: String) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         let chat = chat(for: botID)
-        let optimistic = ChatMessage(author: .user, time: Self.clock(), text: text)
-        chat.messages.append(optimistic)
-
         if isOffline && GatewayBotRoute(qualifiedID: botID) == nil {
+            // Normal Send keeps the existing optimistic recovery semantics.
+            // Only the explicit Queue affordance is bubble-free; an ordinary
+            // offline send may still lack a stored-session key and must remain
+            // visible/recoverable through the current failure lifecycle.
+            let optimistic = ChatMessage(author: .user, time: Self.clock(), text: text)
+            chat.messages.append(optimistic)
             appendComposeQueue(botID: botID, text: text,
                                route: stateRoute(for: botID) ?? gatewayRoute(for: botID),
                                storedID: chat.storedSessionID, sessionID: chat.sessionID,
                                chatID: ObjectIdentifier(chat))
-            return
+            return true
         }
+        let optimistic = ChatMessage(author: .user, time: Self.clock(), text: text)
+        chat.messages.append(optimistic)
         switch mode {
         case .demo: demoReply(botID: botID, chat: chat)
         case .live:
             liveSendSerialized(text: text, botID: botID, chat: chat,
                                optimisticID: optimistic.id)
         }
+        return true
     }
 
     public func resolveApproval(_ approval: Approval, approve: Bool) {
