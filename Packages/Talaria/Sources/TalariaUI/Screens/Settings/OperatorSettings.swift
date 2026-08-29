@@ -98,6 +98,7 @@ public struct GatewayCommandAction: Equatable, Sendable {
     var running: Bool
     var alreadyRunning: Bool
     var pid: Int?
+    var actionID: String?
     var exitCode: Int?
     var message: String
     var lines: [String]
@@ -109,15 +110,16 @@ public struct GatewayCommandAction: Equatable, Sendable {
 
     static let empty = GatewayCommandAction(
         name: "", ok: false, running: false, alreadyRunning: false,
-        pid: nil, exitCode: nil, message: "", lines: [], canApply: false,
+        pid: nil, actionID: nil, exitCode: nil, message: "", lines: [], canApply: false,
         updateAvailable: false, behind: nil, updateCommand: "", installMethod: "")
 
     init(name: String, ok: Bool, running: Bool, alreadyRunning: Bool,
-         pid: Int?, exitCode: Int?, message: String, lines: [String],
+         pid: Int?, actionID: String? = nil, exitCode: Int?, message: String, lines: [String],
          canApply: Bool, updateAvailable: Bool, behind: Int?,
          updateCommand: String, installMethod: String) {
         self.name = name; self.ok = ok; self.running = running
-        self.alreadyRunning = alreadyRunning; self.pid = pid; self.exitCode = exitCode
+        self.alreadyRunning = alreadyRunning; self.pid = pid; self.actionID = actionID
+        self.exitCode = exitCode
         self.message = message; self.lines = lines; self.canApply = canApply
         self.updateAvailable = updateAvailable; self.behind = behind
         self.updateCommand = updateCommand; self.installMethod = installMethod
@@ -129,6 +131,7 @@ public struct GatewayCommandAction: Equatable, Sendable {
         running = value["running"]?.boolValue ?? false
         alreadyRunning = value["already_running"]?.boolValue ?? false
         pid = value["pid"]?.intValue
+        actionID = HermesUpdateActionIdentity.admit(value["action_id"]?.stringValue)
         exitCode = value["exit_code"]?.intValue
         message = value["message"]?.stringValue
             ?? value["error"]?.stringValue
@@ -154,11 +157,16 @@ enum GatewayOperationsPolicy {
         -> GatewayCommandAction {
         guard value["ok"]?.boolValue == true,
               value["name"]?.stringValue == expectedName,
-              let pid = value["pid"]?.intValue,
-              pid > 0 else {
+              HermesUpdateActionIdentity.admittedPID(value["pid"]) != nil else {
             throw AckValidationError(
                 operation: expectedName,
                 detail: "Hermes omitted or changed the exact accepted action receipt.")
+        }
+        if expectedName != "hermes-update",
+           let rawActionID = value["action_id"], rawActionID != .null,
+           HermesUpdateActionIdentity.admit(rawActionID.stringValue) == nil {
+            throw AckValidationError(operation: expectedName,
+                                     detail: "Hermes returned a malformed action identity.")
         }
         return GatewayCommandAction(value)
     }
@@ -257,10 +265,27 @@ enum GatewayMaintenanceOutcome: Equatable, Sendable {
     case uncertain
 }
 
+enum GatewayUpdateRecoveryPresentation: Equatable, Sendable {
+    case recovering
+    case running(restarted: Bool)
+    case terminal(outcome: HermesUpdateReceiptOutcome, restarted: Bool)
+    case ambiguous(reason: String)
+}
+
 struct GatewayMaintenanceFence: Equatable, Sendable {
     var source: GatewayMaintenanceSource
     var action: String
     var outcome: GatewayMaintenanceOutcome
+    var updateRecovery: GatewayUpdateRecoveryPresentation?
+
+    init(source: GatewayMaintenanceSource, action: String,
+         outcome: GatewayMaintenanceOutcome,
+         updateRecovery: GatewayUpdateRecoveryPresentation? = nil) {
+        self.source = source
+        self.action = action
+        self.outcome = outcome
+        self.updateRecovery = updateRecovery
+    }
 }
 
 /// Gateway operations are no-replay mutations. Their fence outlives this view and
@@ -273,8 +298,23 @@ final class GatewayMaintenanceRuntime {
 
     private(set) var fence: GatewayMaintenanceFence?
     @ObservationIgnored private var sharedOwner: UUID?
+    @ObservationIgnored private let updateStore: DurableHermesUpdateStore
+
+    convenience init() {
+        self.init(updateStore: .shared)
+    }
+
+    init(updateStore: DurableHermesUpdateStore) {
+        self.updateStore = updateStore
+        guard let record = updateStore.load() else { return }
+        sharedOwner = WorkspaceRuntime.shared.claimMutation()
+        fence = GatewayMaintenanceFence(
+            source: record.source, action: "hermes-update",
+            outcome: .accepted(pid: record.initialPID), updateRecovery: .recovering)
+    }
 
     func begin(source: GatewayMaintenanceSource, action: String) -> Bool {
+        ensureSharedOwner()
         guard fence == nil, sharedOwner == nil,
               let owner = WorkspaceRuntime.shared.claimMutation() else { return false }
         sharedOwner = owner
@@ -285,6 +325,80 @@ final class GatewayMaintenanceRuntime {
     func accept(source: GatewayMaintenanceSource, action: String, pid: Int) {
         guard pid > 0, fence?.source == source, fence?.action == action else { return }
         fence?.outcome = .accepted(pid: pid)
+    }
+
+    func acceptUpdate(source: GatewayMaintenanceSource, pid: Int,
+                      actionID: String?, startedAt: Date) {
+        guard pid > 0, fence?.source == source,
+              fence?.action == "hermes-update" else { return }
+        guard let actionID else {
+            fence?.outcome = .uncertain
+            fence?.updateRecovery = .ambiguous(
+                reason: "Hermes omitted the durable update action identity.")
+            let record = DurableHermesUpdateRecord(
+                gatewayID: source.gatewayID, profile: source.profile,
+                actionID: nil, initialPID: pid, startedAt: startedAt,
+                ambiguous: true)
+            _ = updateStore.save(record)
+            return
+        }
+        let record = DurableHermesUpdateRecord(
+            gatewayID: source.gatewayID, profile: source.profile,
+            actionID: actionID, initialPID: pid, startedAt: startedAt,
+            ambiguous: false)
+        guard updateStore.save(record) else {
+            fence?.outcome = .uncertain
+            fence?.updateRecovery = .ambiguous(
+                reason: "Talaria could not persist the durable update identity.")
+            return
+        }
+        fence?.outcome = .accepted(pid: pid)
+        fence?.updateRecovery = .recovering
+    }
+
+    func updateRecord(gatewayID: String) -> DurableHermesUpdateRecord? {
+        ensureSharedOwner()
+        guard let record = updateStore.load(), record.gatewayID == gatewayID,
+              fence?.source == record.source, fence?.action == "hermes-update" else { return nil }
+        return record
+    }
+
+    func updateRecord(source: GatewayMaintenanceSource) -> DurableHermesUpdateRecord? {
+        guard let record = updateRecord(gatewayID: source.gatewayID),
+              record.source == source else { return nil }
+        return record
+    }
+
+    func applyUpdateRecovery(_ decision: HermesUpdateRecoveryDecision,
+                             record: DurableHermesUpdateRecord) {
+        guard updateStore.load() == record, fence?.source == record.source,
+              fence?.action == "hermes-update" else { return }
+        switch decision {
+        case .running(let pid, let restarted):
+            fence?.outcome = .accepted(pid: pid)
+            fence?.updateRecovery = .running(restarted: restarted)
+        case .terminal(let outcome, let restarted):
+            fence?.outcome = .accepted(pid: record.initialPID)
+            fence?.updateRecovery = .terminal(outcome: outcome, restarted: restarted)
+            updateStore.remove(gatewayID: record.gatewayID)
+        case .ambiguous(let reason):
+            fence?.outcome = .uncertain
+            fence?.updateRecovery = .ambiguous(reason: reason)
+            var ambiguous = record
+            ambiguous.ambiguous = true
+            _ = updateStore.save(ambiguous)
+        }
+    }
+
+    func markUpdateRecoveryAmbiguous(record: DurableHermesUpdateRecord, reason: String) {
+        applyUpdateRecovery(.ambiguous(reason: reason), record: record)
+    }
+
+    func removeUpdateRecovery(gatewayID: String? = nil) {
+        updateStore.remove(gatewayID: gatewayID)
+        guard fence?.action == "hermes-update",
+              gatewayID == nil || fence?.source.gatewayID == gatewayID else { return }
+        clear()
     }
 
     func markUncertain(source: GatewayMaintenanceSource, action: String) {
@@ -317,10 +431,20 @@ final class GatewayMaintenanceRuntime {
     }
 
     func preservesWorkspaceMutation(owner: UUID?) -> Bool {
-        fence != nil && owner != nil && owner == sharedOwner
+        ensureSharedOwner()
+        return fence != nil && owner != nil && owner == sharedOwner
+    }
+
+    private func ensureSharedOwner() {
+        if fence != nil, sharedOwner == nil {
+            sharedOwner = WorkspaceRuntime.shared.claimMutation()
+        }
     }
 
     private func clear() {
+        if fence?.action == "hermes-update", let gatewayID = fence?.source.gatewayID {
+            updateStore.remove(gatewayID: gatewayID)
+        }
         if let sharedOwner { WorkspaceRuntime.shared.releaseMutation(sharedOwner) }
         sharedOwner = nil
         fence = nil
@@ -512,11 +636,16 @@ extension GatewayClient {
 
     func actionStatus(name: String, pid: Int, lines: Int = 80) async throws
         -> GatewayCommandAction {
-        let value = try await restJSON(path: "api/actions/\(name)/status",
-                                       query: [URLQueryItem(name: "lines", value: String(lines))],
-                                       timeout: 20)
+        let value = try await rawActionStatus(name: name, lines: lines)
         return try GatewayOperationsPolicy.statusReceipt(
             value, expectedName: name, expectedPID: pid)
+    }
+
+    func rawActionStatus(name: String, lines: Int = 80) async throws -> JSONValue {
+        try await restJSON(
+            path: "api/actions/\(name)/status",
+            query: [URLQueryItem(name: "lines", value: String(max(1, min(2_000, lines))))],
+            timeout: 20)
     }
 
     func usageAnalytics(days: Int, profile: String?) async throws -> GatewayUsageSnapshot {
@@ -731,6 +860,7 @@ public struct OperatorSettingsSection: View {
             await loadUpdateCheck(scopeKey: key)
             await loadCurator(scopeKey: key)
             await loadMemoryStore(scopeKey: key)
+            await recoverDurableUpdateIfNeeded(scopeKey: key)
         }
         .confirmationDialog(pendingMaintenance?.title(copy, theme.id) ?? "",
                             isPresented: Binding(
@@ -1442,6 +1572,53 @@ public struct OperatorSettingsSection: View {
         }
     }
 
+    private func recoverDurableUpdateIfNeeded(scopeKey key: String) async {
+        guard stateScopeKey == key, model.mode == .live,
+              let source = targetMaintenanceSource,
+              let record = maintenanceRuntime.updateRecord(source: source) else { return }
+        let gatewayID = source.gatewayID
+        let capturedGeneration = generation
+        let capturedConnectionRevision = OperatorSettingsRuntime.shared.connectionRevision
+        let capturedLiveGeneration = LiveRuntime.shared.generation
+        do {
+            let client = try await targetClient(gatewayID: gatewayID)
+            let clientID = ObjectIdentifier(client)
+            for attempt in 0..<20 {
+                guard isCurrent(key, generation: capturedGeneration) else { return }
+                if attempt > 0 { try await Task.sleep(for: .milliseconds(1_200)) }
+                let value = try await client.rawActionStatus(
+                    name: "hermes-update", lines: HermesUpdateStatus.maximumLines)
+                let currentClient = try? await targetClient(gatewayID: gatewayID)
+                guard HermesUpdateRecoveryPublicationPolicy.accepts(
+                    capturedGatewayID: gatewayID, currentGatewayID: targetGatewayID,
+                    capturedGeneration: capturedLiveGeneration,
+                    currentGeneration: LiveRuntime.shared.generation,
+                    capturedConnectionRevision: capturedConnectionRevision,
+                    currentConnectionRevision: OperatorSettingsRuntime.shared.connectionRevision,
+                    capturedClient: clientID,
+                    currentClient: currentClient.map(ObjectIdentifier.init)
+                ), isCurrent(key, generation: capturedGeneration) else { return }
+
+                let decision = HermesUpdateRecoveryPolicy.decide(record: record, value: value)
+                maintenanceRuntime.applyUpdateRecovery(decision, record: record)
+                actionName = "hermes-update"
+                switch decision {
+                case .running:
+                    continue
+                case .terminal, .ambiguous:
+                    return
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrent(key, generation: capturedGeneration) else { return }
+            maintenanceRuntime.markUpdateRecoveryAmbiguous(
+                record: record,
+                reason: "The exact status could not be read after reconnect: \(error.localizedDescription)")
+        }
+    }
+
     private func loadCurator(scopeKey key: String) async {
         guard stateScopeKey == key else { return }
         let captured = generation
@@ -1601,6 +1778,7 @@ public struct OperatorSettingsSection: View {
         actionName = name
         action = GatewayCommandAction.empty
         var postStarted = false
+        let updateStartedAt = Date()
         do {
             let client = try await targetClient(gatewayID: capture.source.gatewayID)
             // Resolving a retained gateway can suspend. Recheck immediately
@@ -1638,11 +1816,19 @@ public struct OperatorSettingsSection: View {
                 throw AckValidationError(
                     operation: name, detail: "Hermes did not return a positive PID.")
             }
-            maintenanceRuntime.accept(source: capture.source, action: name, pid: pid)
+            if name == "hermes-update" {
+                maintenanceRuntime.acceptUpdate(
+                    source: capture.source, pid: pid,
+                    actionID: started.actionID, startedAt: updateStartedAt)
+            } else {
+                maintenanceRuntime.accept(source: capture.source, action: name, pid: pid)
+            }
             if name == "gateway-restart" || name == "hermes-update" {
                 if isCurrent(key, generation: captured) {
                     action = started
-                    action.message = "Accepted by \(capture.source.label) with PID \(pid). Talaria will not replay it until you explicitly reconcile this receipt."
+                    action.message = name == "hermes-update" && started.actionID == nil
+                        ? "Hermes omitted the durable update identity. Outcome is ambiguous; Talaria will not replay it."
+                        : "Accepted by \(capture.source.label) with PID \(pid). Talaria will not replay it until you explicitly reconcile this receipt."
                 }
                 return
             }
@@ -1667,6 +1853,21 @@ public struct OperatorSettingsSection: View {
     }
 
     private func maintenanceFenceMessage(_ fence: GatewayMaintenanceFence) -> String {
+        if let recovery = fence.updateRecovery {
+            switch recovery {
+            case .recovering:
+                return "Recovering the exact accepted Hermes update on \(fence.source.label). Talaria will not replay it."
+            case .running(let restarted):
+                return restarted
+                    ? "Recovered the exact Hermes update after its host process changed. It is still running."
+                    : "Recovered the exact Hermes update. It is still running."
+            case .terminal(let outcome, let restarted):
+                let prefix = restarted ? "Recovered after the host restarted" : "Recovered"
+                return "\(prefix): Hermes update finished with \(outcome.rawValue)."
+            case .ambiguous(let reason):
+                return "Hermes update recovery is ambiguous. \(reason) Talaria will not replay it."
+            }
+        }
         switch fence.outcome {
         case .pending:
             return "Starting \(fence.action) on \(fence.source.label). Other maintenance actions are blocked."
