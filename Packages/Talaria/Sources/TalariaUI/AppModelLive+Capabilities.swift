@@ -38,6 +38,39 @@ struct CapabilityTarget: Hashable, Sendable {
     }
 }
 
+/// Whether the most recent persisted MCP change reached the exact live agent
+/// that owns this CapabilityState. A persisted configuration is still useful
+/// without a live session, but it must never be presented as if an unrelated
+/// profile or gateway had been reloaded.
+public enum MCPLiveReloadState: Sendable, Equatable {
+    /// No persisted MCP change has requested a live reload yet.
+    case notRequested
+    /// Hermes positively acknowledged `reload.mcp` for the captured session.
+    case reloaded
+    /// The config was persisted, but no exact current session was safe to
+    /// reload (or its acknowledgement could not be confirmed).
+    case takesEffectNextSession
+}
+
+/// A captured, source-qualified live session. This is deliberately narrower
+/// than a profile route: reload.mcp has no profile parameter, so an old or
+/// replacement runtime id would reload the wrong agent snapshot.
+private struct MCPReloadBinding {
+    var route: GatewayBotRoute
+    var botID: String
+    var sessionID: String
+    var chatID: ObjectIdentifier
+    var source: MCPReloadSourceAuthority
+}
+
+/// The connection proof carried across an MCP persistence await. A primary
+/// reconnect changes LiveRuntime's generation; a routed source changes its
+/// pool snapshot. Either invalidates the captured session for a new reload.
+private enum MCPReloadSourceAuthority {
+    case primary(generation: Int, clientID: ObjectIdentifier)
+    case routed(GatewayClientPool.ConnectionSnapshot)
+}
+
 // MARK: - Screen state
 
 /// Observable state for one profile's capabilities. `AppModel`'s stored
@@ -68,6 +101,10 @@ public final class CapabilityState {
     public var hasLoaded = false
     /// Themed one-line explanation of the last failure; nil when all is well.
     public var notice: String?
+    /// Delivery status for the latest persisted MCP change. This remains
+    /// explicit when the configuration is saved but no exact live agent can
+    /// safely receive it.
+    public var mcpReloadState: MCPLiveReloadState = .notRequested
     /// Rows with an action in flight, keyed "<section>:<id>".
     public var busy: Set<String> = []
 
@@ -88,6 +125,7 @@ public final class CapabilityState {
         toolsets.removeAll(); plugins.removeAll(); probes.removeAll()
         supported.removeAll(); busy.removeAll()
         isLoading = false; hasLoaded = false; notice = nil
+        mcpReloadState = .notRequested
     }
 }
 
@@ -157,6 +195,125 @@ extension AppModel {
                                           target: CapabilityTarget) -> Bool {
         capabilityTarget(profileID: profileID) == target
             && CapabilityRuntime.shared.states[target.stateKey] === state
+    }
+
+    /// The exact source/profile a session-bound MCP reload may affect. The
+    /// launch-profile capabilities view deliberately has no profile proof, so
+    /// it can persist configuration but must wait for a later session.
+    private func mcpReloadRoute(for target: CapabilityTarget) -> GatewayBotRoute? {
+        guard let profile = target.profile?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !profile.isEmpty else { return nil }
+        return GatewayBotRoute(gatewayID: target.gatewayID, profile: profile)
+    }
+
+    /// Capture the only runtime session this mutation is allowed to reload.
+    /// The session-to-bot table is part of the proof: a ChatState carrying an
+    /// old sid after reconnect is not enough to authorize a side effect.
+    ///
+    /// `profileID` is retained as the original roster key rather than derived
+    /// from the target. A bare primary key and a qualified retained-source key
+    /// have different ownership semantics, and a gateway role change while an
+    /// action is awaiting must not reinterpret one as the other.
+    private func captureMCPReloadBinding(profileID: String?, target: CapabilityTarget,
+                                         client: GatewayClient) async -> MCPReloadBinding? {
+        guard let route = mcpReloadRoute(for: target),
+              let rawBotID = profileID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawBotID.isEmpty else { return nil }
+        let botID = rawBotID
+        guard let chat = chats[botID],
+              stateRoute(for: botID) == route,
+              let rawSessionID = chat.sessionID,
+              !rawSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              self.botID(forSession: rawSessionID, sourceGatewayID: route.gatewayID) == botID,
+              let source = await captureMCPReloadSourceAuthority(route: route, client: client)
+        else { return nil }
+        return MCPReloadBinding(route: route, botID: botID, sessionID: rawSessionID,
+                                chatID: ObjectIdentifier(chat), source: source)
+    }
+
+    private func captureMCPReloadSourceAuthority(route: GatewayBotRoute,
+                                                  client: GatewayClient) async
+        -> MCPReloadSourceAuthority? {
+        guard mode == .live, profileLifecycleAllowsGatewayTraffic(route.gatewayID) else {
+            return nil
+        }
+        if route.gatewayID == LiveRuntime.shared.gatewayID {
+            guard self.client.map(ObjectIdentifier.init) == ObjectIdentifier(client) else {
+                return nil
+            }
+            return .primary(generation: LiveRuntime.shared.generation,
+                            clientID: ObjectIdentifier(client))
+        }
+        let retained = await ConnectionRegistry.shared.clientPool.retainedConnectionSnapshots()
+        guard let snapshot = retained.first(where: {
+            $0.gatewayID == route.gatewayID
+                && ObjectIdentifier($0.connection.client) == ObjectIdentifier(client)
+        })?.connection else { return nil }
+        return .routed(snapshot)
+    }
+
+    /// Re-check every proof after an await. In particular, a session resume can
+    /// replace only its runtime sid while the persisted MCP write is in flight;
+    /// the replacement must not inherit a reload meant for the old session.
+    private func mcpReloadBindingIsCurrent(_ binding: MCPReloadBinding) async -> Bool {
+        guard mode == .live,
+              profileLifecycleAllowsGatewayTraffic(binding.route.gatewayID),
+              let chat = chats[binding.botID],
+              ObjectIdentifier(chat) == binding.chatID,
+              chat.sessionID == binding.sessionID,
+              stateRoute(for: binding.botID) == binding.route,
+              botID(forSession: binding.sessionID,
+                       sourceGatewayID: binding.route.gatewayID) == binding.botID
+        else { return false }
+
+        switch binding.source {
+        case .primary(let generation, let clientID):
+            return binding.route.gatewayID == LiveRuntime.shared.gatewayID
+                && LiveRuntime.shared.generation == generation
+                && self.client.map(ObjectIdentifier.init) == clientID
+        case .routed(let snapshot):
+            // A source that became primary while this mutation was awaiting
+            // has a different roster/session namespace. It needs a new
+            // explicit capability action rather than inheriting this reload.
+            guard binding.route.gatewayID != LiveRuntime.shared.gatewayID else { return false }
+            return await ConnectionRegistry.shared.clientPool.isCurrent(
+                snapshot, for: binding.route.gatewayID)
+        }
+    }
+
+    /// Reload only after a successful persistence receipt and only while the
+    /// same source/profile/runtime binding remains live. Reload failure does
+    /// not erase that receipt or invite a write retry: the saved config will
+    /// load in the next session.
+    private func reloadMCPAfterPersist(state: CapabilityState, profileID: String?,
+                                       target: CapabilityTarget, client: GatewayClient,
+                                       binding: MCPReloadBinding?) async {
+        guard capabilityStateIsCurrent(state, profileID: profileID, target: target) else { return }
+        guard let binding, await mcpReloadBindingIsCurrent(binding) else {
+            state.mcpReloadState = .takesEffectNextSession
+            state.notice = noticeText("MCP configuration takes effect next session.")
+            return
+        }
+
+        do {
+            _ = try await client.reloadMCP(sessionID: binding.sessionID)
+        } catch {
+            guard capabilityStateIsCurrent(state, profileID: profileID, target: target) else { return }
+            state.mcpReloadState = .takesEffectNextSession
+            state.notice = noticeText(
+                "MCP configuration was saved, but live reload did not confirm. "
+                    + "It takes effect next session. " + Self.shortMessage(error))
+            return
+        }
+
+        guard capabilityStateIsCurrent(state, profileID: profileID, target: target) else { return }
+        guard await mcpReloadBindingIsCurrent(binding) else {
+            state.mcpReloadState = .takesEffectNextSession
+            state.notice = noticeText("MCP configuration takes effect next session.")
+            return
+        }
+        state.mcpReloadState = .reloaded
+        state.notice = nil
     }
 
     /// The profile a Capabilities screen should open on when the caller has no
@@ -478,15 +635,21 @@ extension AppModel {
         }
         guard let (target, client) = await capabilityContext(profileID: profile, state: state)
         else { return }
+        let reloadBinding = await captureMCPReloadBinding(
+            profileID: profile, target: target, client: client)
+        guard capabilityStateIsCurrent(state, profileID: profile, target: target) else { return }
         let key = "catalog:\(entry.name)"
         state.busy.insert(key)
         defer { state.busy.remove(key) }
+        state.mcpReloadState = .notRequested
         do {
             try await client.mcpAddFromCatalog(
                 profile: target.profile, name: entry.name)
             guard capabilityStateIsCurrent(state, profileID: profile,
                                            target: target) else { return }
-            state.notice = nil
+            await reloadMCPAfterPersist(state: state, profileID: profile,
+                                        target: target, client: client,
+                                        binding: reloadBinding)
             await refreshMCP(state: state, profileID: profile,
                              target: target, client: client)
         } catch {
@@ -510,15 +673,23 @@ extension AppModel {
         }
         guard let (target, client) = await capabilityContext(profileID: profile, state: state)
         else { return false }
+        let reloadBinding = await captureMCPReloadBinding(
+            profileID: profile, target: target, client: client)
+        guard capabilityStateIsCurrent(state, profileID: profile, target: target) else {
+            return false
+        }
         state.busy.insert("mcp:add")
         defer { state.busy.remove("mcp:add") }
+        state.mcpReloadState = .notRequested
         do {
             try await client.mcpAddServer(
                 profile: target.profile,
                 name: trimmed, url: url, command: command, args: args)
             guard capabilityStateIsCurrent(state, profileID: profile,
                                            target: target) else { return false }
-            state.notice = nil
+            await reloadMCPAfterPersist(state: state, profileID: profile,
+                                        target: target, client: client,
+                                        binding: reloadBinding)
             await refreshMCP(state: state, profileID: profile,
                              target: target, client: client)
             return true
@@ -539,9 +710,13 @@ extension AppModel {
         }
         guard let (target, client) = await capabilityContext(profileID: profile, state: state)
         else { return }
+        let reloadBinding = await captureMCPReloadBinding(
+            profileID: profile, target: target, client: client)
+        guard capabilityStateIsCurrent(state, profileID: profile, target: target) else { return }
         let key = "mcp:\(server.name)"
         state.busy.insert(key)
         defer { state.busy.remove(key) }
+        state.mcpReloadState = .notRequested
         do {
             try await client.mcpRemoveServer(
                 profile: target.profile, name: server.name)
@@ -549,7 +724,9 @@ extension AppModel {
                                            target: target) else { return }
             state.mcpServers.removeAll { $0.name == server.name }
             state.probes[server.name] = nil
-            state.notice = nil
+            await reloadMCPAfterPersist(state: state, profileID: profile,
+                                        target: target, client: client,
+                                        binding: reloadBinding)
             await refreshMCP(state: state, profileID: profile,
                              target: target, client: client)
         } catch {
@@ -568,16 +745,24 @@ extension AppModel {
         guard mode == .live else { return true }
         guard let (target, client) = await capabilityContext(profileID: profile, state: state)
         else { return false }
+        let reloadBinding = await captureMCPReloadBinding(
+            profileID: profile, target: target, client: client)
+        guard capabilityStateIsCurrent(state, profileID: profile, target: target) else {
+            return false
+        }
         let key = "mcp:\(server.name)"
         state.busy.insert(key)
         defer { state.busy.remove(key) }
+        state.mcpReloadState = .notRequested
         do {
             try await client.mcpSetAPIKey(
                 profile: target.profile,
                 name: server.name, value: value, envVar: envVar)
             guard capabilityStateIsCurrent(state, profileID: profile,
                                            target: target) else { return false }
-            state.notice = nil
+            await reloadMCPAfterPersist(state: state, profileID: profile,
+                                        target: target, client: client,
+                                        binding: reloadBinding)
             await refreshMCP(state: state, profileID: profile,
                              target: target, client: client)
             return true
@@ -629,9 +814,15 @@ extension AppModel {
         else {
             return MCPOAuthStatus(status: "error", errorMessage: state.notice, authURL: nil)
         }
+        let reloadBinding = await captureMCPReloadBinding(
+            profileID: profile, target: target, client: client)
+        guard capabilityStateIsCurrent(state, profileID: profile, target: target) else {
+            return MCPOAuthStatus(status: "error", errorMessage: nil, authURL: nil)
+        }
         let key = "mcp:\(server.name)"
         state.busy.insert(key)
         defer { state.busy.remove(key) }
+        state.mcpReloadState = .notRequested
 
         let deadline = Date().addingTimeInterval(180)
         while Date() < deadline {
@@ -661,6 +852,9 @@ extension AppModel {
             }
             if status.isPending { continue }
             if status.isApproved {
+                await reloadMCPAfterPersist(state: state, profileID: profile,
+                                            target: target, client: client,
+                                            binding: reloadBinding)
                 await refreshMCP(state: state, profileID: profile,
                                  target: target, client: client)
                 do {
@@ -678,7 +872,13 @@ extension AppModel {
                         return MCPOAuthStatus(status: "error", errorMessage: nil,
                                               authURL: nil)
                     }
-                    state.notice = noticeText(Self.shortMessage(error))
+                    // Keep the saved-config delivery state visible. The probe
+                    // is diagnostic only; it must not replace the explicit
+                    // "takes effect next session" explanation with an
+                    // unrelated connection error.
+                    if state.mcpReloadState != .takesEffectNextSession {
+                        state.notice = noticeText(Self.shortMessage(error))
+                    }
                 }
             } else if let message = status.errorMessage {
                 state.notice = noticeText(message)
