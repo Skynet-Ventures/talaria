@@ -15,6 +15,7 @@ public enum ProtocolChecks {
 
     public static func runAll() throws {
         try eventEnvelopeDecoding()
+        try gatewayReplayDecoding()
         try usageParsing()
         try gatewayURLNormalization()
         try webSocketURLBuilding()
@@ -37,7 +38,7 @@ public enum ProtocolChecks {
 
     static func eventEnvelopeDecoding() throws {
         let frame = """
-        {"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"a1b2c3d4",
+        {"jsonrpc":"2.0","method":"event","params":{"type":"approval.request","session_id":"a1b2c3d4","seq":17,
          "payload":{"command":"rm -rf build","description":"Recursive delete","pattern_key":"rm",
                     "allow_permanent":true,"allow_session":true,"request_id":"9f3c",
                     "choices":["once","session","always","deny"]}}}
@@ -45,6 +46,8 @@ public enum ProtocolChecks {
         let value = try JSONDecoder().decode(JSONValue.self, from: Data(frame.utf8))
         let params = value["params"]
         try expect(params?["type"]?.stringValue == "approval.request", "event type parses")
+        try expect(GatewayTransport.admittedSequence(params?["seq"]) == 17,
+                   "event replay sequence parses exactly")
         let event = GatewayEvent(type: params?["type"]?.stringValue ?? "",
                                  sessionID: params?["session_id"]?.stringValue ?? "",
                                  payload: params?["payload"])
@@ -55,6 +58,27 @@ public enum ProtocolChecks {
         try expect(req.sessionID == "a1b2c3d4", "session id from envelope")
         try expect(req.choices == ["once", "session", "always", "deny"], "choices")
         try expect(req.allowPermanent, "allow_permanent")
+    }
+
+    static func gatewayReplayDecoding() throws {
+        let value: JSONValue = [
+            "events": .array([
+                ["type": "message.delta", "session_id": "runtime-1", "seq": 8,
+                 "payload": ["text": "missed"]],
+                ["type": "message.complete", "session_id": "runtime-1", "seq": 9,
+                 "payload": ["text": "missed", "status": "complete"]],
+            ]),
+            "latest_seq": 9, "truncated": false, "count": 2,
+            "epoch": "process-a",
+        ]
+        guard let page = GatewayReplayCodec.decode(
+            value, sessionID: "runtime-1", lastSeen: 7,
+            expectedEpoch: "process-a") else {
+            throw CheckFailure(description: "gateway replay suffix decodes")
+        }
+        try expect(page.events.compactMap(\.sequence) == [8, 9],
+                   "gateway replay preserves wire order")
+        try expect(page.issue == nil, "complete replay is certain")
     }
 
     static func usageParsing() throws {

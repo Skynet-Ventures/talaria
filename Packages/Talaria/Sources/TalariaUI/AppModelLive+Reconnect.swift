@@ -692,7 +692,11 @@ extension AppModel {
         guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
         supervisor.reauthGateway = nil
         let adopted = await adoptReconnectedLink(authority: authority, parked: parked)
-        return adopted ? .success : .stale
+        if adopted { return .success }
+        // The source can remain authoritative while the replacement socket
+        // dies during replay preparation. That is another link failure, not a
+        // stale ownership transition; keep the supervised backoff alive.
+        return await reconnectAuthorityIsCurrent(authority) ? .retryable : .stale
     }
 
     /// Post-dial housekeeping, mirroring AppModelLive's own reattach (that one
@@ -708,7 +712,18 @@ extension AppModel {
         let adoptedGeneration = runtime.generation
         OperatorSettingsRuntime.shared.completeReconnectAttempt()
         runtime.resetSessionState()
-        guard await authority.client.publishCurrentTransportForEvents() else {
+        // Re-establish the retired runtime-id routes solely for replay. Resume
+        // will replace each with the new runtime sid after the missing suffix
+        // has been applied, so snapshots cannot erase the gap first.
+        restoreParkedReplayRoutes()
+        guard let replay = await authority.client.prepareCurrentTransportForEvents() else {
+            isOffline = true
+            ConnectionRegistry.shared.noteState(.offline, forURL: authority.baseURL)
+            return false
+        }
+        guard await applyPreparedGatewayReplay(
+            replay, client: authority.client,
+            sourceGatewayID: authority.gatewayID) else {
             isOffline = true
             ConnectionRegistry.shared.noteState(.offline, forURL: authority.baseURL)
             return false
@@ -753,6 +768,17 @@ extension AppModel {
         }
         ConnectionSupervisor.shared.resetEpisode(for: .cleanOpen)
         return true
+    }
+
+    /// Restore only the retired runtime bindings needed to route the replay
+    /// suffix. `ensureSession` replaces them with fresh runtime ids after the
+    /// suffix has been committed.
+    func restoreParkedReplayRoutes() {
+        let runtime = LiveRuntime.shared
+        for (botID, sessionID) in runtime.reconnectParkedSessionIDs {
+            runtime.sessionToBot[sessionID] = botID
+            chats[botID]?.sessionID = sessionID
+        }
     }
 
     /// Supervised reconnect finishes after the foreground/network callbacks

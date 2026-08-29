@@ -120,6 +120,15 @@ Protocol facts baked into the transport (do not "fix" these):
   owning reconnect supervisor to replace a silent half-open connection.
   Gateways that do not advertise the capability retain the older
   URLSession/WebSocket close-event path.
+- Current gateways also advertise an opaque `replay_epoch`, stamp each
+  session-bound event as `{type, session_id, seq, payload}`, and answer
+  `session.events.since {session_id,last_seen}` with
+  `{events,latest_seq,truncated,count,epoch}`. `seq` is monotonic per runtime
+  session and meaningful only inside the advertised process epoch. Older
+  gateways omit the capability and retain snapshot-only reconnect recovery.
+  The optional `session.events.stats` diagnostics RPC is decoded strictly as
+  `{sessions,events,max_per_session}`; malformed occupancy is never displayed
+  as a reassuring zero.
 - The first frame after accept is the `gateway.ready` event —
   `GatewayTransport.connect()` treats its arrival as connection success and
   captures the skin payload.
@@ -234,13 +243,21 @@ rides). The design leans on the gateway's session-parking behavior:
 2. `GatewayClient.connect()` is the reconnect: refresh OAuth tokens if near
    expiry → mint a fresh WS ticket (single-use, 30 s TTL — never reuse) →
    new transport → wait for `gateway.ready`.
-3. On disconnect the gateway **parks** live sessions for a ~20 s grace window.
+3. Before any resume/list snapshot can overwrite the disconnected interval,
+   `GatewayClient` requests a bounded replay suffix for every retained session
+   cursor. Live frames racing those requests remain parked. A same-epoch,
+   contiguous answer is applied in server array order; overlapping live frames
+   are then released through the same per-session sequence gate, exactly once.
+   Epoch changes clear poisoned cursors. Malformed, failed, bounded, or
+   `truncated` answers are surfaced as uncertain and force snapshot
+   reconciliation rather than claiming the interval was complete.
+4. On disconnect the gateway **parks** live sessions for a ~20 s grace window.
    Reconnecting and calling `session.resume` with the *stored key* inside that
    window reattaches the live in-memory session, replaying `inflight` partial
    assistant text, the queued prompt, and `pending_approval`/`pending_clarify`
    — enough to rebuild the chat mid-turn. After the window, resume still works
    but cold-loads from storage.
-4. Built: an explicit, source-qualified durable composer queue plus the
+5. Built: an explicit, source-qualified durable composer queue plus the
    existing in-memory ordinary-send recovery path. The Queue control persists
    text-only rows keyed by gateway, profile, and stored session;
    `flushComposeQueue()` resumes that exact stored session and drains only when
