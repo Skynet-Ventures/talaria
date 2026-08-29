@@ -553,6 +553,8 @@ public struct ToolCompletePayload: Sendable {
     public var resultText: String?
     public var arguments: ToolPayload?
     public var result: ToolPayload?
+    public var fileDiff: ToolFileDiff?
+    public var deferredFileDiff: ToolFileDiff?
 
     public init(_ v: JSONValue?) {
         toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
@@ -573,6 +575,12 @@ public struct ToolCompletePayload: Sendable {
             from: v?["args"] ?? v?["arguments"] ?? v?["input"])
         result = ToolPayloadCodec.result(from: v?["result"] ?? v?["result_text"])
         resultText = result?.displayText
+        let candidate = ToolDiffCodec.candidate(
+            arguments: v?["args"] ?? v?["arguments"] ?? v?["input"],
+            result: v?["result"] ?? v?["result_text"],
+            inlineDiff: v?["inline_diff"])
+        fileDiff = ToolDiffCodec.isFileEditTool(name) ? candidate : nil
+        deferredFileDiff = fileDiff == nil ? candidate : nil
     }
 }
 

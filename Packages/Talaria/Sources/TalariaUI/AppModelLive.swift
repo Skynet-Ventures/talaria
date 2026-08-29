@@ -1450,6 +1450,13 @@ extension AppModel {
             summary: context.isEmpty ? ToolPayloadCodec.preview(result) : context,
             resultText: result.displayText, gatewayToolID: wireID,
             arguments: arguments, result: result,
+            fileDiff: ToolDiffCodec.extract(toolName: name,
+                arguments: row["args"] ?? row["arguments"] ?? row["input"],
+                result: raw),
+            deferredFileDiff: ToolDiffCodec.isFileEditTool(name) ? nil
+                : ToolDiffCodec.candidate(
+                    arguments: row["args"] ?? row["arguments"] ?? row["input"],
+                    result: raw),
             provenance: hasRaw
                 ? (wireID == nil ? .unmatchedResult : (ambiguousIdentity ? .malformed : .stored))
                 : .projection,
@@ -1465,6 +1472,12 @@ extension AppModel {
         call.context = call.context.isEmpty ? result.context : call.context
         call.arguments = call.arguments ?? result.arguments
         call.result = result.result
+        if ToolDiffCodec.isFileEditTool(call.name),
+           var diff = result.fileDiff ?? result.deferredFileDiff {
+            if diff.path == nil { diff.path = ToolDiffCodec.path(from: call.arguments) }
+            call.fileDiff = diff
+        }
+        call.deferredFileDiff = nil
         call.summary = result.summary ?? call.summary
         call.resultText = result.resultText ?? call.resultText
         call.diagnostic = result.provenance == .projection ? call.diagnostic : result.diagnostic
