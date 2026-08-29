@@ -7,13 +7,24 @@ are not current until they are regenerated against this baseline.
 ## Exact authority
 
 - Hermes repository: <https://github.com/nousresearch/hermes-agent>
-- Hermes commit: `40643cbaf9b767af146694131ffb8f8160f25e1c`
-- Talaria baseline: `04695b91e8fe7cc59a8638e266b5b151c58144ab`
-- Audited cutoff: 2026-08-20 (America/Los_Angeles), exact `40643cba` snapshot
+- Hermes commit: `299c652a66bcc915a2a1e10cd2b648f196ec4bba`
+- Talaria baseline: `f2f97ee4cc0ba973f162b0a3df3011639f5fd7c2`
+- Audited cutoff: 2026-08-29, exact `299c652a` snapshot
 - Machine-readable pin and authority-file hashes:
   [`parity/hermes-upstream.json`](../parity/hermes-upstream.json)
 - Audited contract delta and remaining certification:
-  [`docs/HERMES-CURRENT-AUDIT.md`](HERMES-CURRENT-AUDIT.md)
+  [`docs/HERMES-299C652-AUDIT.md`](HERMES-299C652-AUDIT.md)
+
+The current `02c7ae95..299c652a` audit spans 919 upstream commits and a Bot
+Mode source split from one `plugin.js` into typed modules. Portable deltas are
+bounded: Bot-owned sessions follow current profile configuration, legacy
+session ownership gains an exact-profile backfill endpoint plus read-only
+fallback, guarded model changes share one confirmation handshake, and
+compaction state requires durable terminal evidence. Session/profile routing
+remains exact-source qualified. Catalog, state-database, relay, Electron and
+presentation-system churn stays server-owned or iOS N/A. The exact
+classification and implementation order are in the new audit; older sections
+below remain historical range evidence.
 
 The earlier `b5455fdd..c1e25cad` drift was material: it changed all five
 authority files and added canonical-chat adoption, renamed-friendly mentions,
