@@ -745,13 +745,33 @@ public actor GatewayClient {
 
     /// Drop the parked transport without sending. Used when iOS is about to
     /// suspend the process — any write onto that socket can wedge URLSession.
+    ///
+    /// Clears the live reference first so a concurrent wake dial does not
+    /// wait on the same half-open socket. Close is bounded: a hung actor hop
+    /// on a parked WebSocket must not block `reconnectNow()` forever.
     public func invalidateTransportForBackground() async {
-        if let previous = transport {
-            await previous.close()
-            transport = nil
-        }
+        let previous = transport
+        transport = nil
         eventsTask?.cancel()
         eventsTask = nil
+        guard let previous else { return }
+        await Self.closeTransportBounded(
+            previous, seconds: PostBootReconnectPolicy.backgroundInvalidateTimeout)
+    }
+
+    /// Retire a transport without letting teardown stall the caller.
+    private static func closeTransportBounded(
+        _ transport: GatewayTransport, seconds: TimeInterval
+    ) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await transport.close() }
+            group.addTask {
+                let ns = UInt64(max(seconds, 0) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: ns)
+            }
+            await group.next()
+            group.cancelAll()
+        }
     }
 
     /// Connect (or reconnect). Refreshes OAuth tokens when near expiry and
@@ -802,9 +822,12 @@ public actor GatewayClient {
         // A reconnect must retire the previous receive loop and event stream
         // before a replacement transport is published. Leaving them running
         // makes the old pump finish later and look like a fresh drop.
+        // Bound the close: an unbounded await here is the same stall as a
+        // hung background invalidate (banner stuck before gateway.ready).
         if let previous = transport {
-            await previous.close()
             self.transport = nil
+            await Self.closeTransportBounded(
+                previous, seconds: PostBootReconnectPolicy.backgroundInvalidateTimeout)
         }
         eventsTask?.cancel()
         eventsTask = nil

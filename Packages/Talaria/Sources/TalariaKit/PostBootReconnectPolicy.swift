@@ -43,6 +43,11 @@ public enum PostBootReconnectPolicy {
     /// like a 20s freeze when the phone cannot complete TCP to Mini.
     /// A shorter ready wait makes each try visible and the next try start.
     public static let redialReadyTimeout: TimeInterval = 5
+    /// Resign closes the parked socket off the wake path. Device 8cea17a
+    /// stuck the banner on `redial.scheduled after-background` because the
+    /// next dial awaited that teardown forever and never reached
+    /// `connect.started`. Cap the wait so redial fails fast into try N.
+    public static let backgroundInvalidateTimeout: TimeInterval = 0.4
 
     /// Full-jitter delay for an indefinitely available reconnect attempt.
     /// Negative attempts safely normalize to the first retry; very large

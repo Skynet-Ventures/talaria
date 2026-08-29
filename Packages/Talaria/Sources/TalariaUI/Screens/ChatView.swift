@@ -150,11 +150,24 @@ public struct ChatView: View {
         model.mode == .demo ? (DemoData.quickReplies[botID] ?? []) : []
     }
 
+    /// Canonical open is in flight and the transcript is still empty — show
+    /// a light loading surface instead of a blank chat for ~3s (device
+    /// 8cea17a after the fat-resume wait was removed).
+    private var isOpeningChat: Bool {
+        model.mode == .live
+            && messages.isEmpty
+            && (chat?.isOpeningCanonicalChat == true)
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             header
             ZStack(alignment: .bottomTrailing) {
-                messageList
+                if isOpeningChat {
+                    chatOpeningPlaceholder
+                } else {
+                    messageList
+                }
                 if showsJumpToLatest {
                     jumpToLatestButton
                         .padding(.trailing, 16)
@@ -356,6 +369,31 @@ public struct ChatView: View {
     }
 
     // MARK: - Message list
+
+    /// Inline placeholder while `enterCanonicalChat` hydrates. Not a modal —
+    /// composer and header stay usable; only the blank transcript is filled.
+    private var chatOpeningPlaceholder: some View {
+        VStack(spacing: 12) {
+            Spacer(minLength: 0)
+            ProgressView()
+                .tint(theme.accent)
+            Text(chatOpeningLabel)
+                .font(theme.body(13, weight: .medium))
+                .foregroundStyle(theme.sub)
+                .accessibilityLabel(Text(chatOpeningLabel))
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+    }
+
+    private var chatOpeningLabel: String {
+        switch theme.id {
+        case .soft: "Loading chat…"
+        case .control: "LOADING CHAT"
+        case .ink: "Loading chat"
+        }
+    }
 
     private var messageList: some View {
         ScrollViewReader { proxy in

@@ -44,6 +44,9 @@ public final class ChatState {
     /// REST `offset` for the next older `order=latest` page.
     public var transcriptOlderOffset: Int = 0
     public var isLoadingOlderTranscript: Bool = false
+    /// `enterCanonicalChat` is hydrating an empty transcript. ChatView shows
+    /// a light loading surface instead of a blank list.
+    public var isOpeningCanonicalChat: Bool = false
 
     public init(messages: [ChatMessage] = []) {
         self.messages = messages

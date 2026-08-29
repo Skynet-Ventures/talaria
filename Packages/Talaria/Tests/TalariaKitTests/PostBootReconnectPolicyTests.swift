@@ -69,6 +69,11 @@ final class PostBootReconnectPolicyTests: XCTestCase {
     func testRedialReadyTimeoutIsShorterThanTheConnectBound() {
         XCTAssertEqual(PostBootReconnectPolicy.redialReadyTimeout, 5)
         XCTAssertLessThan(PostBootReconnectPolicy.redialReadyTimeout, 15)
+        XCTAssertEqual(PostBootReconnectPolicy.backgroundInvalidateTimeout, 0.4)
+        XCTAssertLessThan(
+            PostBootReconnectPolicy.backgroundInvalidateTimeout,
+            PostBootReconnectPolicy.redialReadyTimeout)
+
     }
 
     func testGatewayClientStoresRepairedHermesOrigin() async {

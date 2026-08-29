@@ -142,7 +142,12 @@ public actor GatewayTransport {
         task?.cancel(with: .goingAway, reason: nil)
         finish(reason: "closed")
         if ownsSession {
-            session.finishTasksAndInvalidate()
+            // `finishTasksAndInvalidate` keeps the session alive until
+            // outstanding tasks end. A parked half-open WebSocket receive
+            // can delay that indefinitely and wedge the next wake dial that
+            // awaits close(). Cancel immediately so teardown cannot stall
+            // `redial.scheduled → connect.started`.
+            session.invalidateAndCancel()
         }
     }
 

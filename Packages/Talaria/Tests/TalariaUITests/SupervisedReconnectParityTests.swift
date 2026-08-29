@@ -613,6 +613,77 @@ final class SupervisedReconnectParityTests: XCTestCase {
         XCTAssertTrue(fixture.model.lastReconnectStep.contains("connect.failed"))
     }
 
+    /// Device 8cea17a: banner stuck on `redial.scheduled after-background`
+    /// because dial awaited a hung resign teardown and never reached
+    /// `connect.started`. Wake must cancel/bound that wait and dial.
+    @MainActor
+    func testHungBackgroundInvalidateDoesNotBlockAfterBackgroundRedial() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        var hung: CheckedContinuation<Void, Never>?
+        supervisor.backgroundInvalidateTask = Task { @MainActor in
+            await withCheckedContinuation { hung = $0 }
+        }
+        supervisor.suspendedForBackground = true
+        fixture.model.isOffline = true
+
+        var dialCount = 0
+        supervisor.dial = { _ in
+            dialCount += 1
+            throw URLError(.cannotConnectToHost)
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil {
+            fixture.model.reconnectTraceForTesting.contains("connect.started")
+        }
+        await waitUntil { dialCount > 0 }
+        await LiveRuntime.shared.reconnectTask?.value
+
+        XCTAssertGreaterThanOrEqual(dialCount, 1)
+        let steps = fixture.model.reconnectTraceForTesting
+        XCTAssertTrue(steps.contains("redial.scheduled"), steps.joined(separator: ","))
+        XCTAssertTrue(steps.contains("connect.started"), steps.joined(separator: ","))
+        XCTAssertTrue(steps.contains("connect.failed"), steps.joined(separator: ","))
+        XCTAssertTrue(
+            fixture.model.lastReconnectStep.contains("connect.failed"),
+            fixture.model.lastReconnectStep)
+        hung?.resume()
+    }
+
+    /// Dual wake used to clear `suspendedForBackground` inside the first
+    /// Task, then cancel it before `reconnectNow` while the second wake
+    /// took already-active and skipped dial. Synchronous edge capture
+    /// keeps after-background redial alive across coalesced notifications.
+    @MainActor
+    func testCoalescedWakeKeepsAfterBackgroundRedial() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        supervisor.suspendedForBackground = true
+        fixture.model.isOffline = true
+
+        var dialCount = 0
+        supervisor.dial = { _ in
+            dialCount += 1
+            throw URLError(.cannotConnectToHost)
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { dialCount > 0 }
+        await LiveRuntime.shared.reconnectTask?.value
+
+        XCTAssertGreaterThanOrEqual(dialCount, 1)
+        XCTAssertTrue(
+            fixture.model.reconnectTraceForTesting.contains("redial.scheduled"),
+            fixture.model.reconnectTraceForTesting.joined(separator: ","))
+        XCTAssertTrue(
+            fixture.model.reconnectTraceForTesting.contains("connect.started"),
+            fixture.model.reconnectTraceForTesting.joined(separator: ","))
+    }
+
     @MainActor
     func testRedialBannerNamesTheTryWhileConnectIsInFlight() async throws {
         let fixture = try fixture()

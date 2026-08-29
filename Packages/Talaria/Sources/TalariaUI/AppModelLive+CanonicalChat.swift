@@ -410,7 +410,18 @@ extension AppModel {
         if runtime.opens[botID] != nil { return }
         kickOpenChatLatestPageIfPossible(botID: botID)
 
+        let openingChat = chat(for: botID)
+        let showOpeningPlaceholder = openingChat.messages.isEmpty
+        if showOpeningPlaceholder {
+            openingChat.isOpeningCanonicalChat = true
+        }
+
         let task = Task { @MainActor [weak self] in
+            defer {
+                if showOpeningPlaceholder {
+                    self?.chat(for: botID).isOpeningCanonicalChat = false
+                }
+            }
             guard let self else { return }
             // A send that beat the tap owns an attach. Let it settle before
             // touching the binding, so the rebind below cannot be undone by a
