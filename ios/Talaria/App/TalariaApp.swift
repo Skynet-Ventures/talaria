@@ -57,7 +57,9 @@ struct TalariaApp: App {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             // Refresh saved-gateway health whenever we come to the front so
-            // the network chip and Connections rows are honest.
+            // the network chip and Connections rows are honest. Socket
+            // reconnect is owned by AppModel's resign/active handlers — a
+            // REST probe must not run before the replacement link is up.
             Task { await ConnectionRegistry.shared.probeAll() }
         }
     }
@@ -71,6 +73,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func applicationDidBecomeActive(_ application: UIApplication) {
         NotificationCenter.default.post(
             name: .talariaApplicationDidBecomeActive, object: application)
+    }
+
+    func applicationWillResignActive(_ application: UIApplication) {
+        NotificationCenter.default.post(
+            name: .talariaApplicationWillResignActive, object: application)
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        NotificationCenter.default.post(
+            name: .talariaApplicationWillResignActive, object: application)
     }
 
     /// APNs registration succeeded — hand the token to PushCoordinator, which

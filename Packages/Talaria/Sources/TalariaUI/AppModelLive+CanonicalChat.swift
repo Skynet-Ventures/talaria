@@ -243,9 +243,13 @@ enum TranscriptHydrationMerge {
                       current: [ChatMessage], clearWhenEmpty: Bool,
                       protectedIDs: Set<UUID> = []) -> [ChatMessage] {
         guard !history.isEmpty else {
-            // Clearing is safe only when nothing changed during the fallback.
-            // A user send, assistant delta, or error that landed while REST
-            // was suspended is newer than an empty/failed response.
+            // An empty resume/REST page must never replace a populated local
+            // transcript. Failed reconnects and flaky history fetches have
+            // blanked the open chat this way. `clearWhenEmpty` still applies
+            // to an already-empty (or system-only) local chat when rebinding.
+            if current.contains(where: { $0.author != .system }) {
+                return current
+            }
             if clearWhenEmpty, current == baseline,
                current.allSatisfy({ $0.author == .system }) {
                 return []

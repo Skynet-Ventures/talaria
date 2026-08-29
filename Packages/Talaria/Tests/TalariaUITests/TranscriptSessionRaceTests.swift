@@ -1381,6 +1381,47 @@ final class TranscriptSessionRaceTests: XCTestCase {
         XCTAssertEqual(chat.messages[1].rowID, 11)
     }
 
+    @MainActor
+    func testHydrateTranscriptEmptyResumeAndEmptyRESTKeepLocalRows() async throws {
+        let chat = ChatState(messages: [
+            ChatMessage(author: .user, text: "keep"),
+            ChatMessage(author: .bot, text: "me"),
+        ])
+
+        try await AppModel.hydrateTranscript(
+            chat: chat,
+            resumeMessages: [],
+            clearWhenEmpty: true,
+            fallback: { ["messages": []] },
+            accepts: { true })
+
+        XCTAssertEqual(chat.messages.map(\.text), ["keep", "me"])
+    }
+
+    func testEmptyGatewayPageDoesNotClobberPopulatedLocalTranscript() {
+        let current = [
+            ChatMessage(author: .user, text: "still on the phone"),
+            ChatMessage(author: .bot, text: "gateway still has this"),
+        ]
+
+        let cleared = TranscriptHydrationMerge.merge(
+            history: [], baseline: current, current: current, clearWhenEmpty: true)
+        let raced = TranscriptHydrationMerge.merge(
+            history: [], baseline: current, current: current, clearWhenEmpty: false)
+
+        XCTAssertEqual(cleared.map(\.text), current.map(\.text))
+        XCTAssertEqual(raced.map(\.text), current.map(\.text))
+    }
+
+    func testEmptyGatewayPageMayClearSystemOnlyChatWhenRebinding() {
+        let systemOnly = [ChatMessage(author: .system, text: "signed out")]
+
+        let merged = TranscriptHydrationMerge.merge(
+            history: [], baseline: systemOnly, current: systemOnly, clearWhenEmpty: true)
+
+        XCTAssertTrue(merged.isEmpty)
+    }
+
     func testHydrationNeverCollapsesAssistantAcrossANewerUserTurn() {
         let history = [ChatMessage(author: .bot, text: "Hel", rowID: 4)]
         let current = [

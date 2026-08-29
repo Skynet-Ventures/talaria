@@ -4,14 +4,16 @@ import SwiftUI
 import TalariaKit
 import TalariaTheme
 
-/// UIKit's application-active callback is the reliable wake edge on iOS.
-/// SwiftUI's `scenePhase` remains useful, but production devices have shown it
-/// can miss a lock-screen return while the mounted root view survives. The
-/// app target posts this notification from `UIApplicationDelegate` and the
-/// root funnels both lifecycle sources through the same coalesced validation.
+/// UIKit's resign/active callbacks are the reliable iOS lifecycle edges.
+/// SwiftUI's `scenePhase` remains useful, but production devices have shown
+/// it can miss a lock-screen return while the mounted root view survives.
+/// The app target posts these from `UIApplicationDelegate` and the root
+/// funnels both sources through the same coalesced handlers.
 public extension Notification.Name {
     static let talariaApplicationDidBecomeActive = Notification.Name(
         "bot.talaria.applicationDidBecomeActive")
+    static let talariaApplicationWillResignActive = Notification.Name(
+        "bot.talaria.applicationWillResignActive")
 }
 
 // Connection supervision for every post-boot socket-loss path.
@@ -27,12 +29,13 @@ public extension Notification.Name {
 //      #10). A missing credential for the connected base URL is therefore an
 //      exact, side-effect-free signal that reconnect gave up on auth — the
 //      supervisor polls for it and raises ReauthBanner.
-//   2. Foreground recovery. iOS suspends the process; a socket that died in the
-//      background is often still `.ready` until the first write. A scenePhase
-//      hook can also miss lock-screen return. applicationDidBecomeActive()
-//      therefore takes the UIKit wake as well, proves the exact socket with a
-//      bounded `gateway.ping`, and enters supervised reconnect immediately
-//      instead of trusting transport state or waiting out backoff.
+//   2. Foreground recovery. iOS parks the process; writing a ping onto the
+//      parked URLSessionWebSocket wedges `URLSession` and a later dial on
+//      that same session never comes back. Device evidence (PR #108 f3ad5b6):
+//      the ping-then-reconnect path left the link dead and a hung
+//      `isReconnecting` dial made `reconnectNow()` a no-op. The repair drops
+//      the socket on resign (no RPC), hard-redials on the next active edge
+//      with a fresh URLSession, and lets a wake supersede a hung attempt.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -111,8 +114,15 @@ final class ConnectionSupervisor {
     /// App-lifetime watch loop; nil until the first start request.
     @ObservationIgnored var watchTask: Task<Void, Never>?
     @ObservationIgnored var reconnectTaskToken: UUID?
-    /// Single-flight foreground socket validation. UIKit and SwiftUI publish
-    /// the same wake a few milliseconds apart; they must share one ping.
+    /// Incremented by every user-visible wake/manual reconnect so a hung
+    /// background dial cannot keep `isReconnecting` or publish after it
+    /// is superseded.
+    @ObservationIgnored var reconnectGeneration = 0
+    /// True after the process left the foreground. The next active edge
+    /// always hard-redials; it must not write to the parked socket.
+    @ObservationIgnored var suspendedForBackground = false
+    /// Single-flight foreground wake. UIKit and SwiftUI publish the same
+    /// edge a few milliseconds apart.
     @ObservationIgnored var foregroundValidationTask: Task<Void, Never>?
     @ObservationIgnored var foregroundValidationToken: UUID?
     @ObservationIgnored var episodeSource: EpisodeSource?
@@ -149,6 +159,8 @@ final class ConnectionSupervisor {
         dial = { client in try await client.connect() }
         switchConnect = nil
         reconnectTaskToken = nil
+        reconnectGeneration = 0
+        suspendedForBackground = false
         foregroundValidationTask?.cancel()
         foregroundValidationTask = nil
         foregroundValidationToken = nil
@@ -329,6 +341,8 @@ extension AppModel {
         let runtime = LiveRuntime.shared
         guard mode == .live, client != nil, let base = runtime.baseURL else { return }
 
+        if supervisor.suspendedForBackground { return }
+
         if !isOffline {
             supervisor.resetEpisode(for: .cleanOpen)
             // Only the live gateway's own banner is cleared here: a re-auth
@@ -356,87 +370,92 @@ extension AppModel {
 
     // MARK: Foreground / manual entry points
 
-    /// Scene-phase / UIKit wake hook. Validates the exact current socket
-    /// before waiting on any saved-gateway HTTP diagnostics, then either
-    /// enters supervised reconnect immediately or refreshes a healthy source.
+    /// UIKit / scene-phase resign. Drop the live socket without writing to it.
+    /// A ping or RPC on a parked URLSessionWebSocket wedges the session and
+    /// the next dial never returns — that is the device-verified failure of
+    /// the ping-first wake path.
+    public func applicationWillResignActive() {
+        let supervisor = ConnectionSupervisor.shared
+        guard mode == .live, client != nil else { return }
+        supervisor.suspendedForBackground = true
+        // A mid-background dial is what made the first wake a no-op
+        // (`isReconnecting` stayed true, `reconnectNow` returned). Cancel it
+        // and bump generation so a hung attempt cannot publish after we
+        // drop the socket. Do not start a replacement dial here — iOS is
+        // about to park the process.
+        let runtime = LiveRuntime.shared
+        runtime.reconnectTask?.cancel()
+        runtime.reconnectTask = nil
+        supervisor.reconnectTaskToken = nil
+        supervisor.reconnectGeneration &+= 1
+        supervisor.isReconnecting = false
+        supervisor.foregroundValidationTask?.cancel()
+        supervisor.foregroundValidationTask = nil
+        supervisor.foregroundValidationToken = nil
+        Task { @MainActor [weak self] in
+            await self?.invalidateLiveTransportForBackground()
+        }
+    }
+
+    /// Close the parked transport and mark the live row offline. Session
+    /// bindings and transcripts stay put — a resign must not hydrate, rebind,
+    /// or empty the open chat.
+    func invalidateLiveTransportForBackground() async {
+        guard mode == .live, let client else { return }
+        await client.invalidateTransportForBackground()
+        isOffline = true
+        if let base = LiveRuntime.shared.baseURL {
+            ConnectionRegistry.shared.noteState(.offline, forURL: base)
+            connections = ConnectionRegistry.shared.rows
+        }
+    }
+
+    /// Scene-phase / UIKit wake hook. After the process was parked, always
+    /// hard-redial. Never probe the old socket, and never wait on HTTP
+    /// diagnostics or roster refresh before the replacement link is adopted.
     public func applicationDidBecomeActive() {
         startLinkSupervision()
         let supervisor = ConnectionSupervisor.shared
-        // UIKit and SwiftUI normally publish the same foreground edge a few
-        // milliseconds apart. Do not cancel a liveness RPC already crossing
-        // the half-open transport: cancellation can retire its waiter while a
-        // replacement request is still queued behind that same dead socket.
-        // The check is bounded to three seconds, so one exact-source
-        // single-flight is both faster and safer than cancel-and-restart.
         guard supervisor.foregroundValidationTask == nil else { return }
         let token = UUID()
         supervisor.foregroundValidationToken = token
         supervisor.foregroundValidationTask = Task { @MainActor [weak self] in
-            guard !Task.isCancelled, let self else {
-                self?.clearForegroundValidation(ifOwned: token)
+            defer { self?.clearForegroundValidation(ifOwned: token) }
+            guard !Task.isCancelled, let self else { return }
+
+            let wasBackgrounded = supervisor.suspendedForBackground
+            supervisor.suspendedForBackground = false
+
+            guard mode == .live, client != nil,
+                  currentReconnectAuthority() != nil else {
+                await refreshConnectionHealth()
                 return
             }
-            let refreshSource: (client: GatewayClient, source: ConnectionSupervisor.EpisodeSource)?
-            if mode == .live, let client,
-               let capturedSource = currentReconnectAuthority()?.episodeSource {
-                let liveness = await client.validateForegroundLiveness()
-                guard !Task.isCancelled,
-                      currentReconnectAuthority()?.episodeSource == capturedSource else {
-                    self.clearForegroundValidation(ifOwned: token)
-                    return
-                }
-                switch liveness {
-                case .reconnectRequired:
-                    // Release the single-flight before dialling so a later
-                    // lock/unlock is not discarded while reconnect runs.
-                    self.clearForegroundValidation(ifOwned: token)
-                    reconnectNow()
-                    return
-                case .trafficFenced:
-                    // Profile-lifecycle authority intentionally rejected local
-                    // traffic. Do not mistake that for a dead socket.
-                    self.clearForegroundValidation(ifOwned: token)
-                    return
-                case .healthy:
-                    refreshSource = (client, capturedSource)
-                }
-            } else {
-                refreshSource = nil
-            }
-            // End the lease after the exact socket verdict so a distinct later
-            // wake can ping again while HTTP/roster/room refresh is still
-            // running on this one.
-            self.clearForegroundValidation(ifOwned: token)
 
-            if let refreshSource {
-                // Only ask the socket for liveness/session snapshots after the
-                // explicit ping proved it survived suspension.
-                foregroundReseed()
-                await refreshConnectionHealth()
-                guard mode == .live, self.client === refreshSource.client,
-                      currentReconnectAuthority()?.episodeSource == refreshSource.source else {
-                    return
+            if wasBackgrounded {
+                // Resign already dropped the socket. Hard-redial; do not
+                // write onto whatever transport is still installed.
+                reconnectNow()
+                return
+            }
+
+            guard let client, await client.isConnected else {
+                reconnectNow()
+                return
+            }
+            if isOffline {
+                isOffline = false
+                if let base = LiveRuntime.shared.baseURL {
+                    ConnectionRegistry.shared.noteState(.connected, forURL: base)
+                    connections = ConnectionRegistry.shared.rows
                 }
-                guard await refreshSource.client.isConnected else {
-                    reconnectNow()
-                    return
-                }
-                if isOffline {
-                    // The socket outlived the flag (a send failed, then the link
-                    // recovered): the transport is the authority.
-                    isOffline = false
-                    if let base = LiveRuntime.shared.baseURL {
-                        ConnectionRegistry.shared.noteState(.connected, forURL: base)
-                        connections = ConnectionRegistry.shared.rows
-                    }
-                    await flushComposeQueue()
-                }
-                try? await refreshRoster()
-                if let gatewayID = LiveRuntime.shared.gatewayID {
-                    await pullAndReseedRoomProjection(gatewayID: gatewayID)
-                }
-            } else {
-                await refreshConnectionHealth()
+                await flushComposeQueue()
+            }
+            foregroundReseed()
+            await refreshConnectionHealth()
+            try? await refreshRoster()
+            if let gatewayID = LiveRuntime.shared.gatewayID {
+                await pullAndReseedRoomProjection(gatewayID: gatewayID)
             }
         }
     }
@@ -448,22 +467,27 @@ extension AppModel {
         supervisor.foregroundValidationToken = nil
     }
 
-    /// "Reconnect now" — abandons any backoff sleep and dials at once.
+    /// "Reconnect now" — abandons any backoff sleep or hung dial and starts
+    /// a fresh attempt. A wake must be able to supersede a background dial
+    /// that is still sitting in `isReconnecting`.
     public func reconnectNow() {
         let supervisor = ConnectionSupervisor.shared
-        guard !supervisor.isReconnecting else { return }
         let source = currentReconnectAuthority()?.episodeSource
         let runtime = LiveRuntime.shared
         runtime.reconnectTask?.cancel()
         runtime.reconnectTask = nil
         supervisor.reconnectTaskToken = nil
+        supervisor.reconnectGeneration &+= 1
+        supervisor.isReconnecting = false
         supervisor.resetEpisode(for: .manualWake, source: source)
 
+        let generation = supervisor.reconnectGeneration
         let token = UUID()
         supervisor.reconnectTaskToken = token
         runtime.reconnectTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let outcome = await self.attemptReconnectOutcome(expected: source)
+            let outcome = await self.attemptReconnectOutcome(
+                expected: source, generation: generation)
             guard supervisor.reconnectTaskToken == token else { return }
             supervisor.reconnectTaskToken = nil
             runtime.reconnectTask = nil
@@ -631,11 +655,25 @@ extension AppModel {
     }
 
     func attemptReconnectOutcome(
-        expected source: ConnectionSupervisor.EpisodeSource? = nil
+        expected source: ConnectionSupervisor.EpisodeSource? = nil,
+        generation claimedGeneration: Int? = nil
     ) async -> SupervisedReconnectOutcome {
         let runtime = LiveRuntime.shared
         let supervisor = ConnectionSupervisor.shared
+        // Capture the caller's generation BEFORE any await. A wake that
+        // increments `reconnectGeneration` while this attempt is already
+        // past the first guard used to steal the new generation, set
+        // `isReconnecting`, and make the replacement dial return `.stale`.
+        let attemptGeneration = claimedGeneration ?? supervisor.reconnectGeneration
+        guard supervisor.reconnectGeneration == attemptGeneration else { return .stale }
         guard !supervisor.isReconnecting else { return .stale }
+        supervisor.isReconnecting = true
+        defer {
+            if supervisor.reconnectGeneration == attemptGeneration {
+                supervisor.isReconnecting = false
+            }
+        }
+
         guard let authority = currentReconnectAuthority() else {
             // Missing credential is re-auth only when the remaining source
             // coordinates still describe the exact live row.
@@ -650,39 +688,28 @@ extension AppModel {
             return .stale
         }
         if let source, source != authority.episodeSource { return .stale }
+        guard supervisor.reconnectGeneration == attemptGeneration else { return .stale }
         guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
+        guard supervisor.reconnectGeneration == attemptGeneration else { return .stale }
 
         // Fence Operator status before the first await below. This generation
         // remains in force on every exact-source failure path.
         OperatorSettingsRuntime.shared.beginReconnectAttempt()
 
-        supervisor.isReconnecting = true
-        defer { supervisor.isReconnecting = false }
-
-        // Every cached runtime sid dies with the old socket; drop them before
-        // dialing so nothing can submit into a session that no longer exists.
-        let primaryChats = chats.filter { GatewayBotRoute(qualifiedID: $0.key) == nil }
-        let parked = primaryChats.filter { $0.value.storedSessionID != nil }.map(\.key)
-        for (botID, chat) in primaryChats {
-            if let sessionID = chat.sessionID, !sessionID.isEmpty {
-                runtime.reconnectParkedSessionIDs[botID] = sessionID
-            }
-            chat.sessionID = nil
-            chat.isTyping = false
-        }
-
         let registry = ConnectionRegistry.shared
         do {
             try await supervisor.dial(authority.client)
         } catch AuthError.sessionExpired {
-            guard reconnectSessionExpiryIsCurrent(authority) else { return .stale }
+            guard supervisor.reconnectGeneration == attemptGeneration,
+                  reconnectSessionExpiryIsCurrent(authority) else { return .stale }
             supervisor.reauthGateway = authority.baseURL
             supervisor.note(error: AuthError.sessionExpired,
                             forGatewayID: authority.gatewayID)
             isOffline = true
             return .reauth
         } catch {
-            guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
+            guard supervisor.reconnectGeneration == attemptGeneration,
+                  await reconnectAuthorityIsCurrent(authority) else { return .stale }
             isOffline = true
             registry.noteState(.offline, forURL: authority.baseURL)
             supervisor.note(error: error, forGatewayID: authority.gatewayID)
@@ -690,10 +717,30 @@ extension AppModel {
             return .retryable
         }
 
-        guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
+        guard supervisor.reconnectGeneration == attemptGeneration,
+              await reconnectAuthorityIsCurrent(authority) else { return .stale }
+        // Park runtime sids only after the replacement socket is up. Doing
+        // this before a dial that then fails left the open chat unbound and
+        // invited a hydrate to replace its transcript with an empty page.
+        let parked = parkPrimarySessionsForReconnect()
         supervisor.reauthGateway = nil
         let adopted = await adoptReconnectedLink(authority: authority, parked: parked)
         return adopted ? .success : .stale
+    }
+
+    /// Remember durable chats and drop only the dead runtime sid. Transcripts
+    /// stay in memory — `ensureSession(hydrate: false)` rebinds them.
+    func parkPrimarySessionsForReconnect() -> [String] {
+        let primaryChats = chats.filter { GatewayBotRoute(qualifiedID: $0.key) == nil }
+        let parked = primaryChats.filter { $0.value.storedSessionID != nil }.map(\.key)
+        for (botID, chat) in primaryChats {
+            if let sessionID = chat.sessionID, !sessionID.isEmpty {
+                LiveRuntime.shared.reconnectParkedSessionIDs[botID] = sessionID
+            }
+            chat.sessionID = nil
+            chat.isTyping = false
+        }
+        return parked
     }
 
     /// Post-dial housekeeping, mirroring AppModelLive's own reattach (that one
@@ -774,6 +821,9 @@ extension AppModel {
                 ConnectionRegistry.shared.noteState(.offline, forURL: base)
                 self.connections = ConnectionRegistry.shared.rows
             }
+            // Resign already owns the next redial. Starting one here is
+            // how a hung `isReconnecting` dial survived into the next wake.
+            guard !ConnectionSupervisor.shared.suspendedForBackground else { return }
             self.scheduleSupervisedReconnect()
         }
     }
@@ -786,7 +836,8 @@ extension AppModel {
     ) {
         let runtime = LiveRuntime.shared
         let supervisor = ConnectionSupervisor.shared
-        guard runtime.reconnectTask == nil, !supervisor.isReconnecting,
+        guard !supervisor.suspendedForBackground,
+              runtime.reconnectTask == nil, !supervisor.isReconnecting,
               let currentSource = currentReconnectAuthority()?.episodeSource else { return }
         if let expectedSource, expectedSource != currentSource { return }
         if supervisor.episodeSource != currentSource {
@@ -814,7 +865,9 @@ extension AppModel {
                     return
                 }
                 self.publishRecoveryEscalationIfNeeded(source: currentSource)
-                let outcome = await self.attemptReconnectOutcome(expected: currentSource)
+                let outcome = await self.attemptReconnectOutcome(
+                    expected: currentSource,
+                    generation: supervisor.reconnectGeneration)
                 guard supervisor.reconnectTaskToken == token else { return }
                 switch outcome {
                 case .success:
@@ -863,9 +916,12 @@ extension AppModel {
         runtime.reconnectTask?.cancel()
         runtime.reconnectTask = nil
         ConnectionSupervisor.shared.reconnectTaskToken = nil
+        ConnectionSupervisor.shared.reconnectGeneration &+= 1
+        ConnectionSupervisor.shared.isReconnecting = false
 
         if runtime.baseURL?.absoluteString == baseURL.absoluteString, client != nil {
-            let outcome = await attemptReconnectOutcome()
+            let outcome = await attemptReconnectOutcome(
+                generation: ConnectionSupervisor.shared.reconnectGeneration)
             if outcome == .retryable {
                 scheduleSupervisedReconnect()
             }

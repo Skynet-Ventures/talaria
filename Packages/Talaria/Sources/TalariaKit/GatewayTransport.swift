@@ -46,6 +46,7 @@ public actor GatewayTransport {
     }
     private let url: URL
     private let session: URLSession
+    private let ownsSession: Bool
     private var task: URLSessionWebSocketTask?
     private var nextID = 1
     private var pending: [String: CheckedContinuation<SequencedResponse, Error>] = [:]
@@ -57,9 +58,22 @@ public actor GatewayTransport {
     public nonisolated let events: AsyncStream<GatewayEvent>
     private nonisolated let eventsCont: AsyncStream<GatewayEvent>.Continuation
 
-    public init(url: URL, session: URLSession = .shared) {
+    public init(url: URL, session: URLSession? = nil) {
         self.url = url
-        self.session = session
+        if let session {
+            self.session = session
+            self.ownsSession = false
+        } else {
+            // A dedicated ephemeral session per socket. Writing onto a
+            // half-open `URLSession.shared` WebSocket after iOS parks the
+            // process wedges the shared session; the next dial never returns.
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.waitsForConnectivity = false
+            configuration.timeoutIntervalForRequest = 15
+            configuration.timeoutIntervalForResource = 30
+            self.session = URLSession(configuration: configuration)
+            self.ownsSession = true
+        }
         var cont: AsyncStream<GatewayEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .unbounded) { cont = $0 }
         self.eventsCont = cont
@@ -96,8 +110,11 @@ public actor GatewayTransport {
     }
 
     public func close() {
-        task?.cancel(with: .normalClosure, reason: nil)
+        task?.cancel(with: .goingAway, reason: nil)
         finish(reason: "closed")
+        if ownsSession {
+            session.finishTasksAndInvalidate()
+        }
     }
 
     /// Send a JSON-RPC request and await its response (correlated by id;

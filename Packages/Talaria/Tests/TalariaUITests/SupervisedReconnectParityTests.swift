@@ -3,25 +3,6 @@ import XCTest
 @testable import TalariaKit
 @testable import TalariaUI
 
-private actor ForegroundPingLatch {
-    private(set) var count = 0
-    private var firstWaiter: CheckedContinuation<Void, Never>?
-
-    func enter() async {
-        count += 1
-        if count == 1 {
-            await withCheckedContinuation { firstWaiter = $0 }
-        }
-    }
-
-    var isWaiting: Bool { firstWaiter != nil }
-
-    func release() {
-        firstWaiter?.resume()
-        firstWaiter = nil
-    }
-}
-
 final class SupervisedReconnectParityTests: XCTestCase {
     @MainActor
     private struct Fixture {
@@ -395,43 +376,62 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
-    func testDuplicateUIKitAndSceneWakeShareOneHalfOpenValidation() async throws {
+    func testFailedReconnectLeavesPopulatedTranscriptAndRuntimeSid() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let botID = "worker"
+        let chat = fixture.model.chat(for: botID)
+        chat.sessionID = "live-sid"
+        chat.storedSessionID = "durable-bot-chat"
+        chat.messages = [
+            ChatMessage(author: .user, text: "still on screen"),
+            ChatMessage(author: .bot, text: "gateway still has this"),
+        ]
+        ConnectionSupervisor.shared.dial = { _ in
+            throw URLError(.cannotConnectToHost)
+        }
+
+        let outcome = await fixture.model.attemptReconnectOutcome()
+
+        XCTAssertEqual(outcome, .retryable)
+        XCTAssertEqual(chat.sessionID, "live-sid")
+        XCTAssertEqual(chat.storedSessionID, "durable-bot-chat")
+        XCTAssertEqual(chat.messages.map(\.text),
+                       ["still on screen", "gateway still has this"])
+        XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
+    func testBackgroundWakeHardRedialsWithoutPinging() async throws {
         let fixture = try fixture()
         defer { cleanup(fixture) }
         let supervisor = ConnectionSupervisor.shared
+        fixture.model.isOffline = false
+        ConnectionRegistry.shared.noteState(.connected, forURL: fixture.baseURL)
+        // Half-open sockets still report ready. The failed device build
+        // trusted that and wrote gateway.ping; this wake must redial anyway.
         await fixture.client.setForegroundReadinessForTesting(true)
-
-        let ping = ForegroundPingLatch()
         await fixture.client.setRPCExecutorForTesting { method, _, _ in
-            guard method == "gateway.ping" else {
-                return .object(["profiles": .array([]), "jobs": .array([])])
-            }
-            await ping.enter()
-            throw GatewayError(code: -5, message: "request timed out: gateway.ping")
+            XCTAssertNotEqual(method, "gateway.ping",
+                              "background wake must not write onto the parked socket")
+            return .object(["profiles": .array([]), "sessions": .array([]), "jobs": .array([])])
         }
 
         var dialCount = 0
         supervisor.dial = { _ in
             dialCount += 1
-            throw URLError(.cannotConnectToHost)
         }
 
-        // UIApplicationDelegate and SwiftUI scenePhase both publish this edge.
-        // The second callback must not cancel/restart the request already
-        // proving the exact suspended transport.
+        fixture.model.applicationWillResignActive()
+        XCTAssertTrue(supervisor.suspendedForBackground)
         fixture.model.applicationDidBecomeActive()
-        for _ in 0..<1_000 {
-            if await ping.isWaiting { break }
-            await Task.yield()
-        }
-        XCTAssertTrue(await ping.isWaiting)
         fixture.model.applicationDidBecomeActive()
-        for _ in 0..<20 { await Task.yield() }
-
-        XCTAssertEqual(await ping.count, 1)
-        await ping.release()
         await waitUntil { dialCount > 0 }
-        XCTAssertTrue(fixture.model.isOffline)
+        await LiveRuntime.shared.reconnectTask?.value
+
+        XCTAssertGreaterThanOrEqual(dialCount, 1)
+        XCTAssertFalse(fixture.model.isOffline)
+        XCTAssertFalse(supervisor.suspendedForBackground)
     }
 
     @MainActor
@@ -458,16 +458,13 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
-    func testForegroundHealthyPingRefreshesWithoutDialing() async throws {
+    func testForegroundWhileConnectedDoesNotRedial() async throws {
         let fixture = try fixture()
         defer { cleanup(fixture) }
         fixture.model.isOffline = false
         ConnectionRegistry.shared.noteState(.connected, forURL: fixture.baseURL)
         await fixture.client.setForegroundReadinessForTesting(true)
-        await fixture.client.setRPCExecutorForTesting { method, _, _ in
-            if method == "gateway.ping" {
-                return .object(["ok": .bool(true)])
-            }
+        await fixture.client.setRPCExecutorForTesting { _, _, _ in
             return .object(["profiles": .array([]), "sessions": .array([])])
         }
 
@@ -488,45 +485,43 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
-    func testLaterWakePingsAgainAfterValidationLeaseEnds() async throws {
+    func testWakeSupersedesHungDialAndKeepsTranscript() async throws {
         let fixture = try fixture()
         defer { cleanup(fixture) }
-        await fixture.client.setForegroundReadinessForTesting(true)
+        let supervisor = ConnectionSupervisor.shared
+        let botID = "worker"
+        let chat = fixture.model.chat(for: botID)
+        chat.sessionID = "hung-sid"
+        chat.storedSessionID = "durable-bot-chat"
+        chat.messages = [
+            ChatMessage(author: .user, text: "do not blank"),
+            ChatMessage(author: .bot, text: "still here"),
+        ]
 
-        let ping = ForegroundPingLatch()
-        await fixture.client.setRPCExecutorForTesting { method, _, _ in
-            guard method == "gateway.ping" else {
-                return .object(["profiles": .array([]), "jobs": .array([])])
-            }
-            await ping.enter()
-            return .object(["ok": .bool(true)])
+        var hung: CheckedContinuation<Void, Never>?
+        supervisor.dial = { _ in
+            await withCheckedContinuation { hung = $0 }
         }
-        var dialCount = 0
-        ConnectionSupervisor.shared.dial = { _ in
-            dialCount += 1
-        }
+        fixture.model.reconnectNow()
+        await waitUntil { hung != nil && supervisor.isReconnecting }
+        let hungGeneration = supervisor.reconnectGeneration
 
-        fixture.model.isOffline = false
+        var wakeDials = 0
+        supervisor.dial = { _ in
+            wakeDials += 1
+        }
+        fixture.model.applicationWillResignActive()
+        XCTAssertNotEqual(supervisor.reconnectGeneration, hungGeneration)
         fixture.model.applicationDidBecomeActive()
-        for _ in 0..<1_000 {
-            if await ping.isWaiting { break }
-            await Task.yield()
-        }
-        XCTAssertTrue(await ping.isWaiting)
-        await ping.release()
-        await waitUntil {
-            ConnectionSupervisor.shared.foregroundValidationTask == nil
-        }
+        await waitUntil { wakeDials > 0 }
+        await LiveRuntime.shared.reconnectTask?.value
 
-        // A distinct later unlock must not be discarded just because roster
-        // refresh from the first wake is still in flight.
-        fixture.model.applicationDidBecomeActive()
-        for _ in 0..<1_000 {
-            if await ping.count >= 2 { break }
-            await Task.yield()
-        }
-        XCTAssertEqual(await ping.count, 2)
-        XCTAssertEqual(dialCount, 0)
+        hung?.resume()
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertGreaterThanOrEqual(wakeDials, 1)
+        XCTAssertEqual(chat.messages.map(\.text), ["do not blank", "still here"])
+        XCTAssertFalse(fixture.model.isOffline)
     }
 
     @MainActor

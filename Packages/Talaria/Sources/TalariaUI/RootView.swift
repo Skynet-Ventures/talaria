@@ -292,18 +292,28 @@ public struct TalariaRootView: View {
         // nothing and closes that window.
         .onChange(of: model.mode) { attachEventRouters() }
         .onChange(of: scenePhase) {
-            // Foregrounding is when a parked socket has to be re-established
-            // and any approval resolved from a notification has to be caught up.
-            if scenePhase == .active { model.applicationDidBecomeActive() }
+            // Resign drops the parked socket without writing to it. Active
+            // hard-redials. UIKit notifications below cover a scenePhase miss
+            // after lock-screen return.
+            if scenePhase == .active {
+                model.applicationDidBecomeActive()
+            } else {
+                model.applicationWillResignActive()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(
             for: .talariaApplicationDidBecomeActive
         )) { _ in
             // UIApplicationDelegate is the authoritative iOS wake edge. The
             // model coalesces this with scenePhase so a normal foreground does
-            // one exact-source liveness validation, while a scenePhase miss
-            // after screen lock can no longer strand a dead socket.
+            // one hard redial, while a scenePhase miss after screen lock can
+            // no longer strand a dead socket.
             model.applicationDidBecomeActive()
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .talariaApplicationWillResignActive
+        )) { _ in
+            model.applicationWillResignActive()
         }
         .onAppear { wireUp() }
         .onReceive(NotificationCenter.default.publisher(for: .talariaOpenConnections)) { _ in

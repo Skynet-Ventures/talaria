@@ -741,9 +741,21 @@ public actor GatewayClient {
         }
     }
 
+    /// Drop the parked transport without sending. Used when iOS is about to
+    /// suspend the process — any write onto that socket can wedge URLSession.
+    public func invalidateTransportForBackground() async {
+        if let previous = transport {
+            await previous.close()
+            transport = nil
+        }
+        eventsTask?.cancel()
+        eventsTask = nil
+    }
+
     /// Connect (or reconnect). Refreshes OAuth tokens when near expiry and
     /// mints a fresh single-use WS ticket per attempt.
     public func connect() async throws {
+        try Task.checkCancellation()
         if case .oauth(let tokens) = credential, tokens.needsRefresh {
             do {
                 let refreshed = try await auth.refresh(tokens)
@@ -764,6 +776,7 @@ public actor GatewayClient {
             ticket = nil
         }
 
+        try Task.checkCancellation()
         let url = try auth.webSocketURL(credential: credential, ticket: ticket)
         // A reconnect must retire the previous receive loop and event stream
         // before a replacement transport is published. Leaving them running
@@ -775,9 +788,11 @@ public actor GatewayClient {
         eventsTask?.cancel()
         eventsTask = nil
 
+        try Task.checkCancellation()
         let transport = GatewayTransport(url: url)
         self.transport = transport
         try await transport.connect()
+        try Task.checkCancellation()
 
         eventsTask = Task {
             for await event in transport.events {
