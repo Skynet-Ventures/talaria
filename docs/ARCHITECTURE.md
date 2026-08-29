@@ -236,11 +236,19 @@ rides). The design leans on the gateway's session-parking behavior:
    assistant text, the queued prompt, and `pending_approval`/`pending_clarify`
    — enough to rebuild the chat mid-turn. After the window, resume still works
    but cold-loads from storage.
-4. Built: offline compose queue + flush — `AppModel.connectGateway` drains
-   `composeQueue` through the normal send path once the roster is refreshed.
-   Planned (🚧): AppModel-level scene-phase observer + full-jitter exponential
-   backoff (mirroring desktop's reconnect-backoff) and
-   resume-all-open-chats on foreground.
+4. Built: an explicit, source-qualified durable composer queue plus the
+   existing in-memory ordinary-send recovery path. The Queue control persists
+   text-only rows keyed by gateway, profile, and stored session;
+   `flushComposeQueue()` resumes that exact stored session and drains only when
+   it reports no running/in-flight turn, approval, or clarify state. Normal
+   mid-turn Send remains steer-first and never creates durable queue authority.
+   Stop parks still-local durable rows before interrupting. The legacy
+   `composeQueue` remains compatibility recovery for ordinary sends, not a
+   replayable durable queue. The app-level scene-phase observer, foreground
+   health re-probe, network-restored liveness nudge, supervised full-jitter
+   reconnect, and post-adoption queue flush are implemented. Foregrounding
+   reseeds exact open-session liveness rather than blindly resuming every
+   historical chat.
 
 Request timeouts follow desktop's per-call overrides: default 120 s,
 `prompt.submit` 1800 s (the ack can legitimately take that long),

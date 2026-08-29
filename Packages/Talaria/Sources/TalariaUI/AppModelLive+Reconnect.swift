@@ -880,10 +880,16 @@ extension AppModel {
     /// probeable, and the next tap runs sign-in again.
     public func signOutGateway(_ gateway: SavedGateway) async {
         invalidateManagedCloudBootEpisode(gatewayID: gateway.id)
+        guard ProfileLifecycleTrafficAdmission.beginGatewayTeardown(gateway.id) else { return }
+        beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
+        defer {
+            finishExactStoredSessionSourceTeardown(gatewayID: gateway.id)
+            ProfileLifecycleTrafficAdmission.endGatewayTeardown(gateway.id)
+        }
+        await ProfileLifecycleTrafficAdmission.awaitGatewayTrafficQuiescence(gateway.id)
+        guard !Task.isCancelled, retireDurableComposerQueueForGateway(gateway.id) else { return }
         ArtifactStore.shared.purge(gatewayID: gateway.id)
         AdvancedTerminalCoordinator.shared.stopAndForget(gatewayID: gateway.id)
-        beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
-        defer { finishExactStoredSessionSourceTeardown(gatewayID: gateway.id) }
         cancelRoomProjectionSync(gatewayID: gateway.id)
         guard let base = gateway.baseURL else {
             dropArtifactScope(gatewayID: gateway.id)
@@ -917,10 +923,16 @@ extension AppModel {
     /// Remove the gateway entirely — registry row and Keychain credential.
     public func removeGateway(_ gateway: SavedGateway) async {
         invalidateManagedCloudBootEpisode(gatewayID: gateway.id)
+        guard ProfileLifecycleTrafficAdmission.beginGatewayTeardown(gateway.id) else { return }
+        beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
+        defer {
+            finishExactStoredSessionSourceTeardown(gatewayID: gateway.id)
+            ProfileLifecycleTrafficAdmission.endGatewayTeardown(gateway.id)
+        }
+        await ProfileLifecycleTrafficAdmission.awaitGatewayTrafficQuiescence(gateway.id)
+        guard !Task.isCancelled, retireDurableComposerQueueForGateway(gateway.id) else { return }
         ArtifactStore.shared.purge(gatewayID: gateway.id)
         AdvancedTerminalCoordinator.shared.stopAndForget(gatewayID: gateway.id)
-        beginExactStoredSessionSourceTeardown(gatewayID: gateway.id)
-        defer { finishExactStoredSessionSourceTeardown(gatewayID: gateway.id) }
         cancelRoomProjectionSync(gatewayID: gateway.id)
         if isActiveGateway(gateway) {
             await disconnectGateway()
@@ -947,6 +959,28 @@ extension AppModel {
         // Reject a retained exact-session route now that its source is no
         // longer trusted, instead of leaving it parked until another launch.
         retryExactStoredSessionNavigation()
+    }
+
+    /// Retire queued local text only after the gateway-exclusive traffic fence
+    /// has quiesced. If deletion cannot persist, quarantine is fail-closed;
+    /// if neither write succeeds, keep the credential/source authority so the
+    /// user can retry rather than replaying into a future same-id gateway.
+    @discardableResult
+    private func retireDurableComposerQueueForGateway(_ gatewayID: String) -> Bool {
+        do {
+            try durableComposerQueueStore.remove(gatewayID: gatewayID)
+        } catch {
+            do {
+                try durableComposerQueueStore.quarantine(
+                    gatewayID: gatewayID,
+                    reason: "Gateway sign-out/removal could not clean the local queue; work was quarantined.")
+            } catch {
+                durableComposerQueueEntries = durableComposerQueueStore.allEntries()
+                return false
+            }
+        }
+        reloadDurableComposerQueueProjection()
+        return true
     }
 
     /// Drop the outgoing gateway's world. flushDemoWorld() is the single place

@@ -358,8 +358,13 @@ public struct LiveSession: Sendable {
         running = v["running"]?.boolValue ?? false
         inflight = v["inflight"]
         retainedInflightAdmission = RetainedInflightTurnAdmission.admit(v["inflight"])
-        pendingApproval = v["pending_approval"].map { ApprovalRequest($0, sessionID: v["session_id"]?.stringValue ?? "") }
-        pendingClarify = v["pending_clarify"]
+        pendingApproval = v["pending_approval"].flatMap {
+            $0 == .null ? nil : ApprovalRequest(
+                $0, sessionID: v["session_id"]?.stringValue ?? "")
+        }
+        pendingClarify = v["pending_clarify"].flatMap { value -> JSONValue? in
+            value == .null ? Optional<JSONValue>.none : value
+        }
     }
 
     /// The exact durable/state evidence represented by this resume payload.
@@ -599,6 +604,11 @@ public actor GatewayClient {
     private var transport: GatewayTransport?
     private let keychain: KeychainStore
     private var trafficAdmission: TrafficAdmission?
+    /// Package-test seam for source-qualified queue flows without opening a
+    /// WebSocket. It deliberately runs inside `rpc` so lifecycle traffic
+    /// admission remains part of every exercised wire boundary.
+    typealias RPCExecutor = @Sendable (String, JSONValue?, TimeInterval) async throws -> JSONValue
+    private var rpcExecutorForTesting: RPCExecutor?
     typealias RESTExecutor = @Sendable (URLRequest, Int?) async throws -> (Data, URLResponse)
     private let restExecutor: RESTExecutor
 
@@ -649,6 +659,13 @@ public actor GatewayClient {
     /// delivery still comes exclusively from the transport event task.
     func emitEventForTesting(_ event: GatewayEvent) {
         for handler in handlerSnapshot() { handler(event) }
+    }
+
+    /// Install or clear the deterministic RPC seam used by package tests.
+    /// Production leaves this nil and continues through the authenticated
+    /// transport path below.
+    func setRPCExecutorForTesting(_ executor: RPCExecutor?) {
+        rpcExecutorForTesting = executor
     }
 
     /// Install the owning app's source-qualified lifecycle admission. The
@@ -746,6 +763,11 @@ public actor GatewayClient {
                     timeout: TimeInterval = 120) async throws -> JSONValue {
         let lease = try await acquireTrafficLease()
         do {
+            if let rpcExecutorForTesting {
+                let result = try await rpcExecutorForTesting(method, params, timeout)
+                await lease?.release()
+                return result
+            }
             guard let transport else { throw GatewayError(code: -3, message: "not connected") }
             let result = try await transport.request(method, params: params, timeout: timeout)
             await lease?.release()

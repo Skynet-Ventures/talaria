@@ -75,8 +75,18 @@ public struct ChatView: View {
     @ScaledMetric(relativeTo: .body) private var softComposerSize = 14.5
     @ScaledMetric(relativeTo: .body) private var controlComposerSize = 13
     @ScaledMetric(relativeTo: .body) private var inkComposerSize = 15
+    @ScaledMetric(relativeTo: .body) private var queuePromptTextSize = 13
+    @ScaledMetric(relativeTo: .caption) private var queuePromptStateSize = 9.5
     @State private var showModelSheet = false
     @State private var showCommands = false
+    @State private var showQueuePanel = false
+    @State private var editingQueuedPromptID: UUID?
+    /// Capture the presenting bot id with the reservation. A profile route can
+    /// change while the sheet is visible; Cancel must still release the exact
+    /// reservation even though Save will correctly reject a stale route.
+    @State private var editingQueuedPromptBotID: String?
+    @State private var queuedPromptDraft = ""
+    @State private var queuedPromptEditError: String?
     @State private var initialTranscriptAnchor = InitialTranscriptAnchorState()
     @State private var followingLatest = true
     @State private var jumpToLatestToken = 0
@@ -181,6 +191,20 @@ public struct ChatView: View {
         }
         .onChange(of: pendingSlashPrefill) { _, _ in consumeSlashPrefillIfSafe() }
         .onChange(of: draft) { _, _ in consumeSlashPrefillIfSafe() }
+        .onDisappear {
+            cancelQueuedPromptEdit()
+        }
+        .sheet(isPresented: $showQueuePanel) {
+            queuedPromptPanel
+        }
+        // This is intentionally mounted at ChatView level rather than inside
+        // the queue panel sheet, so a panel dismissal cannot strand a durable
+        // reservation or turn the editor into a nested composer.
+        .sheet(isPresented: queuedPromptEditorPresented, onDismiss: {
+            cancelQueuedPromptEdit()
+        }) {
+            queuedPromptEditor
+        }
         .sheet(isPresented: privateDiagnosticsSheetPresented) {
             if let state = model.privateDiagnosticsShare {
                 NousDiagnosticsConsentSheet(
@@ -1059,36 +1083,207 @@ public struct ChatView: View {
 
 
     @ViewBuilder private var queuedPromptStrip: some View {
-        let items = model.queuedPrompts(for: botID)
+        let items = model.durableQueuedPrompts(for: botID)
         if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(copy.promptQueueTitle(theme.id, count: items.count))
-                    .font(theme.id == .control ? theme.mono(9.5, weight: .semibold) : theme.body(11.5, weight: .semibold))
-                    .foregroundStyle(theme.sub)
-                ForEach(items, id: \.id) { item in
-                    HStack(spacing: 8) {
-                        Text(item.text)
-                            .font(theme.body(13))
-                            .foregroundStyle(theme.ink)
-                            .lineLimit(2)
-                        Spacer(minLength: 8)
-                        Button {
-                            model.dismissQueuedPrompt(id: item.id)
-                        } label: {
-                            Text(copy.promptQueueRemove(theme.id))
-                                .font(theme.body(12, weight: .semibold))
-                                .foregroundStyle(theme.accent)
+            Button { showQueuePanel = true } label: {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(copy.promptQueueTitle(theme.id, count: items.count))
+                            .font(theme.id == .control
+                                  ? theme.mono(9.5, weight: .semibold)
+                                  : theme.body(11.5, weight: .semibold))
+                            .foregroundStyle(theme.sub)
+                        if let first = items.first {
+                            Text(first.text)
+                                .font(theme.body(11.5))
+                                .foregroundStyle(theme.ink)
+                                .lineLimit(1)
                         }
-                        .buttonStyle(.plain)
                     }
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 10)
-                    .background(theme.inset, in: RoundedRectangle(cornerRadius: theme.buttonRadius, style: .continuous))
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.accent)
                 }
-                Text(copy.promptQueueNotice(theme.id))
-                    .font(theme.body(10.5))
-                    .foregroundStyle(theme.faint)
+                .padding(.vertical, 8)
+                .padding(.horizontal, 11)
+                .frame(minHeight: ChatComposerLayoutPolicy.controlHitTarget)
+                .background(theme.inset,
+                            in: RoundedRectangle(cornerRadius: theme.buttonRadius,
+                                                 style: .continuous))
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(copy.promptQueueOpenPanel(theme.id, count: items.count))
+        }
+    }
+
+    private var queuedPromptPanel: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(model.durableQueuedPrompts(for: botID), id: \.id) { item in
+                        queuedPromptRow(item)
+                    }
+                    Text(copy.promptQueueNotice(theme.id))
+                        .font(theme.body(11))
+                        .foregroundStyle(theme.faint)
+                        .padding(.top, 4)
+                }
+                .padding(16)
+            }
+            .navigationTitle(copy.promptQueueTitle(
+                theme.id, count: model.durableQueuedPrompts(for: botID).count))
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func queuedPromptRow(_ item: DurableComposerQueueEntry) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(item.text)
+                .font(theme.body(queuePromptTextSize))
+                .foregroundStyle(theme.ink)
+                .lineLimit(4)
+            Text(copy.promptQueueState(theme.id, state: item.state))
+                .font(theme.id == .control ? theme.mono(queuePromptStateSize)
+                      : theme.body(queuePromptStateSize))
+                .foregroundStyle(item.state == .uncertain ? theme.warn : theme.faint)
+            if DurableComposerQueuePresentationPolicy.usesStackedActions(
+                inPanel: true, isAccessibilitySize: dynamicTypeSize.isAccessibilitySize) {
+                VStack(alignment: .leading, spacing: 4) { queuedPromptActions(item) }
+            } else {
+                HStack(spacing: 12) { queuedPromptActions(item) }
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.inset,
+                    in: RoundedRectangle(cornerRadius: theme.buttonRadius,
+                                         style: .continuous))
+    }
+
+    @ViewBuilder private func queuedPromptActions(_ item: DurableComposerQueueEntry) -> some View {
+        if item.state.isLocallyEditable {
+            queuedPromptAction(copy.promptQueueEdit(theme.id), color: theme.accent) {
+                beginQueuedPromptEdit(item)
+            }
+        }
+        if item.state == .parked {
+            queuedPromptAction(copy.promptQueueResume(theme.id), color: theme.accent) {
+                model.resumeQueuedPrompts(botID: botID)
+            }
+        }
+        if item.state == .uncertain {
+            queuedPromptAction(copy.promptQueueAcknowledge(theme.id), color: theme.warn) {
+                model.removeDurableQueuedPrompt(id: item.id)
+            }
+        } else if item.state == .acceptedGatewayOwned {
+            queuedPromptAction(copy.promptQueueHideAccepted(theme.id), color: theme.accent) {
+                model.removeDurableQueuedPrompt(id: item.id)
+            }
+        } else if item.state != .submitting {
+            queuedPromptAction(copy.promptQueueRemove(theme.id), color: theme.accent) {
+                model.removeDurableQueuedPrompt(id: item.id)
+            }
+        }
+    }
+
+    private func queuedPromptAction(_ title: String, color: Color,
+                                    action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(theme.body(11, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(minHeight: ChatComposerLayoutPolicy.controlHitTarget)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private var queuedPromptEditorPresented: Binding<Bool> {
+        Binding(
+            get: { editingQueuedPromptID != nil },
+            set: { presented in
+                if !presented { cancelQueuedPromptEdit() }
+            }
+        )
+    }
+
+    private func beginQueuedPromptEdit(_ item: DurableComposerQueueEntry) {
+        guard let reserved = model.beginEditingDurableQueuedPrompt(id: item.id, botID: botID) else {
+            return
+        }
+        queuedPromptDraft = reserved.text
+        queuedPromptEditError = nil
+        editingQueuedPromptID = reserved.id
+        editingQueuedPromptBotID = botID
+    }
+
+    private func cancelQueuedPromptEdit() {
+        guard let id = editingQueuedPromptID else { return }
+        if let reservedBotID = editingQueuedPromptBotID {
+            model.cancelEditingDurableQueuedPrompt(id: id, botID: reservedBotID)
+        }
+        editingQueuedPromptID = nil
+        editingQueuedPromptBotID = nil
+        queuedPromptEditError = nil
+    }
+
+    /// A deliberately isolated editor: raw text plus Save/Cancel only. It has
+    /// no attachment tray, voice, mention path, Send, or Steer affordance.
+    private var queuedPromptEditor: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(copy.promptQueueEditNotice(theme.id))
+                    .font(theme.body(12))
+                    .foregroundStyle(theme.faint)
+                TextEditor(text: $queuedPromptDraft)
+                    .font(composerFont)
+                    .foregroundStyle(theme.ink)
+                    .padding(8)
+                    .frame(minHeight: 180)
+                    .background(theme.inset,
+                                in: RoundedRectangle(cornerRadius: theme.buttonRadius,
+                                                     style: .continuous))
+                if let queuedPromptEditError {
+                    Text(queuedPromptEditError)
+                        .font(theme.body(12))
+                        .foregroundStyle(theme.warn)
+                }
+                Spacer(minLength: 0)
+                Button(copy.promptQueueSaveEdit(theme.id)) {
+                    saveQueuedPromptEdit()
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding(16)
+            .navigationTitle(copy.promptQueueEditTitle(theme.id))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(copy.promptQueueCancelEdit(theme.id)) { cancelQueuedPromptEdit() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func saveQueuedPromptEdit() {
+        guard let id = editingQueuedPromptID,
+              let reservedBotID = editingQueuedPromptBotID else { return }
+        if model.saveEditingDurableQueuedPrompt(id: id, botID: reservedBotID,
+                                                text: queuedPromptDraft) {
+            editingQueuedPromptID = nil
+            editingQueuedPromptBotID = nil
+            queuedPromptEditError = nil
+            return
+        }
+        // The model released the failed reservation transactionally. Reclaim
+        // only if the exact row still exists on this source; otherwise retain
+        // the draft for the user and explain that it is no longer editable.
+        if model.beginEditingDurableQueuedPrompt(id: id, botID: reservedBotID) != nil {
+            queuedPromptEditError = copy.promptQueueEditFailed(theme.id)
+        } else {
+            queuedPromptEditError = copy.promptQueueEditUnavailable(theme.id)
         }
     }
 
@@ -1099,6 +1294,12 @@ public struct ChatView: View {
             // Staged attachments (attachments agent owns the tray + picker).
             AttachmentTray(model: model, botID: botID)
             queuedPromptStrip
+            if showsQueueAttachmentExplanation {
+                Text(copy.queueAttachmentNotice(theme.id))
+                    .font(theme.body(10.5, weight: .semibold))
+                    .foregroundStyle(theme.warn)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if turnRunning, model.mode == .live {
                 steerHint
             }
@@ -1140,6 +1341,7 @@ public struct ChatView: View {
                 .accessibilityLabel(copy.voiceLabel(theme.id))
                 attachButton
                 Spacer(minLength: 8)
+                if showsQueueAction { queueButton }
                 sendOrStopButton
             }
             .frame(minHeight: ChatComposerLayoutPolicy.controlHitTarget)
@@ -1338,6 +1540,44 @@ public struct ChatView: View {
     /// permanent stop button was the old behaviour.
     private var showsStop: Bool { composerAction == .stop }
 
+    private var queueActionPolicy: DurableComposerQueuePresentationPolicy.QueueAction {
+        DurableComposerQueuePresentationPolicy.queueAction(
+            isLive: model.mode == .live,
+            isTurnRunning: turnRunning,
+            hasAttachments: attachmentCount > 0,
+            hasText: !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            isBranching: model.isBranchingFromMessage(in: botID))
+    }
+
+    private var showsQueueAction: Bool { queueActionPolicy == .available }
+
+    private var showsQueueAttachmentExplanation: Bool {
+        queueActionPolicy == .attachmentExplanation
+    }
+
+    private var queueButton: some View {
+        Button {
+            let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            if model.queuePrompt(text: text, to: botID) {
+                draft = ""
+                editingMessage = nil
+            }
+        } label: {
+            Text(copy.queueLabel(theme.id))
+                .font(theme.id == .control ? theme.mono(9.5, weight: .semibold)
+                      : theme.body(11, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .padding(.horizontal, 10)
+                .frame(minHeight: ChatComposerLayoutPolicy.controlHitTarget)
+                .background(theme.inset,
+                            in: RoundedRectangle(cornerRadius: theme.buttonRadius,
+                                                 style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(copy.queueAccessibility(theme.id))
+    }
+
     private var sendOrStopButton: some View {
         Button {
             if showsStop {
@@ -1485,6 +1725,15 @@ extension CopyPack {
         case .ink: "waiting · \(count)"
         }
     }
+
+    func promptQueueOpenPanel(_ theme: ThemeID, count: Int) -> String {
+        switch theme {
+        case .soft: "Open queued prompts, \(count) waiting"
+        case .control: "OPEN QUEUED PROMPTS, \(count) WAITING"
+        case .ink: "open the \(count) waiting notes"
+        }
+    }
+
     func promptQueueRemove(_ theme: ThemeID) -> String {
         switch theme {
         case .soft: "Dismiss"
@@ -1495,9 +1744,148 @@ extension CopyPack {
 
     func promptQueueNotice(_ theme: ThemeID) -> String {
         switch theme {
-        case .soft: "Dismiss only hides this notice; Hermes still runs the queued prompt."
-        case .control: "DISMISS HIDES LOCAL MIRROR ONLY — GATEWAY EXECUTION CONTINUES"
-        case .ink: "Hiding the note does not unspeak the waiting words."
+        case .soft: "Text-only rows are fenced to this exact session. Uncertain rows are never replayed; hiding an accepted mirror does not cancel it."
+        case .control: "LOCAL TEXT ONLY — UNCERTAIN NEVER REPLAYS; HIDE NEVER CANCELS"
+        case .ink: "only words wait here; a lost receipt is never spoken twice"
+        }
+    }
+
+    func promptQueueState(_ theme: ThemeID, state: DurableComposerQueueState) -> String {
+        switch state {
+        case .localReady: return switch theme {
+        case .soft: "Ready locally"
+        case .control: "LOCAL / READY"
+        case .ink: "ready here"
+        }
+        case .parked: return switch theme {
+        case .soft: "Paused"
+        case .control: "PARKED"
+        case .ink: "resting"
+        }
+        case .submitting: return switch theme {
+        case .soft: "Sending…"
+        case .control: "SUBMITTING"
+        case .ink: "leaving now"
+        }
+        case .acceptedGatewayOwned: return switch theme {
+        case .soft: "Accepted by gateway"
+        case .control: "ACCEPTED / GATEWAY-OWNED"
+        case .ink: "the gateway has it"
+        }
+        case .uncertain: return switch theme {
+        case .soft: "Uncertain — not replayed"
+        case .control: "UNCERTAIN / NO AUTO-REPLAY"
+        case .ink: "receipt lost · not repeated"
+        }
+        case .retryExhausted: return switch theme {
+        case .soft: "Retry limit reached"
+        case .control: "RETRY LIMIT REACHED"
+        case .ink: "four tries spent"
+        }
+        }
+    }
+
+    func queueLabel(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Queue"
+        case .control: "QUEUE"
+        case .ink: "let it wait"
+        }
+    }
+
+    func queueAccessibility(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Queue this text for the next turn"
+        case .control: "QUEUE TEXT FOR NEXT TURN"
+        case .ink: "leave this text for the next turn"
+        }
+    }
+
+    func queueAttachmentNotice(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Queue is text-only. Keep the attachment staged and send it when this turn settles."
+        case .control: "QUEUE IS TEXT-ONLY — KEEP ATTACHMENT STAGED"
+        case .ink: "attachments stay staged; send them when the turn rests"
+        }
+    }
+
+    func promptQueueEdit(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Edit"
+        case .control: "EDIT"
+        case .ink: "revise"
+        }
+    }
+
+    func promptQueueResume(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Resume"
+        case .control: "RESUME"
+        case .ink: "wake it"
+        }
+    }
+
+    func promptQueueAcknowledge(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Acknowledge"
+        case .control: "ACKNOWLEDGE"
+        case .ink: "set aside"
+        }
+    }
+
+    func promptQueueHideAccepted(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Hide local mirror"
+        case .control: "HIDE LOCAL MIRROR"
+        case .ink: "hide this proof"
+        }
+    }
+
+    func promptQueueEditTitle(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Edit queued text"
+        case .control: "EDIT QUEUED TEXT"
+        case .ink: "revise the waiting words"
+        }
+    }
+
+    func promptQueueEditNotice(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Text only. Saving never sends or steers this prompt."
+        case .control: "TEXT ONLY — SAVE NEVER SENDS OR STEERS"
+        case .ink: "only the words may change; save does not speak them"
+        }
+    }
+
+    func promptQueueSaveEdit(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Save changes"
+        case .control: "SAVE"
+        case .ink: "keep these words"
+        }
+    }
+
+    func promptQueueCancelEdit(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Cancel"
+        case .control: "CANCEL"
+        case .ink: "leave unchanged"
+        }
+    }
+
+    func promptQueueEditFailed(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "Could not save this text. Review it and try again."
+        case .control: "SAVE FAILED — REVIEW TEXT AND RETRY"
+        case .ink: "these words could not be kept yet"
+        }
+    }
+
+    func promptQueueEditUnavailable(_ theme: ThemeID) -> String {
+        switch theme {
+        case .soft: "This queued prompt changed or is no longer editable."
+        case .control: "ROW CHANGED OR IS NO LONGER EDITABLE"
+        case .ink: "this waiting note belongs elsewhere now"
         }
     }
 
