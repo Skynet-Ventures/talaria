@@ -1130,6 +1130,13 @@ extension AppModel {
                     profile: GatewayBotRoute(qualifiedID: botID)?.profile ?? botID)
         let replacedFailureScope = (newStoredID != nil && newStoredID != oldStoredID)
             || (oldRoute != nil && oldRoute != bindingRoute)
+        if bindingChanged || (oldRoute != nil && oldRoute != bindingRoute) {
+            // A runtime sid/source/durable replacement is a new local chat
+            // binding. Archived response snapshots must never cross it.
+            chat.clearAssistantResponseAlternatives()
+            ChatRuntime.shared.clearAssistantResponseAlternativeStage(
+                botID: botID, chatID: ObjectIdentifier(chat))
+        }
         if replacedFailureScope {
             let chatID = ObjectIdentifier(chat)
             ChatRuntime.shared.retainedFailureRows[chatID] = nil
@@ -1260,6 +1267,9 @@ extension AppModel {
         chat.usage = nil
         chat.contextSegments = []
         chat.messages = []
+        chat.clearAssistantResponseAlternatives()
+        ChatRuntime.shared.clearAssistantResponseAlternativeStage(
+            botID: botID, chatID: ObjectIdentifier(chat))
     }
 
     /// A roster tap may discard a scratch binding only after two successful
@@ -1320,6 +1330,18 @@ extension AppModel {
                 route: sourceRoute, client: client) else { throw CancellationError() }
         let sourceGatewayID = sourceRoute.gatewayID
         let storedID = live.storedSessionID.isEmpty ? chat.storedSessionID : live.storedSessionID
+        if let binding = chat.assistantResponseBinding,
+           (binding.chatID != chat.chatIdentity
+            || binding.storedSessionID != (storedID ?? "")
+            || binding.runtimeSessionID != live.sessionID
+            || binding.gatewayID != sourceRoute.gatewayID
+            || binding.profile != sourceRoute.profile) {
+            // An authoritative page from another exact source cannot safely
+            // rebind a local shelf, even when its visible text looks similar.
+            chat.clearAssistantResponseAlternatives()
+            ChatRuntime.shared.clearAssistantResponseAlternativeStage(
+                botID: botID, chatID: chatID)
+        }
         // The REST page is a read-only supplement/fallback for this exact
         // durable key. Its one permitted empty-projection retry stays here:
         // it must never re-enter canonical resolution, where a timeout could
@@ -1413,6 +1435,14 @@ extension AppModel {
             let visible = Set(chat.messages.map(\.id))
             ChatRuntime.shared.retainedFailureRows[chatID] =
                 protectedIDs.intersection(visible)
+        }
+        if let binding = chat.assistantResponseBinding,
+           !chat.messages.contains(where: {
+               $0.author == .user && $0.id == binding.sourceUserID
+           }) {
+            // A stored page that cannot rebind the exact source row is a new
+            // authoritative projection, not evidence for this local shelf.
+            chat.clearAssistantResponseAlternatives()
         }
     }
 

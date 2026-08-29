@@ -70,6 +70,10 @@ final class ChatRuntime {
     /// fence when it had.
     var transcriptLeases: [String: TranscriptActionLease] = [:]
     var transcriptFences: [String: TranscriptActionFence] = [:]
+    /// A regenerate's old assistant run is staged here until the destructive
+    /// submit has an accepted receipt or an exact later effect proof. It is
+    /// never a navigable alternative while this lease is ambiguous.
+    var assistantResponseAlternativeStages: [String: AssistantResponseAlternativeStage] = [:]
 
     /// Mid-turn mutations are no-replay operations too. A lost `steer` or
     /// `redirect` receipt must not fall through to the next verb: the gateway
@@ -124,6 +128,19 @@ final class ChatRuntime {
         // An ambiguous destructive submit survives a connection generation.
         // Only authoritative hydration of the same source/session, or an
         // explicit bind to a different durable session, may retire it.
+    }
+
+    func clearAssistantResponseAlternativeStage(botID: String,
+                                                chatID: ObjectIdentifier? = nil) {
+        guard let stage = assistantResponseAlternativeStages[botID] else { return }
+        if let chatID, stage.chatID != chatID { return }
+        assistantResponseAlternativeStages[botID] = nil
+    }
+
+    func clearAssistantResponseAlternativeStages(chatID: ObjectIdentifier) {
+        assistantResponseAlternativeStages = assistantResponseAlternativeStages.filter {
+            $0.value.chatID != chatID
+        }
     }
 
     /// A reconnect may assign a new runtime sid to the same durable session.
@@ -308,6 +325,11 @@ final class ChatRuntime {
             !botIDs.contains(key)
                 && (fence.gatewayID != route.gatewayID || fence.profile != route.profile)
         }
+        assistantResponseAlternativeStages = assistantResponseAlternativeStages.filter {
+            !botIDs.contains($0.key)
+                && ($0.value.binding.gatewayID != route.gatewayID
+                    || $0.value.binding.profile != route.profile)
+        }
         steerActions = steerActions.filter {
             !botIDs.contains($0.key) && $0.value.route != route
         }
@@ -350,6 +372,11 @@ final class ChatRuntime {
         transcriptFences = transcriptFences.filter {
             !ownsPrimary($0.key, route: GatewayBotRoute(
                 gatewayID: $0.value.gatewayID, profile: $0.value.profile))
+        }
+        assistantResponseAlternativeStages = assistantResponseAlternativeStages.filter {
+            !ownsPrimary($0.key, route: GatewayBotRoute(
+                gatewayID: $0.value.binding.gatewayID,
+                profile: $0.value.binding.profile))
         }
         steerActions = steerActions.filter { !ownsPrimary($0.key, route: $0.value.route) }
         steerFences = steerFences.filter { !ownsPrimary($0.key, route: $0.value.route) }
@@ -734,6 +761,17 @@ struct TranscriptActionLease {
     /// point is a definite non-attempt, even if its transport error is noisy.
     var submitStarted = false
     var effectProof: TranscriptActionEffectProof? = nil
+}
+
+struct AssistantResponseAlternativeStage: Equatable {
+    var operationID: UUID
+    var botID: String
+    var chatID: ObjectIdentifier
+    var binding: AssistantResponseAlternativesBinding
+    var previousSourceUserID: UUID
+    var invalidatedSourceUserIDs: Set<UUID>
+    var previousAssistantRun: [ChatMessage]
+    var committed = false
 }
 
 struct QueuedPromptBinding: Equatable {
@@ -1672,6 +1710,9 @@ extension AppModel {
             scheduleRetainedMutationReconciliation(botID: botID)
             return
         }
+        // A normal composer send always returns the transcript to the
+        // authoritative newest response before it can append/steer.
+        chat.resetAssistantResponseSelection()
 
         switch mode {
         case .demo:
@@ -2849,12 +2890,37 @@ extension AppModel {
         let baseline = chat.messages
         let effectProof = TranscriptActionEffectProof.capture(plan: plan, baseline: baseline)
         guard effectProof != nil else { return }
+        let operationID = UUID()
         chat.messages = TranscriptActing.applyOptimistic(baseline, plan: plan)
         let optimistic = ChatMessage(author: .user, time: AppModel.clock(), text: plan.text)
         chat.messages.append(optimistic)
+        if plan.kind == .regenerate,
+           let previousSourceUserID = plan.sourceUserID,
+           !plan.previousAssistantRun.isEmpty {
+            // The destructive submit replaces the old durable source row with
+            // this new local identity. The plan still captures the old source
+            // identity; the shelf binds to the exact current row so selected
+            // snapshots can be projected in place after the mutation.
+            let binding = AssistantResponseAlternativesBinding(
+                chatID: chat.chatIdentity,
+                sourceUserID: optimistic.id,
+                storedSessionID: storedID,
+                runtimeSessionID: sid,
+                gatewayID: actionRoute.gatewayID,
+                profile: actionRoute.profile)
+            runtime.assistantResponseAlternativeStages[botID] =
+                AssistantResponseAlternativeStage(
+                    operationID: operationID, botID: botID,
+                    chatID: ObjectIdentifier(chat), binding: binding,
+                    previousSourceUserID: previousSourceUserID,
+                    invalidatedSourceUserIDs: Set(
+                        baseline.dropFirst(plan.sourceIndex + 1)
+                            .filter { $0.author == .user }.map(\.id)),
+                    previousAssistantRun: plan.previousAssistantRun)
+        }
         chat.isRunning = true
         let lease = TranscriptActionLease(
-            id: UUID(), botID: botID, sessionID: sid, storedID: storedID,
+            id: operationID, botID: botID, sessionID: sid, storedID: storedID,
             gatewayID: actionRoute.gatewayID, profile: actionRoute.profile,
             generation: LiveRuntime.shared.generation, chatID: ObjectIdentifier(chat),
             optimisticID: optimistic.id, baseline: baseline,
@@ -2890,12 +2956,14 @@ extension AppModel {
                     chat.messages = TranscriptActing.rebindSurvivorRowIDs(chat.messages,
                                                                           survivorRowIDs: survivors)
                 }
+                commitAssistantResponseAlternativeIfProven(lease)
                 releaseTranscriptAction(lease)
                 startWatchdog(botID)
             } catch {
                 let ambiguous = submitStarted && PromptMutationFailure.isAmbiguous(error)
                 guard ownsTranscriptAction(lease) else {
                     if ambiguous { fenceTranscriptActionIfDurableTargetStillOwned(lease) }
+                    if !ambiguous { clearAssistantResponseAlternativeIfOwned(lease) }
                     releaseTranscriptAction(lease)
                     return
                 }
@@ -2975,6 +3043,7 @@ extension AppModel {
             clearWhenEmpty: true)
         chat.isRunning = false
         chat.isTyping = false
+        clearAssistantResponseAlternativeIfOwned(lease)
         return true
     }
 
@@ -3029,6 +3098,9 @@ extension AppModel {
                     || $0.proves(chat.messages)
                     || $0.proves(live)
             } == true
+            if effectProven {
+                commitAssistantResponseAlternativeIfProven(lease)
+            }
             releaseTranscriptAction(lease)
             // A successful resume/read is not proof that the destructive
             // submit landed. Keep the no-replay fence when the exact target
@@ -3064,6 +3136,52 @@ extension AppModel {
             clearWhenEmpty: true)
         chat.isRunning = false
         chat.isTyping = false
+        clearAssistantResponseAlternativeIfOwned(lease)
+    }
+
+    /// Publish the staged old run exactly once. An accepted submit receipt is
+    /// sufficient; an ambiguous receipt reaches this method only after the
+    /// existing exact transcript effect proof has settled.
+    @discardableResult
+    func commitAssistantResponseAlternativeIfProven(
+        _ lease: TranscriptActionLease
+    ) -> Bool {
+        let runtime = ChatRuntime.shared
+        guard let stage = runtime.assistantResponseAlternativeStages[lease.botID],
+              stage.operationID == lease.id, !stage.committed,
+              let chat = chats[lease.botID], ObjectIdentifier(chat) == stage.chatID,
+              chat.chatIdentity == stage.binding.chatID,
+              chat.storedSessionID == stage.binding.storedSessionID,
+              chat.sessionID == stage.binding.runtimeSessionID,
+              let route = gatewayRoute(for: lease.botID),
+              route.gatewayID == stage.binding.gatewayID,
+              route.profile == stage.binding.profile else { return false }
+        var shelf = AssistantResponseAlternativesPolicy.pruning(
+            sourceUserIDs: stage.invalidatedSourceUserIDs,
+            in: chat.assistantResponseAlternatives)
+        shelf = AssistantResponseAlternativesPolicy.rebindSourceUserID(
+            from: stage.previousSourceUserID,
+            to: stage.binding.sourceUserID,
+            matching: stage.binding,
+            in: shelf)
+        chat.assistantResponseBinding = stage.binding
+        chat.assistantResponseAlternatives = AssistantResponseAlternativesPolicy.record(
+            stage.previousAssistantRun, binding: stage.binding,
+            state: shelf)
+        // The stage is one-shot evidence. Once the run is admitted, removing
+        // it prevents a later definite refusal/cleanup callback from wiping
+        // committed shelves and makes repeated commit attempts fail closed.
+        runtime.assistantResponseAlternativeStages[lease.botID] = nil
+        return true
+    }
+
+    func clearAssistantResponseAlternativeIfOwned(_ lease: TranscriptActionLease) {
+        let runtime = ChatRuntime.shared
+        guard let stage = runtime.assistantResponseAlternativeStages[lease.botID],
+              stage.operationID == lease.id else { return }
+        // A definite refusal owns only this uncommitted stage. Previously
+        // committed groups are independent local history and must survive.
+        runtime.assistantResponseAlternativeStages[lease.botID] = nil
     }
 
     private func ownsTranscriptBinding(_ lease: TranscriptActionLease) -> Bool {

@@ -23,19 +23,35 @@ public enum TranscriptActing {
     }
 
     public struct Plan: Equatable, Sendable {
+        public enum Kind: String, Sendable, Equatable {
+            case restore
+            case regenerate
+            case edit
+        }
+
         public var sourceIndex: Int
         public var sourceText: String
         public var text: String
         public var truncate: TruncateAddress
         public var dropsFromIndex: Int
+        /// Metadata used only by the local response-alternative lifecycle.
+        /// `truncate` remains the exact existing wire address.
+        public var kind: Kind
+        public var sourceUserID: UUID?
+        public var previousAssistantRun: [ChatMessage]
 
         public init(sourceIndex: Int, sourceText: String, text: String,
-                    truncate: TruncateAddress, dropsFromIndex: Int) {
+                    truncate: TruncateAddress, dropsFromIndex: Int,
+                    kind: Kind = .restore, sourceUserID: UUID? = nil,
+                    previousAssistantRun: [ChatMessage] = []) {
             self.sourceIndex = sourceIndex
             self.sourceText = sourceText
             self.text = text
             self.truncate = truncate
             self.dropsFromIndex = dropsFromIndex
+            self.kind = kind
+            self.sourceUserID = sourceUserID
+            self.previousAssistantRun = previousAssistantRun
         }
     }
 
@@ -74,7 +90,20 @@ public enum TranscriptActing {
         guard let parentIndex = messages.firstIndex(where: { $0.id == messageID }) else { return nil }
         let userIndex = messages[0...parentIndex].lastIndex(where: { $0.author == .user })
         guard let userIndex else { return nil }
-        return planRestore(messages, from: messages[userIndex].id)
+        let source = messages[userIndex]
+        let sourceEnd = messages[(userIndex + 1)..<messages.endIndex]
+            .firstIndex(where: { $0.author == .user }) ?? messages.endIndex
+        let previousAssistantRun = Array(messages[(userIndex + 1)..<sourceEnd])
+            .filter { $0.author == .bot }
+        guard let restore = planRestore(messages, from: source.id) else { return nil }
+        return Plan(sourceIndex: restore.sourceIndex,
+                    sourceText: restore.sourceText,
+                    text: restore.text,
+                    truncate: restore.truncate,
+                    dropsFromIndex: restore.dropsFromIndex,
+                    kind: .regenerate,
+                    sourceUserID: source.id,
+                    previousAssistantRun: previousAssistantRun)
     }
 
     /// Restore/rewind a user turn: drop it and everything after, then run the
@@ -89,7 +118,9 @@ public enum TranscriptActing {
                     sourceText: sourceText,
                     text: sourceText,
                     truncate: truncate,
-                    dropsFromIndex: sourceIndex)
+                    dropsFromIndex: sourceIndex,
+                    kind: .restore,
+                    sourceUserID: messages[sourceIndex].id)
     }
 
     /// Edit a user turn: drop it and everything after, then submit the new text.
@@ -106,7 +137,9 @@ public enum TranscriptActing {
                     sourceText: sourceText,
                     text: trimmed,
                     truncate: truncate,
-                    dropsFromIndex: sourceIndex)
+                    dropsFromIndex: sourceIndex,
+                    kind: .edit,
+                    sourceUserID: messages[sourceIndex].id)
     }
 
     /// After a truncating submit, surviving visible user turns get new SQLite
