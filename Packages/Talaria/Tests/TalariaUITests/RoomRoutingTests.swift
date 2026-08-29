@@ -967,13 +967,24 @@ final class RoomRoutingTests: XCTestCase {
         XCTAssertEqual(afterCreate.count, 2)
         XCTAssertEqual(Set(afterCreate.map(\.route)), Set(members.map(\.route)))
         XCTAssertTrue(afterCreate.allSatisfy { $0.kind == .add && $0.newName == "Fleet" })
+        model.updateRoomComposerDraft("unfinished fleet note", roomID: id)
+        await model.flushRoomComposerDraft(id)
+        let storedDraft = try await store.composerDraft(roomID: id)
+        XCTAssertEqual(storedDraft, "unfinished fleet note")
 
         try await model.disbandRoom(id)
+        XCTAssertEqual(model.roomComposerDraft(id), "")
         let fresh = RoomStore(baseDirectory: base)
         let afterDisband = try await fresh.metadataOutbox()
         XCTAssertEqual(afterDisband.count, 4)
         XCTAssertEqual(afterDisband.suffix(2).map(\.kind), [.remove, .remove])
         XCTAssertTrue(afterDisband.suffix(2).allSatisfy { $0.oldName == "Fleet" })
+        do {
+            _ = try await fresh.composerDraft(roomID: id)
+            XCTFail("disband must purge the immutable room draft")
+        } catch {
+            XCTAssertEqual(error as? RoomStoreError, .roomNotFound(id))
+        }
         try await fresh.deleteAll()
     }
 

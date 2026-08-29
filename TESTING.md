@@ -320,6 +320,14 @@ Retain a two-Desktop/one-phone report covering:
 6. Feature detection against an older gateway with no `ui_meta_revisions`,
    exercising only the bounded legacy fallback without presenting it as
    conflict-safe.
+7. On the phone, type distinct unsent main-composer text in two rooms, switch
+   repeatedly, background and terminate the app, then relaunch and confirm
+   each immutable room restores only its own text. Rename one room and retain
+   its draft. Prove a failed/uncertain send preserves it and an acknowledged
+   send clears only that room. Disband and same-name recreate must restore no
+   old text; an authoritative remote tombstone and Settings → Delete Local
+   Data must also purge it. Confirm no draft text appears in either gateway's
+   shared `hermes-bots-groups` profile metadata.
 
 The projection limit is 48,000 bytes with at most 16 recent messages per room,
 1,200 text characters per projected message, and a 24,000-character image.

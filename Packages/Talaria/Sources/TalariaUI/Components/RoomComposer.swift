@@ -44,9 +44,11 @@ public struct RoomComposer: View {
     public let members: [RoomMember]
     public let placeholder: String
     public let submitLabel: String
+    public let draftPersistenceError: String?
     public let onSubmit: (String, [RoomOutboundAttachment]) async throws -> Void
 
-    @State private var draft = ""
+    private let externalDraft: Binding<String>?
+    @State private var localDraft = ""
     @State private var attachments: [RoomOutboundAttachment] = []
     @State private var sending = false
     @State private var error: String?
@@ -61,9 +63,12 @@ public struct RoomComposer: View {
 
     public init(theme: ThemePack, members: [RoomMember], placeholder: String,
                 submitLabel: String = "Send",
+                draft: Binding<String>? = nil,
+                draftPersistenceError: String? = nil,
                 onSubmit: @escaping (String, [RoomOutboundAttachment]) async throws -> Void) {
         self.theme = theme; self.members = members; self.placeholder = placeholder
-        self.submitLabel = submitLabel; self.onSubmit = onSubmit
+        self.submitLabel = submitLabel; externalDraft = draft
+        self.draftPersistenceError = draftPersistenceError; self.onSubmit = onSubmit
     }
 
     public var body: some View {
@@ -72,8 +77,12 @@ public struct RoomComposer: View {
             if let error {
                 Text(error).font(theme.body(10)).foregroundStyle(theme.danger).lineLimit(2)
             }
+            if let draftPersistenceError {
+                Text(draftPersistenceError)
+                    .font(theme.body(10)).foregroundStyle(theme.warn).lineLimit(2)
+            }
             if !mentionOptions.isEmpty { mentionSuggestions }
-            TextField(placeholder, text: $draft, axis: .vertical)
+            TextField(placeholder, text: draftBinding, axis: .vertical)
                 .font(theme.body(14)).lineLimit(1...6).focused($focused)
                 .textFieldStyle(.plain).padding(.horizontal, 12).padding(.vertical, 10)
                 .background(theme.ink.opacity(0.055), in: RoundedRectangle(cornerRadius: 13))
@@ -160,7 +169,8 @@ public struct RoomComposer: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+        !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !attachments.isEmpty
     }
 
     private var mentionHint: String {
@@ -172,7 +182,7 @@ public struct RoomComposer: View {
     }
 
     private var mentionToken: String? {
-        RoomMentionCompletion.activeToken(in: draft)?.token
+        RoomMentionCompletion.activeToken(in: draftText)?.token
     }
 
     private var mentionOptions: [String] {
@@ -208,9 +218,21 @@ public struct RoomComposer: View {
     }
 
     private func insertMention(_ handle: String) {
-        guard let active = RoomMentionCompletion.activeToken(in: draft) else { return }
-        draft = BotMention.complete(draft, range: active.range, with: handle)
+        guard let active = RoomMentionCompletion.activeToken(in: draftText) else { return }
+        draftText = BotMention.complete(draftText, range: active.range, with: handle)
         focused = true
+    }
+
+    private var draftBinding: Binding<String> {
+        Binding(get: { draftText }, set: { draftText = $0 })
+    }
+
+    private var draftText: String {
+        get { externalDraft?.wrappedValue ?? localDraft }
+        nonmutating set {
+            if let externalDraft { externalDraft.wrappedValue = newValue }
+            else { localDraft = newValue }
+        }
     }
 
     private var attachmentTray: some View {
@@ -237,13 +259,15 @@ public struct RoomComposer: View {
 
     private func send() {
         guard canSend, !sending else { return }
-        let text = draft
+        let text = draftText
         let payload = attachments
         sending = true; error = nil
         Task { @MainActor in
             do {
                 try await onSubmit(text, payload)
-                draft = ""; attachments = []; focused = false
+                draftText = RoomComposerDraftCompletionPolicy.result(
+                    current: draftText, submitted: text, sendSucceeded: true)
+                attachments = []; focused = false
             } catch {
                 self.error = error.localizedDescription
             }

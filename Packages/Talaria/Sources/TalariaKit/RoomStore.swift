@@ -10,6 +10,7 @@ public enum RoomStoreError: Error, Equatable, Sendable {
     case unsafePath
     case deleteCommitFailed
     case deleteCleanupFailed
+    case draftCapacityExceeded
 }
 
 public enum RoomStoreDeletePhase: Sendable { case beforeEmptyCommit, afterEmptyCommit }
@@ -58,6 +59,10 @@ public actor RoomStore {
         /// reused route.
         var ignoredMetadataMutationIDs: [UUID]
         var pendingLifecycleRoutes: [GatewayBotRoute]
+        /// Local-only, bounded text keyed solely by immutable room identity.
+        /// Missing on older v1 envelopes means there was no durable draft
+        /// state to migrate.
+        var composerDrafts: [RoomComposerDraft]
         /// Bounded cross-client mirror and tombstone ledger. This remains
         /// separate from `rooms`: remote truncation can never prune the rich
         /// protected transcript or its runtime reconciliation state.
@@ -67,17 +72,20 @@ public actor RoomStore {
              retiredMetadataRoutes: [GatewayBotRoute],
              ignoredMetadataMutationIDs: [UUID],
              pendingLifecycleRoutes: [GatewayBotRoute] = [],
+             composerDrafts: [RoomComposerDraft] = [],
              roomProjection: RoomProjectionEnvelope = RoomProjectionEnvelope()) {
             self.version = version; self.rooms = rooms; self.metadataOutbox = metadataOutbox
             self.retiredMetadataRoutes = retiredMetadataRoutes
             self.ignoredMetadataMutationIDs = ignoredMetadataMutationIDs
             self.pendingLifecycleRoutes = pendingLifecycleRoutes
+            self.composerDrafts = composerDrafts
             self.roomProjection = roomProjection.bounded()
         }
 
         private enum CodingKeys: String, CodingKey {
             case version, rooms, metadataOutbox, retiredMetadataRoutes,
-                 ignoredMetadataMutationIDs, pendingLifecycleRoutes, roomProjection
+                 ignoredMetadataMutationIDs, pendingLifecycleRoutes, composerDrafts,
+                 roomProjection
         }
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -91,6 +99,8 @@ public actor RoomStore {
                                                                      forKey: .ignoredMetadataMutationIDs) ?? []
             pendingLifecycleRoutes = try values.decodeIfPresent([GatewayBotRoute].self,
                                                                forKey: .pendingLifecycleRoutes) ?? []
+            composerDrafts = try values.decodeIfPresent([RoomComposerDraft].self,
+                                                        forKey: .composerDrafts) ?? []
             if values.contains(.roomProjection) {
                 let raw = try values.decode(JSONValue.self, forKey: .roomProjection)
                 guard let projection = RoomProjectionEnvelope.strictlyDecodedPersisted(raw) else {
@@ -121,6 +131,7 @@ public actor RoomStore {
     private var cachedRetiredMetadataRoutes: Set<GatewayBotRoute>?
     private var cachedIgnoredMetadataMutationIDs: Set<UUID>?
     private var cachedPendingLifecycleRoutes: Set<GatewayBotRoute>?
+    private var cachedComposerDrafts: [RoomID: String]?
     private var cachedRoomProjection: RoomProjectionEnvelope?
 
     public init(baseDirectory: URL? = nil, fileManager: FileManager = .default,
@@ -157,6 +168,7 @@ public actor RoomStore {
             cachedRetiredMetadataRoutes = []
             cachedIgnoredMetadataMutationIDs = []
             cachedPendingLifecycleRoutes = []
+            cachedComposerDrafts = [:]
             cachedRoomProjection = RoomProjectionEnvelope()
             return []
         }
@@ -193,10 +205,16 @@ public actor RoomStore {
         try validateRetiredMetadataRoutes(envelope.retiredMetadataRoutes)
         try validateRetiredMetadataRoutes(envelope.pendingLifecycleRoutes)
         try validateIgnoredMetadataMutationIDs(envelope.ignoredMetadataMutationIDs)
+        guard RoomComposerDraftPolicy.admits(envelope.composerDrafts),
+              envelope.composerDrafts.allSatisfy({ rooms[$0.roomID] != nil }) else {
+            throw RoomStoreError.corruptIndex
+        }
         cachedMetadataOutbox = envelope.metadataOutbox
         cachedRetiredMetadataRoutes = Set(envelope.retiredMetadataRoutes)
         cachedIgnoredMetadataMutationIDs = Set(envelope.ignoredMetadataMutationIDs)
         cachedPendingLifecycleRoutes = Set(envelope.pendingLifecycleRoutes)
+        cachedComposerDrafts = Dictionary(uniqueKeysWithValues:
+            envelope.composerDrafts.map { ($0.roomID, $0.text) })
         cachedRoomProjection = envelope.roomProjection.bounded()
         if migrated {
             try persist(Array(rooms.values), outbox: envelope.metadataOutbox,
@@ -209,6 +227,32 @@ public actor RoomStore {
 
     public func room(id: RoomID) throws -> RoomRecord? {
         try ensureLoaded()[id]
+    }
+
+    public func composerDraft(roomID: RoomID) throws -> String {
+        guard try ensureLoaded()[roomID] != nil else {
+            throw RoomStoreError.roomNotFound(roomID)
+        }
+        return cachedComposerDrafts?[roomID] ?? ""
+    }
+
+    /// Replace one exact room's local draft in the same protected, atomic
+    /// envelope as the room index. Empty text removes the row.
+    @discardableResult
+    public func setComposerDraft(_ proposed: String, roomID: RoomID) throws -> String {
+        let rooms = try ensureLoaded()
+        guard rooms[roomID] != nil else { throw RoomStoreError.roomNotFound(roomID) }
+        let text = RoomComposerDraftPolicy.bounded(proposed)
+        var drafts = cachedComposerDrafts ?? [:]
+        if text.isEmpty { drafts[roomID] = nil }
+        else { drafts[roomID] = text }
+        let rows = composerDraftRows(drafts)
+        guard RoomComposerDraftPolicy.admits(rows) else {
+            throw RoomStoreError.draftCapacityExceeded
+        }
+        try persist(Array(rooms.values), composerDrafts: rows)
+        cachedComposerDrafts = drafts
+        return text
     }
 
     /// The durable bounded projection/tombstone ledger. This is never derived
@@ -269,11 +313,16 @@ public actor RoomStore {
             existing: existing, preservingRoomIDs: preservingRoomIDs,
             allowedGatewayIDs: allowedGatewayIDs)
         let committedRooms = sorted(hydrated.rooms.values)
+        let retainedDrafts = (cachedComposerDrafts ?? [:]).filter {
+            hydrated.rooms[$0.key] != nil
+        }
 
         // One atomic index replacement contains both the merged ledger and
         // every rich hydration/deletion. Caches advance only after that write.
-        try persist(committedRooms, roomProjection: merged)
+        try persist(committedRooms, composerDrafts: composerDraftRows(retainedDrafts),
+                    roomProjection: merged)
         cachedRooms = hydrated.rooms
+        cachedComposerDrafts = retainedDrafts
         cachedRoomProjection = merged
 
         // The committed index no longer references these directories. Cleanup
@@ -454,9 +503,13 @@ public actor RoomStore {
         outbox.append(contentsOf: metadataMutations.filter {
             !retiredRoutes.contains($0.route)
         })
+        var drafts = cachedComposerDrafts ?? [:]
+        drafts[roomID] = nil
         try persist(Array(rooms.values), outbox: outbox,
-                    retiredRoutes: Array(retiredRoutes))
+                    retiredRoutes: Array(retiredRoutes),
+                    composerDrafts: composerDraftRows(drafts))
         cachedRooms = rooms
+        cachedComposerDrafts = drafts
         cachedMetadataOutbox = outbox
         cachedRetiredMetadataRoutes = retiredRoutes
         let directory = blobDirectory(roomID: roomID)
@@ -579,6 +632,7 @@ public actor RoomStore {
             try deleteFailure?(.beforeEmptyCommit)
             try persist([], outbox: [], retiredRoutes: [], ignoredMutationIDs: [],
                         pendingLifecycleRoutes: [],
+                        composerDrafts: [],
                         roomProjection: RoomProjectionEnvelope())
         } catch { throw RoomStoreError.deleteCommitFailed }
         cachedRooms = [:]
@@ -586,6 +640,7 @@ public actor RoomStore {
         cachedRetiredMetadataRoutes = []
         cachedIgnoredMetadataMutationIDs = []
         cachedPendingLifecycleRoutes = []
+        cachedComposerDrafts = [:]
         cachedRoomProjection = RoomProjectionEnvelope()
         do {
             try deleteFailure?(.afterEmptyCommit)
@@ -695,18 +750,24 @@ public actor RoomStore {
                          retiredRoutes: [GatewayBotRoute]? = nil,
                          ignoredMutationIDs: [UUID]? = nil,
                          pendingLifecycleRoutes: [GatewayBotRoute]? = nil,
+                         composerDrafts: [RoomComposerDraft]? = nil,
                          roomProjection: RoomProjectionEnvelope? = nil) throws {
         try prepareDirectories()
         let metadataOutbox = outbox ?? cachedMetadataOutbox ?? []
         let routes = retiredRoutes ?? Array(cachedRetiredMetadataRoutes ?? [])
         let ignored = ignoredMutationIDs ?? Array(cachedIgnoredMetadataMutationIDs ?? [])
         let pending = pendingLifecycleRoutes ?? Array(cachedPendingLifecycleRoutes ?? [])
+        let drafts = composerDrafts ?? composerDraftRows(cachedComposerDrafts ?? [:])
         let projection = (roomProjection ?? cachedRoomProjection ?? RoomProjectionEnvelope()).bounded()
         for room in rooms { try validateProjectionIdentity(in: room) }
         try validateMetadataOutbox(metadataOutbox)
         try validateRetiredMetadataRoutes(routes)
         try validateRetiredMetadataRoutes(pending)
         try validateIgnoredMetadataMutationIDs(ignored)
+        guard RoomComposerDraftPolicy.admits(drafts),
+              drafts.allSatisfy({ draft in rooms.contains { $0.id == draft.roomID } }) else {
+            throw RoomStoreError.corruptIndex
+        }
         let envelope = Envelope(version: Self.schemaVersion, rooms: sorted(rooms),
                                 metadataOutbox: metadataOutbox,
                                 retiredMetadataRoutes: routes.sorted {
@@ -715,11 +776,18 @@ public actor RoomStore {
                                     $0.uuidString < $1.uuidString
                                 }, pendingLifecycleRoutes: pending.sorted {
                                     $0.qualifiedID < $1.qualifiedID
-                                }, roomProjection: projection)
+                                }, composerDrafts: drafts,
+                                roomProjection: projection)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(envelope)
         try writeProtected(data, to: indexURL)
+    }
+
+    private func composerDraftRows(_ drafts: [RoomID: String]) -> [RoomComposerDraft] {
+        drafts.map(RoomComposerDraft.init(roomID:text:)).sorted {
+            $0.roomID.description < $1.roomID.description
+        }
     }
 
     private func validateAttachmentFiles(in room: RoomRecord) throws {

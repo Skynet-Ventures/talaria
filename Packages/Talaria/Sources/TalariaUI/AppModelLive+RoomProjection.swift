@@ -662,6 +662,7 @@ final class RoomProjectionRuntime {
         let result = try await store.reconcileRoomProjection(
             incoming, preservingRoomIDs: preservingRoomIDs,
             allowedGatewayIDs: allowedGatewayIDs)
+        runtime.retainComposerDrafts(for: Set(result.rooms.map(\.id)))
         runtime.rooms = result.rooms.sorted {
             if $0.lastActivityAt != $1.lastActivityAt {
                 return $0.lastActivityAt > $1.lastActivityAt
