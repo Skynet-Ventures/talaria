@@ -1,14 +1,6 @@
 import Foundation
 import TalariaKit
 
-private enum RoomComposerDraftClearError: LocalizedError {
-    case storage
-
-    var errorDescription: String? {
-        "Message sent, but its saved draft could not be cleared. The text was preserved."
-    }
-}
-
 @MainActor
 extension RoomRuntime {
     @discardableResult
@@ -57,6 +49,12 @@ extension AppModel {
             runtime.retireComposerDraft(roomID)
             return
         }
+        // A runtime value means this room has already been initialized or the
+        // user has edited it. In particular, a failed protected write keeps
+        // newer text and its warning in memory. A later view `.task` must not
+        // replace that state with the older durable envelope merely because
+        // no generation changed while the screen was away.
+        guard runtime.composerDrafts[roomID] == nil else { return }
         let generation = runtime.composerDraftGenerations[roomID] ?? 0
         await runtime.composerDraftTasks[roomID]?.value
         guard runtime.composerDraftGenerations[roomID] ?? 0 == generation else { return }
@@ -115,11 +113,13 @@ extension AppModel {
         await RoomRuntime.shared.composerDraftTasks[roomID]?.value
     }
 
-    /// A send is not presented as complete until its exact draft deletion is
-    /// durable. If newer text won while an await was suspended, that text and
-    /// its queued write remain untouched.
+    /// Clear the exact submitted snapshot after a successful send. Durable
+    /// cleanup failure is presentation state, not a send failure: the message
+    /// has already been accepted and must never become retryable here. If
+    /// newer text won while an await was suspended, that text and its queued
+    /// write remain untouched.
     func clearRoomComposerDraftAfterSend(_ roomID: RoomID,
-                                         submitted: String) async throws {
+                                         submitted: String) async {
         let runtime = RoomRuntime.shared
         let expected = RoomComposerDraftPolicy.bounded(submitted)
         await runtime.composerDraftTasks[roomID]?.value
@@ -134,7 +134,7 @@ extension AppModel {
             guard runtime.composerDraftGenerations[roomID] == generation else { return }
             runtime.composerDraftErrors[roomID] =
                 "Message sent, but its saved draft could not be cleared."
-            throw RoomComposerDraftClearError.storage
+            return
         }
         guard runtime.composerDraftGenerations[roomID] == generation,
               runtime.composerDrafts[roomID] == expected else { return }

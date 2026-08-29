@@ -82,7 +82,7 @@ public struct RoomView: View {
                     ) { text, attachments in
                         _ = try await model.sendRoomMessage(roomID: roomID, text: text,
                                                             attachments: attachments)
-                        try await model.clearRoomComposerDraftAfterSend(
+                        await model.clearRoomComposerDraftAfterSend(
                             roomID, submitted: text)
                     }
                     .padding(10).background(theme.bg)

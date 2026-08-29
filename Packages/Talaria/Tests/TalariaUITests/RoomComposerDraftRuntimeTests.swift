@@ -55,7 +55,7 @@ final class RoomComposerDraftRuntimeTests: XCTestCase {
         XCTAssertEqual(firstRestored, "first draft")
         XCTAssertEqual(secondRestored, "second draft")
 
-        try await model.clearRoomComposerDraftAfterSend(first.id, submitted: "first draft")
+        await model.clearRoomComposerDraftAfterSend(first.id, submitted: "first draft")
         XCTAssertEqual(model.roomComposerDraft(first.id), "")
         XCTAssertEqual(model.roomComposerDraft(second.id), "second draft")
         let afterSend = RoomStore(baseDirectory: base)
@@ -64,7 +64,7 @@ final class RoomComposerDraftRuntimeTests: XCTestCase {
         XCTAssertEqual(cleared, "")
         XCTAssertEqual(untouched, "second draft")
 
-        try await model.clearRoomComposerDraftAfterSend(second.id, submitted: "older text")
+        await model.clearRoomComposerDraftAfterSend(second.id, submitted: "older text")
         XCTAssertEqual(model.roomComposerDraft(second.id), "second draft")
     }
 
@@ -115,6 +115,50 @@ final class RoomComposerDraftRuntimeTests: XCTestCase {
         XCTAssertEqual(model.roomComposerDraft(room.id), "new typing")
         let persisted = try await store.composerDraft(roomID: room.id)
         XCTAssertEqual(persisted, "new typing")
+    }
+
+    func testFailedDraftWriteSurvivesViewReloadWithoutDiskClobber() async throws {
+        let runtime = RoomRuntime.shared
+        let room = RoomRecord(name: "Dirty", members: members())
+        try await runtime.store.upsert(room)
+        try await runtime.store.setComposerDraft("old disk value", roomID: room.id)
+        runtime.rooms = [room]
+        let model = AppModel()
+
+        // Keep the actor cache loaded, then make every later protected write
+        // fail without changing the already persisted envelope.
+        let rootURL = await runtime.store.rootURL
+        try FileManager.default.removeItem(at: rootURL)
+        try Data().write(to: rootURL)
+        model.updateRoomComposerDraft("new unsaved typing", roomID: room.id)
+        await model.flushRoomComposerDraft(room.id)
+
+        XCTAssertEqual(model.roomComposerDraft(room.id), "new unsaved typing")
+        let warning = try XCTUnwrap(model.roomComposerDraftError(room.id))
+
+        await model.loadRoomComposerDraft(room.id)
+
+        XCTAssertEqual(model.roomComposerDraft(room.id), "new unsaved typing")
+        XCTAssertEqual(model.roomComposerDraftError(room.id), warning)
+    }
+
+    func testFailedPostSendDraftClearDoesNotTurnAcceptedSendIntoError() async throws {
+        let runtime = RoomRuntime.shared
+        let room = RoomRecord(name: "Accepted", members: members())
+        try await runtime.store.upsert(room)
+        try await runtime.store.setComposerDraft("already sent", roomID: room.id)
+        runtime.rooms = [room]
+        runtime.composerDrafts[room.id] = "already sent"
+        let model = AppModel()
+
+        let rootURL = await runtime.store.rootURL
+        try FileManager.default.removeItem(at: rootURL)
+        try Data().write(to: rootURL)
+        await model.clearRoomComposerDraftAfterSend(room.id, submitted: "already sent")
+
+        XCTAssertEqual(model.roomComposerDraft(room.id), "already sent")
+        XCTAssertEqual(model.roomComposerDraftError(room.id),
+                       "Message sent, but its saved draft could not be cleared.")
     }
 
     func testRuntimeProjectionRetentionPurgesOnlyDeletedRoomIdentity() {
