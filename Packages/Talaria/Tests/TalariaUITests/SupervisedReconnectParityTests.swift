@@ -22,6 +22,12 @@ private actor ForegroundPingLatch {
     }
 }
 
+private actor ForegroundPingCounter {
+    private(set) var count = 0
+
+    func increment() { count += 1 }
+}
+
 final class SupervisedReconnectParityTests: XCTestCase {
     @MainActor
     private struct Fixture {
@@ -282,6 +288,55 @@ final class SupervisedReconnectParityTests: XCTestCase {
         await ping.release()
         await waitUntil { dialCount > 0 }
         XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
+    func testLaterWakeValidatesAgainWhilePriorAncillaryRefreshIsStillRunning() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+
+        let pings = ForegroundPingCounter()
+        await fixture.client.setRPCExecutorForTesting { method, _, _ in
+            if method == "gateway.ping" {
+                await pings.increment()
+            }
+            return .object(["ok": .bool(true)])
+        }
+
+        // Hold the first wake after its socket ping has succeeded. A genuine
+        // second lock/unlock must not be dropped merely because this slower
+        // saved-gateway refresh is still completing.
+        let refresh = ForegroundPingLatch()
+        supervisor.healthProbe = { _ in
+            await refresh.enter()
+            return (.connected, GatewayDiagnostics())
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<1_000 {
+            if await refresh.isWaiting { break }
+            await Task.yield()
+        }
+        let firstRefreshIsWaiting = await refresh.isWaiting
+        let firstPingCount = await pings.count
+        XCTAssertTrue(firstRefreshIsWaiting)
+        XCTAssertEqual(firstPingCount, 1)
+        XCTAssertNil(supervisor.foregroundValidationTask,
+                     "the lease ends with socket validation, not ancillary refresh")
+
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<1_000 {
+            if await pings.count == 2 { break }
+            await Task.yield()
+        }
+
+        let finalPingCount = await pings.count
+        XCTAssertEqual(finalPingCount, 2,
+                       "a later foreground edge must validate the socket again")
+        await refresh.release()
+        for _ in 0..<20 { await Task.yield() }
     }
 
     @MainActor

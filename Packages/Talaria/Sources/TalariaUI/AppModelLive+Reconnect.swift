@@ -153,6 +153,19 @@ final class ConnectionSupervisor {
         reauthGateway = nil
     }
 
+    /// End only the foreground validation lease owned by `token`.
+    ///
+    /// The lease coalesces duplicate UIKit/SwiftUI callbacks while the
+    /// bounded socket ping is in flight. It must not cover the slower roster,
+    /// diagnostics, and room refresh that follows a successful ping: a real
+    /// later lock/unlock needs to validate the transport again even if that
+    /// ancillary refresh is still running.
+    func releaseForegroundValidation(ifOwnedBy token: UUID) {
+        guard foregroundValidationToken == token else { return }
+        foregroundValidationTask = nil
+        foregroundValidationToken = nil
+    }
+
     func note(error: Error, forGatewayID id: String?) {
         guard let id else { return }
         var entry = diagnostics[id] ?? GatewayDiagnostics()
@@ -387,10 +400,7 @@ extension AppModel {
         supervisor.foregroundValidationToken = token
         supervisor.foregroundValidationTask = Task { @MainActor [weak self] in
             defer {
-                if supervisor.foregroundValidationToken == token {
-                    supervisor.foregroundValidationTask = nil
-                    supervisor.foregroundValidationToken = nil
-                }
+                supervisor.releaseForegroundValidation(ifOwnedBy: token)
             }
             guard !Task.isCancelled, let self else { return }
             guard mode == .live, let client,
@@ -404,6 +414,10 @@ extension AppModel {
             // generation change while ping was suspended makes its answer
             // irrelevant. Never reconnect or publish against ambient state.
             guard currentReconnectAuthority()?.episodeSource == capturedSource else { return }
+            // Only the bounded exact-socket validation is single-flight.
+            // Release before any potentially slow HTTP/roster/room work so a
+            // distinct later foreground edge cannot be silently discarded.
+            supervisor.releaseForegroundValidation(ifOwnedBy: token)
             switch liveness {
             case .reconnectRequired:
                 reconnectNow()
