@@ -564,6 +564,8 @@ public struct ToolCompletePayload: Sendable {
     public var deferredWebSearchOutput: ToolWebSearchOutput?
     public var deferredWebSearchHasExplicitError: Bool
     public var webSearchHasExplicitError: Bool
+    public var generatedImage: ToolGeneratedImage?
+    public var deferredGeneratedImage: ToolGeneratedImage?
 
     public init(_ v: JSONValue?) {
         toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
@@ -607,6 +609,15 @@ public struct ToolCompletePayload: Sendable {
         deferredWebSearchHasExplicitError = name.isEmpty
             && searchCandidate.hasExplicitError
         webSearchHasExplicitError = searchAdmission.hasExplicitError
+        let generatedCandidate = ToolGeneratedImageCodec.candidate(
+            arguments: arguments, result: rawResult)
+        // A completion payload is evidence, not invocation authority. Even an
+        // exact repeated name remains inert until an exact tool id pairs it
+        // with a retained or live start.
+        generatedImage = nil
+        deferredGeneratedImage = (name.isEmpty
+            || ToolGeneratedImageCodec.isGeneratedImageTool(name))
+            ? generatedCandidate : nil
     }
 }
 

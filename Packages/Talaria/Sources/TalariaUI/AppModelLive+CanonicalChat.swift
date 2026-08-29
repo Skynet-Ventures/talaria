@@ -457,6 +457,33 @@ enum TranscriptHydrationMerge {
                 merged[index].deferredWebSearchOutput = nil
                 merged[index].deferredWebSearchHasExplicitError = false
             }
+            let storedGeneratedEvidence = ToolGeneratedImage.merging(
+                newer: merged[index].generatedImage,
+                preserving: merged[index].deferredGeneratedImage)
+            let overlayGeneratedEvidence = ToolGeneratedImage.merging(
+                newer: overlay.generatedImage,
+                preserving: overlay.deferredGeneratedImage)
+            let storedHadGeneratedEvidence = storedGeneratedEvidence != nil
+            if ToolGeneratedImageCodec.isGeneratedImageTool(merged[index].name) {
+                let preservesGeneratedFailure = storedHadGeneratedEvidence
+                    && stored[index].state == .failed && overlay.state != .failed
+                merged[index].generatedImage = preservesGeneratedFailure
+                    ? ToolGeneratedImage.merging(
+                        newer: storedGeneratedEvidence, preserving: overlayGeneratedEvidence)
+                    : ToolGeneratedImage.merging(
+                        newer: overlayGeneratedEvidence, preserving: storedGeneratedEvidence)
+                merged[index].generatedImage = ToolGeneratedImageCodec.applyingAspectHint(
+                    merged[index].generatedImage, arguments: merged[index].arguments)
+                merged[index].deferredGeneratedImage = nil
+            } else if merged[index].name.isEmpty || merged[index].name == "Tool" {
+                merged[index].generatedImage = nil
+                merged[index].deferredGeneratedImage = ToolGeneratedImage.merging(
+                    newer: overlay.deferredGeneratedImage,
+                    preserving: merged[index].deferredGeneratedImage)
+            } else {
+                merged[index].generatedImage = nil
+                merged[index].deferredGeneratedImage = nil
+            }
             if var liveDiff = overlay.fileDiff ?? overlay.deferredFileDiff,
                ToolDiffCodec.isFileEditTool(merged[index].name) {
                 // The live event owns the current body. Raw storage may enrich
@@ -484,6 +511,10 @@ enum TranscriptHydrationMerge {
                 merged[index].state = .failed
             }
             if storedHadSearchEvidence || overlaySearchEvidence != nil,
+               stored[index].state == .failed, overlay.state != .failed {
+                merged[index].state = .failed
+            }
+            if storedHadGeneratedEvidence || overlayGeneratedEvidence != nil,
                stored[index].state == .failed, overlay.state != .failed {
                 merged[index].state = .failed
             }

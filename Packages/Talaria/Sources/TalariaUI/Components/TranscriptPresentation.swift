@@ -26,7 +26,13 @@ public struct TranscriptPresentationPolicy: Sendable, Equatable {
     /// including failures, remains in the model and appears immediately when
     /// Advanced is enabled; none of it competes with the bot-focused view.
     public func visibleToolCalls(_ calls: [ToolCall]) -> [ToolCall] {
-        detail == .quiet ? [] : calls
+        guard detail == .quiet else { return calls }
+        // A completed generated image is assistant content, not diagnostic
+        // tool detail. Keep that deliverable visible without exposing ordinary
+        // tool arguments/results in the bot-focused mode.
+        return calls.filter {
+            GeneratedImageEchoPolicy.hasSuccessfulAuthority($0)
+        }
     }
 
     /// A quiet transcript always uses the face as its busy affordance.

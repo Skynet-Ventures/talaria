@@ -8,6 +8,12 @@ delivery, but it is not retained certification evidence. The complete Debug /
 TestFlight, room-convergence, PTY, reconnect, and row-specific live matrices in
 [`TESTING.md`](../TESTING.md) remain authoritative.
 
+The reviewed transcript stack now also includes exact file diffs, structured
+terminal/execute-code output, web-search results, foreground find, and bounded
+`image_generate` cards. Generated-image gateway loading and share behavior are
+built and package-tested but still require retained real-device certification;
+see [`GENERATED-IMAGE-TRANSCRIPTS.md`](GENERATED-IMAGE-TRANSCRIPTS.md).
+
 Written 2026-08-18 from three sources: the 1,190-row desktop audit
 ([PARITY.md](../PARITY.md)), the 443-row Bot Mode plugin audit
 ([BOT-MODE-PARITY.md](BOT-MODE-PARITY.md)), and three bugs found by driving the

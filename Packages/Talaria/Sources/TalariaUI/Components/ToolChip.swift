@@ -28,6 +28,12 @@ enum ToolRunPresentationPolicy {
 
     static func shouldGroup(_ calls: [ToolCall]) -> Bool { calls.count > 1 }
 
+    static func isGeneratedImageSpecialist(_ call: ToolCall) -> Bool {
+        call.name == ToolGeneratedImageCodec.exactToolName
+            && (call.state == .running
+                || GeneratedImageEchoPolicy.hasSuccessfulAuthority(call))
+    }
+
     /// File diffs are review deliverables, not collapsible activity. Preserve
     /// order while grouping only the ordinary calls around them.
     static func presentationRuns(_ calls: [ToolCall]) -> [[ToolCall]] {
@@ -41,7 +47,8 @@ enum ToolRunPresentationPolicy {
         for call in calls {
             if (call.fileDiff != nil && ToolDiffCodec.isFileEditTool(call.name))
                 || (call.webSearchOutput != nil
-                    && ToolWebSearchCodec.isWebSearchTool(call.name)) {
+                    && ToolWebSearchCodec.isWebSearchTool(call.name))
+                || isGeneratedImageSpecialist(call) {
                 flush()
                 runs.append([call])
             } else {
@@ -69,12 +76,23 @@ public struct ToolCallList: View {
     private let theme: ThemePack
     private let copy: CopyPack
     private let accent: Color
+    private let generatedImageSource: GeneratedImagePresentationSource?
 
     public init(calls: [ToolCall], theme: ThemePack, copy: CopyPack, accent: Color) {
         self.calls = calls
         self.theme = theme
         self.copy = copy
         self.accent = accent
+        generatedImageSource = nil
+    }
+
+    init(calls: [ToolCall], theme: ThemePack, copy: CopyPack, accent: Color,
+         generatedImageSource: GeneratedImagePresentationSource?) {
+        self.calls = calls
+        self.theme = theme
+        self.copy = copy
+        self.accent = accent
+        self.generatedImageSource = generatedImageSource
     }
 
     public var body: some View {
@@ -84,6 +102,11 @@ public struct ToolCallList: View {
                 if run.count == 1, let call = run.first,
                    call.fileDiff != nil, ToolDiffCodec.isFileEditTool(call.name) {
                     FileDiffCard(call: call, theme: theme, accent: accent)
+                } else if run.count == 1, let call = run.first,
+                          ToolRunPresentationPolicy.isGeneratedImageSpecialist(call),
+                          let generatedImageSource {
+                    GeneratedImageCard(call: call, source: generatedImageSource,
+                                       theme: theme, accent: accent)
                 } else {
                     GenericToolRun(calls: run, theme: theme, copy: copy, accent: accent)
                 }
