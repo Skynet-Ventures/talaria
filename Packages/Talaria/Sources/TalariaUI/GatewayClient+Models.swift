@@ -58,7 +58,7 @@ public struct ModelPriceTag: Sendable, Hashable {
         output = v["output"]?.stringValue ?? ""
         cache = v["cache"]?.stringValue
         free = v["free"]?.boolValue ?? false
-        discountPercent = v["discount_percent"]?.intValue
+        discountPercent = Self.decodeDiscountPercent(v["discount_percent"])
         wasInput = v["was_input"]?.stringValue
         wasOutput = v["was_output"]?.stringValue
     }
@@ -73,6 +73,24 @@ public struct ModelPriceTag: Sendable, Hashable {
     /// "$3.00 / $15.00" — the compact in/out pair the desktop row shows.
     public var compact: String {
         free ? "FREE" : "\(input.isEmpty ? "?" : input) / \(output.isEmpty ? "?" : output)"
+    }
+
+    /// A sale badge is only presentation-safe when Hermes supplied an exact,
+    /// bounded percentage. Keep this guard at the view-model boundary as well
+    /// as decode time: callers can construct or mutate this public value in
+    /// tests and previews without accidentally rendering an invented discount.
+    public var boundedDiscountPercent: Int? {
+        guard let discountPercent, (1...100).contains(discountPercent) else { return nil }
+        return discountPercent
+    }
+
+    private static func decodeDiscountPercent(_ value: JSONValue?) -> Int? {
+        guard let value = value?.doubleValue,
+              value.isFinite,
+              value >= 1,
+              value <= 100,
+              let percent = Int(exactly: value) else { return nil }
+        return percent
     }
 }
 
@@ -245,6 +263,125 @@ public struct ModelSwitchOutcome: Sendable, Equatable {
     }
 }
 
+// MARK: - Profile model-management contracts
+
+/// One task returned by profile-scoped `GET /api/model/auxiliary`.
+public struct AuxiliaryModelSlot: Sendable, Equatable, Identifiable {
+    public var id: String { task }
+    public var task: String
+    public var provider: String
+    public var model: String
+    public var baseURL: String
+
+    init?(_ value: JSONValue) {
+        guard let task = Self.wireString(value["task"], maximum: 64), !task.isEmpty,
+              let provider = Self.wireString(value["provider"], maximum: 256),
+              let model = Self.wireString(value["model"], maximum: 1_024),
+              let baseURL = Self.wireString(value["base_url"], maximum: 4_096) else {
+            return nil
+        }
+        self.task = task
+        self.provider = provider.isEmpty ? "auto" : provider
+        self.model = model
+        self.baseURL = baseURL
+    }
+
+    public init(task: String, provider: String, model: String = "", baseURL: String = "") {
+        self.task = task; self.provider = provider; self.model = model; self.baseURL = baseURL
+    }
+
+    private static func wireString(_ value: JSONValue?, maximum: Int) -> String? {
+        guard let raw = value?.stringValue, raw.utf8.count <= maximum,
+              !raw.unicodeScalars.contains(where: {
+                  $0.value < 0x20 || (0x7f...0x9f).contains($0.value)
+                      || $0.value == 0x061c || (0x200e...0x200f).contains($0.value)
+                      || (0x202a...0x202e).contains($0.value)
+                      || (0x2066...0x2069).contains($0.value)
+              }) else { return nil }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Bounded auxiliary inventory. A malformed row is omitted rather than being
+/// turned into a writable task identity; duplicate tasks keep the first row.
+public struct AuxiliaryModelInventory: Sendable, Equatable {
+    public static let maximumTasks = 32
+
+    public var tasks: [AuxiliaryModelSlot]
+    public var mainProvider: String
+    public var mainModel: String
+
+    init(_ value: JSONValue) {
+        var seen = Set<String>()
+        tasks = (value["tasks"]?.arrayValue ?? []).prefix(Self.maximumTasks).compactMap {
+            guard let slot = AuxiliaryModelSlot($0), seen.insert(slot.task).inserted else {
+                return nil
+            }
+            return slot
+        }
+        let main = value["main"]
+        mainProvider = Self.boundedMainString(main?["provider"]?.stringValue)
+        mainModel = Self.boundedMainString(main?["model"]?.stringValue)
+    }
+
+    public init(tasks: [AuxiliaryModelSlot], mainProvider: String, mainModel: String) {
+        self.tasks = Array(tasks.prefix(Self.maximumTasks))
+        self.mainProvider = mainProvider
+        self.mainModel = mainModel
+    }
+
+    private static func boundedMainString(_ value: String?) -> String {
+        guard let value, value.utf8.count <= 1_024,
+              !value.unicodeScalars.contains(where: {
+                  $0.value < 0x20 || (0x7f...0x9f).contains($0.value)
+                      || $0.value == 0x061c || (0x200e...0x200f).contains($0.value)
+                      || (0x202a...0x202e).contains($0.value)
+                      || (0x2066...0x2069).contains($0.value)
+              }) else { return "" }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// A successful or confirmation-required `/api/model/set` answer. Assignments
+/// change the selected profile's defaults for new sessions; they never claim
+/// to hot-swap the current conversation.
+public struct AuxiliaryModelAssignmentOutcome: Sendable, Equatable {
+    public var ok: Bool
+    public var tasks: [String]
+    public var provider: String
+    public var model: String
+    public var reset: Bool
+    public var confirmRequired: Bool
+    public var confirmMessage: String
+
+    init(_ value: JSONValue) {
+        ok = value["ok"]?.boolValue ?? false
+        tasks = Array((value["tasks"]?.arrayValue ?? []).compactMap {
+            Self.bounded($0.stringValue, maximum: 64, rejectControls: true)
+        }.prefix(32))
+        provider = Self.bounded(value["provider"]?.stringValue, maximum: 256,
+                                rejectControls: true) ?? ""
+        model = Self.bounded(value["model"]?.stringValue, maximum: 1_024,
+                             rejectControls: true) ?? ""
+        reset = value["reset"]?.boolValue ?? false
+        confirmRequired = value["confirm_required"]?.boolValue ?? false
+        confirmMessage = Self.bounded(value["confirm_message"]?.stringValue, maximum: 4_096,
+                                      rejectControls: false) ?? ""
+    }
+
+    private static func bounded(_ value: String?, maximum: Int,
+                                rejectControls: Bool) -> String? {
+        guard let value, value.utf8.count <= maximum else { return nil }
+        if rejectControls, value.unicodeScalars.contains(where: {
+            $0.value < 0x20 || (0x7f...0x9f).contains($0.value)
+                || $0.value == 0x061c || (0x200e...0x200f).contains($0.value)
+                || (0x202a...0x202e).contains($0.value)
+                || (0x2066...0x2069).contains($0.value)
+        }) { return nil }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 // MARK: - Model families
 
 /// A model and its optional `…-fast` sibling collapsed into one row — port of
@@ -304,7 +441,13 @@ public enum ModelLabels {
 
     /// Extra search tokens; never changes a wire id. Kept in sync with
     /// model-search-text.ts / hermes_cli/model_search.py.
-    private static let searchAliases: [String: [String]] = ["k3": ["kimi-k3", "kimi"]]
+    private static let searchAliases: [String: [String]] = [
+        "k3": ["kimi-k3", "kimi"],
+        // OpenCode Zen's public Ox Alpha model has an opaque wire id. These
+        // tokens enrich only the local search haystack; display and routing
+        // continue to use the gateway-provided id.
+        "x-preview-f-free": ["ox-alpha", "ox"],
+    ]
 
     /// Trailing id variants rendered as a grayed tag beside the name, so
     /// `…-4.8` and `…-4.8-fast` don't collapse to the same display name.
@@ -507,6 +650,66 @@ public enum ModelLabels {
 // MARK: - RPCs
 
 extension GatewayClient {
+    private static let modelManagementResponseLimit = 512 * 1_024
+
+    private func modelManagementProfileQuery(_ profile: String?) -> [URLQueryItem] {
+        guard let profile = profile?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !profile.isEmpty else { return [] }
+        return [URLQueryItem(name: "profile", value: profile)]
+    }
+
+    /// Profile-scoped auxiliary assignments exposed by current Hermes. This is
+    /// a saved-default surface: it does not mutate an already-running session.
+    func auxiliaryModelInventory(profile: String?) async throws -> AuxiliaryModelInventory {
+        AuxiliaryModelInventory(try await restJSONBounded(
+            path: "api/model/auxiliary", query: modelManagementProfileQuery(profile),
+            timeout: 30, maximumResponseBytes: Self.modelManagementResponseLimit))
+    }
+
+    /// Assign one currently advertised auxiliary task for future sessions.
+    /// The gateway owns task validation and the expensive-model confirmation.
+    func assignAuxiliaryModel(task: String, provider: String, model: String,
+                              baseURL: String = "", apiKey: String? = nil,
+                              profile: String?, confirmExpensive: Bool = false) async throws
+        -> AuxiliaryModelAssignmentOutcome {
+        let scopedProfile = profile?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var body: [String: JSONValue] = [
+            "scope": .string("auxiliary"), "task": .string(task),
+            "provider": .string(provider), "model": .string(model),
+            "base_url": .string(baseURL),
+        ]
+        if let apiKey { body["api_key"] = .string(apiKey) }
+        if let scopedProfile, !scopedProfile.isEmpty { body["profile"] = .string(scopedProfile) }
+        if confirmExpensive { body["confirm_expensive_model"] = .bool(true) }
+        return AuxiliaryModelAssignmentOutcome(try await restJSONBounded(
+            path: "api/model/set", method: "POST",
+            query: modelManagementProfileQuery(scopedProfile), body: .object(body),
+            timeout: 60, maximumResponseBytes: Self.modelManagementResponseLimit))
+    }
+
+    /// Reset every current Hermes auxiliary task to provider=auto for future
+    /// sessions. The reserved task is server-owned rather than invented here.
+    func resetAuxiliaryModels(profile: String?) async throws -> AuxiliaryModelAssignmentOutcome {
+        let scopedProfile = profile?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var body: [String: JSONValue] = [
+            "scope": .string("auxiliary"), "task": .string("__reset__"),
+            "provider": .string("auto"), "model": .string(""),
+        ]
+        if let scopedProfile, !scopedProfile.isEmpty { body["profile"] = .string(scopedProfile) }
+        return AuxiliaryModelAssignmentOutcome(try await restJSONBounded(
+            path: "api/model/set", method: "POST",
+            query: modelManagementProfileQuery(scopedProfile), body: .object(body),
+            timeout: 60, maximumResponseBytes: Self.modelManagementResponseLimit))
+    }
+
+    /// Current profile-scoped MoA payload. It remains opaque in this transport
+    /// foundation so a future editor must model and validate every slot before
+    /// it can call the reject-don't-repair PUT contract.
+    func moaModelConfiguration(profile: String?) async throws -> JSONValue {
+        try await restJSONBounded(
+            path: "api/model/moa", query: modelManagementProfileQuery(profile),
+            timeout: 30, maximumResponseBytes: Self.modelManagementResponseLimit)
+    }
 
     /// `model.options` — the provider-grouped catalog. `explicitOnly` keeps
     /// ambient/auto-seeded credentials out of a chat picker (the desktop chat

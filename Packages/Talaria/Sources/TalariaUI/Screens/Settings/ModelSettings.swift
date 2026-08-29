@@ -32,12 +32,12 @@ import TalariaTheme
 // shortlist come from `ModelLabels` and `ModelVisibilityStore`, so a model
 // reads identically in Settings and in the chat picker.
 //
-// Deliberately absent: the auxiliary/vision model slots. Upstream has them
-// (hermes_cli/inventory.py:320 `build_aux_picker_rows`) but they are reachable
-// only from the CLI (hermes_cli/main.py:4280) — no gateway RPC exposes them and
-// `model.options` carries no aux field, so there is nothing to bind. A picker
-// over an invented shape would be worse than the honest pointer in the
-// section's footnote.
+// Auxiliary/vision and MoA editing remain a separate mobile slice, but they are
+// not wire-blocked: current Hermes exposes profile-scoped /api/model/auxiliary,
+// /api/model/set and /api/model/moa. GatewayClient+Models.swift owns the bounded
+// transport foundation. This screen must say "not editable here yet", never the
+// obsolete and materially false "no gateway API" claim. Custom endpoints are
+// already managed in Providers.
 
 struct GatewaySettingsTargetFence {
     static func resolve(selected: String?, available: Set<String>,
@@ -331,10 +331,7 @@ public struct ModelSettingsSection: View {
                 }
                 Spacer(minLength: 6)
                 if let price, !price.isEmpty {
-                    Text(price.compact)
-                        .font(theme.mono(9))
-                        .foregroundStyle(price.free ? theme.ok : theme.faint)
-                        .monospacedDigit()
+                    ModelPricePresentation(price: price, theme: theme, copy: copy)
                 }
                 if locked {
                     Text(copy.modelsProBadge(theme.id))
@@ -1190,9 +1187,9 @@ public extension CopyPack {
 
     func settingsAuxNote(_ t: ThemeID) -> String {
         switch t {
-        case .soft: "Auxiliary and vision model slots, MoA presets and custom endpoints are desktop-only — no gateway API exposes them yet."
-        case .control: "AUX/VISION SLOTS, MoA MANAGEMENT, CUSTOM ENDPOINTS: DESKTOP ONLY — NO RPC."
-        case .ink: "The lesser hands, the councils and the private doors are kept on the desk. No gateway offers them."
+        case .soft: "Auxiliary and vision slots and MoA presets are not editable on this screen yet. Custom endpoints are available under Providers."
+        case .control: "AUX/VISION + MoA EDITOR: NOT YET IN THIS BUILD. CUSTOM ENDPOINTS: PROVIDERS."
+        case .ink: "The lesser hands and councils await their mobile ledger. Private endpoints are kept under Providers."
         }
     }
 }
