@@ -253,6 +253,10 @@ partial until the unchecked certification gates are recorded.
       canonical chats, room prompts, and profile lifecycle. Live certification
       remains open row by row.
 - [ ] Finish rich transcripts and full session interaction controls.
+      The first retained-history slice is implemented: bounded raw hydration
+      reconstructs typed tool arguments/results by exact id, preserves
+      protected terminal rows, and exposes a compact accessible generic mobile
+      disclosure. Specialist media/diff/search/structured renderers remain.
       Default working presentation is an animated agent avatar; tool activity
       and gateway-exposed reasoning summaries are opt-in advanced views.
       Multiline full-width capped composition, edit/rewind/regenerate, and

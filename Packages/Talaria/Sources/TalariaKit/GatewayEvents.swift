@@ -77,7 +77,9 @@ public enum TypedGatewayEvent: Sendable {
             self = .sessionTitle(storedSessionID: p?["session_id"]?.stringValue ?? "",
                                  title: p?["title"]?.stringValue ?? "")
         case "tool.generating":
-            self = .toolGenerating(name: p?["name"]?.stringValue ?? "")
+            self = .toolGenerating(name: ToolPayloadCodec.admittedIdentity(
+                p?["name"]?.stringValue,
+                maximum: ToolPayloadCodec.maximumToolNameCharacters) ?? "")
         case "tool.start":
             self = .toolStart(ToolStartPayload(p))
         case "tool.complete":
@@ -524,11 +526,22 @@ public struct ToolStartPayload: Sendable {
     public var name: String
     /// ≤80-char argument preview.
     public var context: String
+    public var arguments: ToolPayload?
 
     public init(_ v: JSONValue?) {
-        toolID = v?["tool_id"]?.stringValue ?? ""
-        name = v?["name"]?.stringValue ?? ""
-        context = v?["context"]?.stringValue ?? ""
+        toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
+            ?? v?["tool_call_id"]?.stringValue
+            ?? v?["id"]?.stringValue,
+            maximum: ToolPayloadCodec.maximumToolIdentityCharacters) ?? ""
+        name = ToolPayloadCodec.admittedIdentity(
+            v?["name"]?.stringValue,
+            maximum: ToolPayloadCodec.maximumToolNameCharacters) ?? ""
+        let supplied = v?["context"]?.stringValue
+        let preview = v?["preview"]?.stringValue
+        context = ToolPayloadCodec.boundedText(
+            (supplied?.isEmpty == false ? supplied : preview) ?? "", maximum: 80)
+        arguments = ToolPayloadCodec.directArguments(
+            from: v?["args"] ?? v?["arguments"] ?? v?["input"])
     }
 }
 
@@ -538,13 +551,28 @@ public struct ToolCompletePayload: Sendable {
     public var durationSeconds: Double?
     public var summary: String?
     public var resultText: String?
+    public var arguments: ToolPayload?
+    public var result: ToolPayload?
 
     public init(_ v: JSONValue?) {
-        toolID = v?["tool_id"]?.stringValue ?? ""
-        name = v?["name"]?.stringValue ?? ""
+        toolID = ToolPayloadCodec.admittedIdentity(v?["tool_id"]?.stringValue
+            ?? v?["tool_call_id"]?.stringValue
+            ?? v?["id"]?.stringValue,
+            maximum: ToolPayloadCodec.maximumToolIdentityCharacters) ?? ""
+        name = ToolPayloadCodec.admittedIdentity(
+            v?["name"]?.stringValue,
+            maximum: ToolPayloadCodec.maximumToolNameCharacters) ?? ""
         durationSeconds = v?["duration_s"]?.doubleValue
-        summary = v?["summary"]?.stringValue
-        resultText = v?["result_text"]?.stringValue ?? v?["result"]?.stringValue
+        let supplied = v?["summary"]?.stringValue
+        let preview = v?["preview"]?.stringValue
+        summary = (supplied?.isEmpty == false ? supplied : preview).map {
+            ToolPayloadCodec.boundedText(
+                $0, maximum: ToolPayloadCodec.maximumDiagnosticCharacters)
+        }
+        arguments = ToolPayloadCodec.directArguments(
+            from: v?["args"] ?? v?["arguments"] ?? v?["input"])
+        result = ToolPayloadCodec.result(from: v?["result"] ?? v?["result_text"])
+        resultText = result?.displayText
     }
 }
 

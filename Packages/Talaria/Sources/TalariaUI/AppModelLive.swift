@@ -1136,27 +1136,88 @@ extension AppModel {
     ///   (hermes_state.py:get_messages returns `SELECT *`) — the same fields
     ///   under their column names: `content` for the body, `id` for the row.
     ///
-    /// Hidden scaffolding and tool rows are dropped either way.
-    static func chatMessages(fromTranscript payload: JSONValue) -> [ChatMessage] {
+    /// Hidden scaffolding is dropped. Tool rows are reconstructed into typed,
+    /// ordered calls. Only exact wire ids pair calls/results; names and text
+    /// are presentation data and never identity.
+    static func chatMessages(fromTranscript payload: JSONValue,
+                             toolsMayBeRunning: Bool = false) -> [ChatMessage] {
         var rows = payload["messages"]?.arrayValue ?? payload.arrayValue ?? []
-        // The REST page may serve newest-first; normalize to oldest-first.
+        // Durable ids outrank wall-clock timestamps, which can move backward.
         if rows.count > 1,
-           let first = rows.first?["timestamp"]?.doubleValue,
-           let last = rows.last?["timestamp"]?.doubleValue,
+           let first = transcriptRowID(rows[0]), let last = transcriptRowID(rows[rows.count - 1]),
            first > last {
             rows.reverse()
+        } else if rows.count > 1, transcriptRowID(rows[0]) == nil,
+                  transcriptRowID(rows[rows.count - 1]) == nil,
+                  let first = rows.first?["timestamp"]?.doubleValue,
+                  let last = rows.last?["timestamp"]?.doubleValue, first > last {
+            rows.reverse()
         }
-        return rows.compactMap { row in
-            guard row["display_kind"]?.stringValue != "hidden" else { return nil }
+        // Normalize direction before clipping. `latest` REST pages may arrive
+        // newest-first; clipping first would discard the newest row rather
+        // than the oldest one and make a 201-row page regress by one turn.
+        if rows.count > StoredTranscriptHydrationPayloadPolicy.maximumRows {
+            rows = Array(rows.suffix(StoredTranscriptHydrationPayloadPolicy.maximumRows))
+        }
+        let ambiguousToolIDs = Self.ambiguousTranscriptToolIDs(rows)
+
+        var messages: [ChatMessage] = []
+        var pending: [ToolCall] = []
+        var pendingTime: String?
+        var pendingRowID: Int?
+        var possibleRunningPresentationIDs: Set<String> = []
+
+        func appendPending() {
+            guard !pending.isEmpty else { return }
+            messages.append(ChatMessage(author: .bot, time: pendingTime, text: "",
+                                        toolCalls: pending, rowID: pendingRowID))
+            pending.removeAll(); pendingTime = nil; pendingRowID = nil
+        }
+
+        func retain(_ calls: [ToolCall], time: String?, rowID: Int?) {
+            guard !calls.isEmpty else { return }
+            pending.append(contentsOf: calls)
+            if pendingTime == nil { pendingTime = time }
+            if pendingRowID == nil { pendingRowID = rowID }
+        }
+
+        func apply(_ result: ToolCall) -> Bool {
+            guard let wireID = result.gatewayToolID else { return false }
+            // Repeated exact ids are not an identity proof. Pairing one of
+            // several calls/results would silently attach output to the wrong
+            // execution, so every member of the collision remains visible but
+            // unpaired.
+            guard !ambiguousToolIDs.contains(wireID) else { return false }
+            if let hit = pending.lastIndex(where: {
+                $0.gatewayToolID == wireID
+                    && ($0.result == nil || $0.result?.kind == .unavailable)
+            }) {
+                mergeStoredResult(result, into: &pending[hit])
+                possibleRunningPresentationIDs.remove(pending[hit].id)
+                return true
+            }
+            for index in messages.indices.reversed() {
+                guard let hit = messages[index].toolCalls.lastIndex(where: {
+                    $0.gatewayToolID == wireID
+                        && ($0.result == nil || $0.result?.kind == .unavailable)
+                }) else { continue }
+                mergeStoredResult(result, into: &messages[index].toolCalls[hit])
+                possibleRunningPresentationIDs.remove(messages[index].toolCalls[hit].id)
+                return true
+            }
+            return false
+        }
+
+        for (index, row) in rows.enumerated() {
+            guard row["display_kind"]?.stringValue != "hidden" else { continue }
             let role = row["role"]?.stringValue
             let text = transcriptText(row)
-            guard !text.isEmpty else { return nil }
             // Gateway bookkeeping (model switches, personality notices) is
             // persisted as role=user "[System: …]" so strict providers accept
             // it mid-history. The WS projection filters it
             // (server.py:_is_display_hidden_marker); raw DB rows do not, so it
             // has to be filtered here too or it renders as a user bubble.
-            guard !(role == "user" && text.hasPrefix("[System:")) else { return nil }
+            guard !(role == "user" && text.hasPrefix("[System:")) else { continue }
             let time = row["timestamp"]?.doubleValue.map { shortTime($0) }
             let reasoning = row["reasoning"]?.stringValue
                 ?? row["reasoning_content"]?.stringValue
@@ -1164,16 +1225,249 @@ extension AppModel {
             // _rows_to_conversation; the DB column it comes from is `id`).
             // Without it only the newest assistant row is addressable by
             // `message.react`, which names rows by id.
-            let rowID = row["row_id"]?.intValue ?? row["id"]?.intValue
+            let rowID = transcriptRowID(row)
             switch role {
-            case "user": return ChatMessage(author: .user, time: time, text: text,
-                                            rowID: rowID)
-            case "assistant": return ChatMessage(author: .bot, time: time, text: text,
-                                                 reasoning: reasoning, rowID: rowID)
-            case "system": return ChatMessage(author: .system, time: time, text: text)
-            default: return nil
+            case "tool":
+                let result = storedToolResult(
+                    row, index: index, rowID: rowID, ambiguousWireIDs: ambiguousToolIDs)
+                if !apply(result) { retain([result], time: time, rowID: rowID) }
+
+            case "assistant":
+                let calls = storedToolCalls(
+                    row, rowID: rowID, ambiguousWireIDs: ambiguousToolIDs)
+                let visible = !text.isEmpty || !(reasoning ?? "").isEmpty
+                if !calls.isEmpty {
+                    possibleRunningPresentationIDs = Set(calls.compactMap { call in
+                        guard call.provenance == .stored, call.gatewayToolID != nil else {
+                            return nil
+                        }
+                        return call.id
+                    })
+                } else if visible {
+                    possibleRunningPresentationIDs = []
+                }
+                if !visible {
+                    guard !calls.isEmpty else { continue }
+                    appendPending()
+                    retain(calls, time: time, rowID: rowID)
+                    continue
+                }
+                let allCalls = pending + calls
+                pending.removeAll(); pendingTime = nil; pendingRowID = nil
+                messages.append(ChatMessage(author: .bot, time: time, text: text,
+                                            reasoning: reasoning, toolCalls: allCalls,
+                                            rowID: rowID))
+
+            case "user":
+                appendPending(); possibleRunningPresentationIDs = []
+                guard !text.isEmpty else { continue }
+                messages.append(ChatMessage(author: .user, time: time, text: text,
+                                            rowID: rowID))
+
+            case "system":
+                appendPending(); possibleRunningPresentationIDs = []
+                guard !text.isEmpty else { continue }
+                messages.append(ChatMessage(author: .system, time: time, text: text))
+
+            default: continue
             }
         }
+        appendPending()
+
+        // A running session can only lend liveness to its single unmatched
+        // tail invocation. Older unmatched calls are historical and must not
+        // come back as permanent spinners after hydration.
+        if toolsMayBeRunning, !possibleRunningPresentationIDs.isEmpty {
+            for messageIndex in messages.indices {
+                for callIndex in messages[messageIndex].toolCalls.indices
+                where possibleRunningPresentationIDs.contains(
+                    messages[messageIndex].toolCalls[callIndex].id)
+                    && messages[messageIndex].toolCalls[callIndex].provenance == .stored {
+                    messages[messageIndex].toolCalls[callIndex].state = .running
+                    messages[messageIndex].toolCalls[callIndex].result = nil
+                    messages[messageIndex].toolCalls[callIndex].resultText = nil
+                    messages[messageIndex].toolCalls[callIndex].diagnostic = nil
+                }
+            }
+        }
+        return messages
+    }
+
+    static func transcriptNeedsRawToolSupplement(_ payload: JSONValue) -> Bool {
+        let rows = payload["messages"]?.arrayValue ?? payload.arrayValue ?? []
+        return rows.contains {
+            $0["role"]?.stringValue == "tool" || $0["tool_calls"] != nil
+        }
+    }
+
+    /// Enrich a display projection with the exact bounded raw page without
+    /// treating repeated text/tool names as identity. Raw durable ids define
+    /// the only replaceable range; ambiguous id-less projection edges remain.
+    static func mergeRawToolSupplement(display: [ChatMessage],
+                                       raw: [ChatMessage]) -> [ChatMessage] {
+        guard !display.isEmpty else { return raw }
+        guard raw.contains(where: { !$0.toolCalls.isEmpty }) else { return display }
+        let ids = raw.compactMap(\.rowID).sorted()
+        guard let lower = ids.first, let upper = ids.last else {
+            if raw.allSatisfy(isToolOnlyTranscriptMessage)
+                && display.allSatisfy(isToolOnlyTranscriptMessage) { return raw }
+            return display + raw
+        }
+
+        let replaceableAnonymous = Set(display.indices.filter { index in
+            guard display[index].rowID == nil,
+                  isToolOnlyTranscriptMessage(display[index]),
+                  let prior = display[..<index].last(where: { $0.rowID != nil })?.rowID,
+                  let next = display.indices.lazy.filter({ $0 > index })
+                    .compactMap({ display[$0].rowID }).first else { return false }
+            return (lower...upper).contains(prior) && (lower...upper).contains(next)
+        })
+        let insertion = replaceableAnonymous.min()
+            ?? display.firstIndex(where: { $0.rowID.map { $0 >= lower } == true })
+            ?? display.endIndex
+        var merged: [ChatMessage] = []
+        var inserted = false
+        for (index, message) in display.enumerated() {
+            if !inserted, index == insertion {
+                merged.append(contentsOf: raw); inserted = true
+            }
+            if let id = message.rowID, (lower...upper).contains(id) { continue }
+            if replaceableAnonymous.contains(index) { continue }
+            merged.append(message)
+        }
+        if !inserted { merged.append(contentsOf: raw) }
+        return merged
+    }
+
+    private static func isToolOnlyTranscriptMessage(_ message: ChatMessage) -> Bool {
+        message.author == .bot && message.text.isEmpty && !message.toolCalls.isEmpty
+    }
+
+    private static func transcriptRowID(_ row: JSONValue) -> Int? {
+        row["row_id"]?.intValue ?? row["id"]?.intValue
+    }
+
+    private static func transcriptWireID(_ value: JSONValue?) -> String? {
+        let raw = value?.stringValue ?? value?.intValue.map(String.init)
+        return ToolPayloadCodec.admittedIdentity(
+            raw, maximum: ToolPayloadCodec.maximumToolIdentityCharacters)
+    }
+
+    /// Exact execution ids are only useful when each side is unique. A
+    /// duplicate call or duplicate result is retained as an explicit
+    /// diagnostic, but it can never be paired by choosing first/last order.
+    private static func ambiguousTranscriptToolIDs(_ rows: [JSONValue]) -> Set<String> {
+        var callCounts: [String: Int] = [:]
+        var resultCounts: [String: Int] = [:]
+        for row in rows where row["display_kind"]?.stringValue != "hidden" {
+            switch row["role"]?.stringValue {
+            case "assistant":
+                for call in row["tool_calls"]?.arrayValue ?? [] {
+                    if let wireID = transcriptWireID(call["id"] ?? call["tool_call_id"]) {
+                        callCounts[wireID, default: 0] += 1
+                    }
+                }
+            case "tool":
+                if let wireID = transcriptWireID(row["tool_call_id"] ?? row["tool_id"]) {
+                    resultCounts[wireID, default: 0] += 1
+                }
+            default:
+                continue
+            }
+        }
+        let duplicateCalls = callCounts.compactMap { key, count in count > 1 ? key : nil }
+        let duplicateResults = resultCounts.compactMap { key, count in count > 1 ? key : nil }
+        return Set(duplicateCalls).union(duplicateResults)
+    }
+
+    private static func storedToolCalls(
+        _ row: JSONValue, rowID: Int?, ambiguousWireIDs: Set<String> = []
+    ) -> [ToolCall] {
+        guard let encoded = row["tool_calls"], encoded != .null else { return [] }
+        guard let calls = encoded.arrayValue else {
+            return [ToolCall(
+                id: "stored-malformed-call:\(rowID.map(String.init) ?? "unknown")",
+                name: "Tool", context: "", state: .done,
+                result: ToolPayloadCodec.unavailable(
+                    "Hermes retained a malformed tool-call record."),
+                provenance: .malformed,
+                diagnostic: "The saved tool-call record could not be decoded; no result was inferred.")]
+        }
+        return calls.prefix(128).enumerated().map { offset, call in
+            let function = call["function"]
+            let wireID = transcriptWireID(call["id"] ?? call["tool_call_id"])
+            let rawName = call["name"]?.stringValue ?? call["tool_name"]?.stringValue
+                ?? function?["name"]?.stringValue ?? call["input"]?["name"]?.stringValue
+            let name = ToolPayloadCodec.admittedIdentity(
+                rawName, maximum: ToolPayloadCodec.maximumToolNameCharacters) ?? "Tool"
+            let arguments = ToolPayloadCodec.arguments(
+                from: function?["arguments"] ?? call["arguments"] ?? call["args"]
+                    ?? call["input"])
+            let context = call["context"]?.stringValue.map {
+                ToolPayloadCodec.boundedText($0, maximum: 80)
+            } ?? ToolPayloadCodec.preview(arguments, maximum: 80) ?? ""
+            let missingIdentity = wireID == nil
+            let ambiguousIdentity = wireID.map { ambiguousWireIDs.contains($0) } == true
+            return ToolCall(
+                id: "stored-call:\(rowID.map(String.init) ?? "unknown"):\(offset)",
+                name: name, context: context, state: .done, gatewayToolID: wireID,
+                arguments: arguments,
+                result: ToolPayloadCodec.unavailable(
+                    "Hermes retained this tool call without a matching result row."),
+                provenance: missingIdentity || ambiguousIdentity ? .malformed : .stored,
+                diagnostic: missingIdentity
+                    ? "The saved call has no stable tool-call id; Talaria will not guess its result."
+                    : (ambiguousIdentity
+                        ? "The saved transcript reused this tool id; Talaria left the call unpaired."
+                        : "The saved turn contains no matching retained tool result."))
+        }
+    }
+
+    private static func storedToolResult(
+        _ row: JSONValue, index: Int, rowID: Int?, ambiguousWireIDs: Set<String> = []
+    ) -> ToolCall {
+        // Database row `id` is not an execution id.
+        let wireID = transcriptWireID(row["tool_call_id"] ?? row["tool_id"])
+        let name = ToolPayloadCodec.admittedIdentity(
+            row["tool_name"]?.stringValue ?? row["name"]?.stringValue,
+            maximum: ToolPayloadCodec.maximumToolNameCharacters) ?? "Tool"
+        let arguments = ToolPayloadCodec.directArguments(
+            from: row["args"] ?? row["arguments"] ?? row["input"])
+        let context = row["context"]?.stringValue.map {
+            ToolPayloadCodec.boundedText($0, maximum: 80)
+        } ?? ToolPayloadCodec.preview(arguments, maximum: 80) ?? ""
+        let raw = row["content"] ?? row["result"]
+        let hasRaw = raw != nil && raw != .null
+        let result = ToolPayloadCodec.result(from: raw)
+            ?? ToolPayloadCodec.unavailable(hasRaw
+                ? "Hermes saved an empty tool result."
+                : "This display projection omitted the retained tool output.")
+        let ambiguousIdentity = wireID.map { ambiguousWireIDs.contains($0) } == true
+        return ToolCall(
+            id: "stored-result:\(rowID.map(String.init) ?? "unknown"):\(index)",
+            name: name, context: context,
+            state: ToolPayloadCodec.resultHasExplicitError(result) ? .failed : .done,
+            summary: context.isEmpty ? ToolPayloadCodec.preview(result) : context,
+            resultText: result.displayText, gatewayToolID: wireID,
+            arguments: arguments, result: result,
+            provenance: hasRaw
+                ? (wireID == nil ? .unmatchedResult : (ambiguousIdentity ? .malformed : .stored))
+                : .projection,
+            diagnostic: wireID == nil
+                ? "Hermes retained this result without a stable tool-call id; it was not paired by name."
+                : (ambiguousIdentity
+                    ? "The saved transcript reused this tool id; Talaria left the result unpaired."
+                    : (hasRaw ? nil : "Raw retained output is unavailable in this projection.")))
+    }
+
+    private static func mergeStoredResult(_ result: ToolCall, into call: inout ToolCall) {
+        call.state = result.state
+        call.context = call.context.isEmpty ? result.context : call.context
+        call.arguments = call.arguments ?? result.arguments
+        call.result = result.result
+        call.summary = result.summary ?? call.summary
+        call.resultText = result.resultText ?? call.resultText
+        call.diagnostic = result.provenance == .projection ? call.diagnostic : result.diagnostic
     }
 
     /// The body of a transcript row. `text` is the projection's field name and

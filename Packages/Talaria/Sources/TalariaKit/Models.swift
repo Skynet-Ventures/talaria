@@ -409,13 +409,47 @@ public enum MessageCard: Codable, Sendable, Equatable {
     }
 }
 
+/// A bounded retained tool argument or result. Raw gateway history is an
+/// untrusted presentation source, so structural JSON is kept only when its
+/// complete rendering fits the relevant budget; a clipped JSON prefix is
+/// never represented as valid JSON.
+public struct ToolPayload: Codable, Sendable, Equatable {
+    public enum Kind: String, Codable, Sendable {
+        case json, text, unavailable, malformed
+    }
+
+    public var kind: Kind
+    public var json: JSONValue?
+    public var text: String?
+    public var isTruncated: Bool
+
+    public init(kind: Kind, json: JSONValue? = nil, text: String? = nil,
+                isTruncated: Bool = false) {
+        self.kind = kind
+        self.json = json
+        self.text = text
+        self.isTruncated = isTruncated
+    }
+
+    public var displayText: String? { text }
+}
+
 /// One tool invocation inside a turn, rendered as a collapsible chip in the
 /// transcript (desktop shows these inline under the assistant message).
 public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
     public enum State: String, Codable, Sendable { case running, done, failed }
 
-    /// The gateway's tool_id.
+    public enum Provenance: String, Codable, Sendable {
+        case live, stored, projection, unmatchedResult, malformed
+    }
+
+    /// Stable presentation identity. This is deliberately distinct from the
+    /// provider id because malformed/repeated/orphaned rows must not collide
+    /// in SwiftUI's `ForEach`.
     public var id: String
+    /// Exact `tool_id` / `tool_call_id`, when Hermes retained one. Pairing
+    /// never falls back to a same-named tool or matching text.
+    public var gatewayToolID: String?
     public var name: String
     /// ≤80-char argument preview from tool.start.
     public var context: String
@@ -425,13 +459,44 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
     /// Full result text, shown when the chip is expanded.
     public var resultText: String?
     public var durationSeconds: Double?
+    public var arguments: ToolPayload?
+    public var result: ToolPayload?
+    public var provenance: Provenance
+    public var diagnostic: String?
 
     public init(id: String, name: String, context: String, state: State = .running,
                 summary: String? = nil, resultText: String? = nil,
-                durationSeconds: Double? = nil) {
+                durationSeconds: Double? = nil, gatewayToolID: String? = nil,
+                arguments: ToolPayload? = nil, result: ToolPayload? = nil,
+                provenance: Provenance = .live, diagnostic: String? = nil) {
         self.id = id; self.name = name; self.context = context; self.state = state
         self.summary = summary; self.resultText = resultText
         self.durationSeconds = durationSeconds
+        self.gatewayToolID = gatewayToolID
+        self.arguments = arguments; self.result = result
+        self.provenance = provenance; self.diagnostic = diagnostic
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, gatewayToolID, name, context, state, summary, resultText
+        case durationSeconds, arguments, result, provenance, diagnostic
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        context = try values.decode(String.self, forKey: .context)
+        state = try values.decodeIfPresent(State.self, forKey: .state) ?? .running
+        gatewayToolID = try values.decodeIfPresent(String.self, forKey: .gatewayToolID)
+            ?? (id.hasPrefix("generating:") ? nil : id)
+        summary = try values.decodeIfPresent(String.self, forKey: .summary)
+        resultText = try values.decodeIfPresent(String.self, forKey: .resultText)
+        durationSeconds = try values.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        arguments = try values.decodeIfPresent(ToolPayload.self, forKey: .arguments)
+        result = try values.decodeIfPresent(ToolPayload.self, forKey: .result)
+        provenance = try values.decodeIfPresent(Provenance.self, forKey: .provenance) ?? .live
+        diagnostic = try values.decodeIfPresent(String.self, forKey: .diagnostic)
     }
 }
 

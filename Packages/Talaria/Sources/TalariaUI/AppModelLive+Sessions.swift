@@ -347,6 +347,16 @@ extension AppModel {
 
     // MARK: - Opening a stored session
 
+    func storedSessionHydrationBindingIsCurrent(
+        botID: String, chat: ChatState, runtimeSessionID: String,
+        storedSessionID: String, route: GatewayBotRoute
+    ) -> Bool {
+        guard let owner = chats[botID], ObjectIdentifier(owner) == ObjectIdentifier(chat),
+              owner.sessionID == runtimeSessionID,
+              owner.storedSessionID == storedSessionID else { return false }
+        return (stateRoute(for: botID) ?? gatewayRoute(for: botID)) == route
+    }
+
     /// Rebind this bot's chat onto a stored session (session.resume by
     /// durable key) and hydrate its transcript. Mirrors `openChat` but for a
     /// session the user picked instead of the profile's most recent one.
@@ -772,20 +782,28 @@ extension AppModel {
             self.bindSession(live, botID: botID, sourceGatewayID: route.gatewayID)
             runtime.lastSessionByBot[botID] = stored
             self.replayInflight(live, botID: botID)
+            guard let sourceAuthority = await self.captureTranscriptHydrationSourceAuthority(
+                route: route, client: client) else { throw CancellationError() }
 
             try await Self.hydrateTranscript(
                 chat: chat,
                 resumeMessages: live.messages,
                 clearWhenEmpty: true,
+                toolsMayBeRunning: live.running || live.retainedInflight?.streaming == true,
                 fallback: {
                     try? await client.latestSessionMessages(storedID: stored,
                                                             profile: route.profile)
                 },
                 accepts: {
-                    SessionsRuntime.shared.acceptsOpen(
+                    await self.transcriptHydrationSourceIsCurrent(sourceAuthority)
+                        && SessionsRuntime.shared.acceptsOpen(
                         botID: botID, generation: openGeneration)
                         && LiveRuntime.shared.generation == connectionGeneration
                         && self.profileLifecycleAccepts(lifecycle)
+                        && self.storedSessionHydrationBindingIsCurrent(
+                            botID: botID, chat: chat,
+                            runtimeSessionID: live.sessionID,
+                            storedSessionID: stored, route: route)
                 })
             try requireCurrentOpen()
 
