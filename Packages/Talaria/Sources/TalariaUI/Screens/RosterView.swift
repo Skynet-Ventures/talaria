@@ -315,7 +315,7 @@ public struct RosterView: View {
             ScreenHeader(theme: theme, kicker: copy.kickerHome, title: copy.titleHome) {
                 headerControls
             }
-            if model.isOffline {
+            if model.showsOfflineUnreachableChrome {
                 offlineBanner
                     .padding(.horizontal, 20)
                     .padding(.bottom, 6)

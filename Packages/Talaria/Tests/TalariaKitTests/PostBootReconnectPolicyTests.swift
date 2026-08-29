@@ -73,6 +73,22 @@ final class PostBootReconnectPolicyTests: XCTestCase {
         XCTAssertLessThan(
             PostBootReconnectPolicy.backgroundInvalidateTimeout,
             PostBootReconnectPolicy.redialReadyTimeout)
+        XCTAssertEqual(PostBootReconnectPolicy.offlineChromeGrace, 8)
+        XCTAssertFalse(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: false, graceActive: false, needsReauth: false,
+            hasPostBootRecovery: false))
+        XCTAssertFalse(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: true, needsReauth: false,
+            hasPostBootRecovery: false))
+        XCTAssertTrue(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: false, needsReauth: false,
+            hasPostBootRecovery: false))
+        XCTAssertTrue(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: true, needsReauth: true,
+            hasPostBootRecovery: false))
+        XCTAssertTrue(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: true, needsReauth: false,
+            hasPostBootRecovery: true))
 
     }
 

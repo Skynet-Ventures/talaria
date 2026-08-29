@@ -154,9 +154,15 @@ final class ConnectionSupervisor {
     /// for this so connect() does not race the teardown.
     @ObservationIgnored var backgroundInvalidateTask: Task<Void, Never>?
     /// Client-side breadcrumbs for the next device fail: resign, wake,
-    /// connect, ready, resume, adopt. Shown on the offline banner.
+    /// connect, ready, resume, adopt. Shown on the offline banner after a
+    /// real failure — not during the wake-redial grace window.
     var reconnectTrace: [ReconnectTraceEvent] = []
     var lastReconnectStep = ""
+    /// Uptime deadline while "Gateway unreachable" chrome stays hidden for
+    /// an expected after-background redial. Observable so roster/banner
+    /// update when grace begins or ends.
+    var offlineChromeGraceUntil: TimeInterval?
+    @ObservationIgnored var offlineChromeGraceTask: Task<Void, Never>?
     /// Single-flight foreground wake. UIKit and SwiftUI publish the same
     /// edge a few milliseconds apart.
     @ObservationIgnored var foregroundValidationTask: Task<Void, Never>?
@@ -206,12 +212,45 @@ final class ConnectionSupervisor {
         backgroundInvalidateTask = nil
         reconnectTrace = []
         lastReconnectStep = ""
+        endOfflineChromeGrace()
         foregroundValidationTask?.cancel()
         foregroundValidationTask = nil
         foregroundValidationToken = nil
         resetEpisode(for: .cleanOpen)
         isReconnecting = false
         reauthGateway = nil
+    }
+
+    /// True while the brief wake-redial grace window is still open.
+    var isOfflineChromeGraceActive: Bool {
+        guard let until = offlineChromeGraceUntil else { return false }
+        return now() < until
+    }
+
+    /// Start/refresh the presentation grace that hides unreachable chrome
+    /// during an expected foreground redial.
+    func beginOfflineChromeGrace(
+        seconds: TimeInterval = PostBootReconnectPolicy.offlineChromeGrace
+    ) {
+        let deadline = now() + max(0, seconds)
+        offlineChromeGraceUntil = deadline
+        offlineChromeGraceTask?.cancel()
+        offlineChromeGraceTask = Task { @MainActor in
+            let remaining = max(0, deadline - ConnectionSupervisor.shared.now())
+            let ns = UInt64(remaining * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: ns)
+            guard !Task.isCancelled else { return }
+            let supervisor = ConnectionSupervisor.shared
+            if supervisor.offlineChromeGraceUntil == deadline {
+                supervisor.offlineChromeGraceUntil = nil
+            }
+        }
+    }
+
+    func endOfflineChromeGrace() {
+        offlineChromeGraceTask?.cancel()
+        offlineChromeGraceTask = nil
+        offlineChromeGraceUntil = nil
     }
 
     func note(error: Error, forGatewayID id: String?) {
@@ -232,6 +271,18 @@ final class ConnectionSupervisor {
         #if canImport(os)
         ReconnectTraceLog.logger.info("\(label, privacy: .public)")
         #endif
+        switch step {
+        case "redial.scheduled":
+            beginOfflineChromeGrace()
+        case "adopted":
+            // Clear after isOffline is already false inside adopt.
+            endOfflineChromeGrace()
+        case "connect.failed", "resume.failed":
+            // Real dial/resume failure — show unreachable chrome again.
+            endOfflineChromeGrace()
+        default:
+            break
+        }
     }
 
     /// Device-facing reason. A dead wake must say whether connect timed out,
@@ -405,6 +456,25 @@ extension AppModel {
         LiveRuntime.shared.reconnectTask != nil
     }
 
+    /// Brief after-background redial window where unreachable chrome is noise.
+    public var isWakeRedialGraceActive: Bool {
+        ConnectionSupervisor.shared.isOfflineChromeGraceActive
+    }
+
+    /// Global "Gateway unreachable" banner + roster strip. Hidden during the
+    /// healthy wake-redial grace; shown on real failure, recovery escalation,
+    /// or when grace expires while still offline.
+    public var showsOfflineUnreachableChrome: Bool {
+        let supervisor = ConnectionSupervisor.shared
+        // Touch observable grace field so views refresh when it clears.
+        _ = supervisor.offlineChromeGraceUntil
+        return PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: isOffline,
+            graceActive: supervisor.isOfflineChromeGraceActive,
+            needsReauth: supervisor.reauthGateway != nil,
+            hasPostBootRecovery: supervisor.postBootRecovery != nil)
+    }
+
     /// Package-test projection of the reconnect breadcrumb log.
     var reconnectTraceForTesting: [String] {
         ConnectionSupervisor.shared.reconnectTrace.map(\.step)
@@ -560,6 +630,11 @@ extension AppModel {
             supervisor.suspendedForBackground = false
         }
         let forceRedial = wasBackgrounded || isOffline
+        // Presentation only: hide unreachable chrome before the first post-wake
+        // frame paints. Dial ownership is unchanged.
+        if forceRedial {
+            supervisor.beginOfflineChromeGrace()
+        }
         // A prior already-active refresh must not hold a lease that blocks
         // redial when we are offline or were backgrounded.
         if supervisor.foregroundValidationTask != nil {
@@ -1276,6 +1351,8 @@ extension AppModel {
         guard PostBootReconnectPolicy.shouldEscalateRecovery(elapsed: elapsed) else { return }
         supervisor.postBootRecovery = PostBootReconnectRecovery(
             gatewayID: source.gatewayID, baseURL: source.baseURL, elapsed: elapsed)
+        // Escalation is a real problem — stop suppressing unreachable chrome.
+        supervisor.endOfflineChromeGrace()
     }
 
     private func clearSupervisedReconnectTask(ifOwned token: UUID) {
@@ -1546,7 +1623,7 @@ public struct ReauthBanner: View {
                 card(tone: theme.danger) {
                     reauthContent(gateway)
                 }
-            } else if model.mode == .live, model.isOffline {
+            } else if model.mode == .live, model.showsOfflineUnreachableChrome {
                 card(tone: theme.warn) {
                     offlineContent
                 }

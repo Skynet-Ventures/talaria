@@ -684,6 +684,37 @@ final class SupervisedReconnectParityTests: XCTestCase {
             fixture.model.reconnectTraceForTesting.joined(separator: ","))
     }
 
+    /// Healthy after-background redial must not flash "Gateway unreachable".
+    /// Grace starts on wake; connect.failed ends it so a real outage still shows.
+    @MainActor
+    func testWakeRedialGraceSuppressesOfflineChromeUntilRealFailure() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        var hung: CheckedContinuation<Void, Error>?
+        supervisor.dial = { _ in
+            try await withCheckedThrowingContinuation { hung = $0 }
+        }
+        supervisor.suspendedForBackground = true
+        fixture.model.isOffline = true
+
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { supervisor.isReconnecting || hung != nil }
+
+        XCTAssertTrue(fixture.model.isWakeRedialGraceActive)
+        XCTAssertFalse(fixture.model.showsOfflineUnreachableChrome)
+        XCTAssertTrue(fixture.model.isOffline)
+
+        hung?.resume(throwing: URLError(.cannotConnectToHost))
+        await waitUntil {
+            fixture.model.reconnectTraceForTesting.contains("connect.failed")
+        }
+        await LiveRuntime.shared.reconnectTask?.value
+
+        XCTAssertFalse(fixture.model.isWakeRedialGraceActive)
+        XCTAssertTrue(fixture.model.showsOfflineUnreachableChrome)
+    }
+
     /// Device a9e387c: banner dead-ended on `reconnect.stale authority`.
     /// In-memory client tokens can drift from the registry/Keychain after
     /// OAuth refresh or :9119 repair; wake must rebind and dial.

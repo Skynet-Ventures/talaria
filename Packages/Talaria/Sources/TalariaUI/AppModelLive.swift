@@ -990,9 +990,52 @@ extension AppModel {
         // raises the dot again on a chat the user is reading
         // (AppModelLive+Unread.swift).
         noteChatOpened(botID)
-        guard mode == .live,
-              !isOffline || GatewayBotRoute(qualifiedID: botID) != nil else { return }
+        guard mode == .live else { return }
+        if GatewayBotRoute(qualifiedID: botID) != nil {
+            Task { @MainActor in await self.enterCanonicalChat(botID: botID) }
+            return
+        }
+        if isOffline {
+            // During the wake-redial grace, open the thread the user asked for
+            // with loading chrome instead of treating the link as dead.
+            if isWakeRedialGraceActive || isReconnecting || isSupervisedReconnectLooping {
+                let chat = chat(for: botID)
+                if chat.messages.isEmpty {
+                    chat.isOpeningCanonicalChat = true
+                }
+                Task { @MainActor in
+                    await self.enterCanonicalChatWhenReachable(botID: botID)
+                }
+            }
+            return
+        }
         Task { @MainActor in await self.enterCanonicalChat(botID: botID) }
+    }
+
+    /// Wait out a brief wake redial, then hydrate the open chat. Cold opens
+    /// keep the full loading placeholder; warm transcripts stay on screen
+    /// with a subtle reconnect indicator.
+    func enterCanonicalChatWhenReachable(botID: String) async {
+        let chat = chat(for: botID)
+        let coldOpen = chat.messages.isEmpty
+        if coldOpen { chat.isOpeningCanonicalChat = true }
+        for _ in 0..<240 {
+            if Task.isCancelled {
+                if coldOpen { chat.isOpeningCanonicalChat = false }
+                return
+            }
+            if !isOffline { break }
+            if !isWakeRedialGraceActive && !isReconnecting && !isSupervisedReconnectLooping {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        guard mode == .live, !isOffline, openBotID == botID else {
+            if coldOpen { chat.isOpeningCanonicalChat = false }
+            return
+        }
+        // `enterCanonicalChat` owns the opening flag from here.
+        await enterCanonicalChat(botID: botID)
     }
 
     /// Create-or-resume the bot's session and bind it to the chat. Coalesces

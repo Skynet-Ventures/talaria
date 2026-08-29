@@ -150,20 +150,34 @@ public struct ChatView: View {
         model.mode == .demo ? (DemoData.quickReplies[botID] ?? []) : []
     }
 
-    /// Canonical open is in flight and the transcript is still empty — show
-    /// a light loading surface instead of a blank chat for ~3s (device
-    /// 8cea17a after the fat-resume wait was removed).
-    private var isOpeningChat: Bool {
+    /// Cold open: empty transcript while canonical hydrate (or wake-redial
+    /// wait) is in flight — fuller “Loading chat…” treatment.
+    private var isColdOpeningChat: Bool {
         model.mode == .live
             && messages.isEmpty
             && (chat?.isOpeningCanonicalChat == true)
     }
 
+    /// Warm reopen during after-background redial: cached messages stay
+    /// visible; only a subtle indicator shows. Never blank the thread.
+    private var showsWarmReconnectIndicator: Bool {
+        model.mode == .live
+            && !messages.isEmpty
+            && model.isOffline
+            && (model.isWakeRedialGraceActive
+                || model.isReconnecting
+                || model.isSupervisedReconnectLooping
+                || (chat?.isOpeningCanonicalChat == true))
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             header
+            if showsWarmReconnectIndicator {
+                warmReconnectIndicator
+            }
             ZStack(alignment: .bottomTrailing) {
-                if isOpeningChat {
+                if isColdOpeningChat {
                     chatOpeningPlaceholder
                 } else {
                     messageList
@@ -370,8 +384,9 @@ public struct ChatView: View {
 
     // MARK: - Message list
 
-    /// Inline placeholder while `enterCanonicalChat` hydrates. Not a modal —
-    /// composer and header stay usable; only the blank transcript is filled.
+    /// Inline placeholder while `enterCanonicalChat` hydrates an empty chat.
+    /// Not a modal — composer and header stay usable; only the blank
+    /// transcript is filled. Warm transcripts use `warmReconnectIndicator`.
     private var chatOpeningPlaceholder: some View {
         VStack(spacing: 12) {
             Spacer(minLength: 0)
@@ -392,6 +407,27 @@ public struct ChatView: View {
         case .soft: "Loading chat…"
         case .control: "LOADING CHAT"
         case .ink: "Loading chat"
+        }
+    }
+
+    /// Thin indeterminate bar under the header while a warm transcript waits
+    /// on after-background redial. Keeps messages on screen.
+    private var warmReconnectIndicator: some View {
+        ProgressView()
+            .progressViewStyle(.linear)
+            .tint(theme.accent)
+            .frame(maxWidth: .infinity)
+            .frame(height: 2)
+            .padding(.horizontal, theme.id == .ink ? 0 : 16)
+            .padding(.bottom, 4)
+            .accessibilityLabel(Text(warmReconnectLabel))
+    }
+
+    private var warmReconnectLabel: String {
+        switch theme.id {
+        case .soft: "Reconnecting…"
+        case .control: "RECONNECTING"
+        case .ink: "Reconnecting"
         }
     }
 
