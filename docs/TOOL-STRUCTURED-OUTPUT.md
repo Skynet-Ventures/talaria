@@ -1,5 +1,15 @@
 # Structured terminal and code output
 
+ANSI behavior was audited against Hermes Desktop `origin/main` at
+`057dcdf236f8a6a26721c10fcc6ccb72726e272a`, specifically
+`apps/desktop/src/lib/ansi.ts`,
+`apps/desktop/src/components/assistant-ui/ansi-text.tsx`, and the exact
+`terminal`/`execute_code` provenance rule in
+`apps/desktop/src/components/assistant-ui/tool/fallback-model/index.ts`.
+Talaria intentionally implements the same visible SGR subset—bold, bold-off,
+full reset, default foreground, and normal/bright 16-color foregrounds—while
+applying stricter mobile admission and control stripping.
+
 Talaria gives Hermes' exact `terminal` and `execute_code` tools a bounded
 structured presentation. A result is promoted only when the tool name matches
 one of those names and the result contains an object with `stdout` and/or
@@ -11,8 +21,10 @@ The two streams are retained separately. ANSI parsing consumes terminal
 controls and keeps only safe display text plus the supported foreground and
 bold SGR state. OSC/DCS/SOS/PM/APC strings, CSI commands other than SGR, C0/C1
 controls, and bidirectional overrides are removed. Tabs and safe newlines are
-preserved; CRLF and lone CR normalize to a newline. Clipboard text is the
-already-sanitized visible stream, never the raw gateway string.
+preserved; CRLF and lone CR normalize to a newline. SGR-shaped sequences with
+private parameters or intermediate bytes are also consumed without applying
+style. Clipboard text is the already-sanitized visible stream, never the raw
+gateway string.
 
 Admission is finite before rendering work begins:
 

@@ -455,6 +455,52 @@ final class StructuredToolOutputTests: XCTestCase {
         XCTAssertTrue(call.structuredOutput?.residualText?.contains("exit_code") == true)
     }
 
+    func testANSISGRSubsetMatchesHermesDesktopStateSemantics() throws {
+        let escape = "\u{001B}["
+        let source = "plain \(escape)31mred\(escape)0m reset "
+            + "\(escape)1mbold\(escape)22m regular "
+            + "\(escape)1;32mboth\(escape)39mbold-only\(escape)m default "
+            + "\(escape)92mbright"
+        let stream = try XCTUnwrap(ToolOutputCodec.extract(
+            toolName: "terminal", result: ["stdout": .string(source)])?.stdout)
+
+        XCTAssertEqual(stream.segments, [
+            ToolANSISegment(id: 0, text: "plain "),
+            ToolANSISegment(id: 1, text: "red", foreground: .red),
+            ToolANSISegment(id: 2, text: " reset "),
+            ToolANSISegment(id: 3, text: "bold", bold: true),
+            ToolANSISegment(id: 4, text: " regular "),
+            ToolANSISegment(id: 5, text: "both", foreground: .green, bold: true),
+            ToolANSISegment(id: 6, text: "bold-only", bold: true),
+            ToolANSISegment(id: 7, text: " default "),
+            ToolANSISegment(id: 8, text: "bright", foreground: .brightGreen),
+        ])
+        XCTAssertEqual(stream.copyText,
+                       "plain red reset bold regular bothbold-only default bright")
+    }
+
+    func testUnsupportedANSIControlsAreConsumedWithoutApplyingTerminalBehavior() throws {
+        let escape = "\u{001B}"
+        let source = "before\(escape)[2Jmiddle\(escape)[10;5Hafter "
+            + "\(escape)]0;hidden title\u{0007}visible "
+            + "\(escape)[38;5;208mindexed \(escape)[38;2;10;20;30mtruecolor "
+            + "\(escape)[31$mintermediate \u{009B}32$mc1-intermediate "
+            + "\(escape)[31mred"
+        let stream = try XCTUnwrap(ToolOutputCodec.extract(
+            toolName: "execute_code", result: ["stdout": .string(source)])?.stdout)
+
+        XCTAssertEqual(stream.plainText,
+                       "beforemiddleafter visible indexed truecolor intermediate c1-intermediate red")
+        XCTAssertEqual(stream.segments, [
+            ToolANSISegment(
+                id: 0, text: "beforemiddleafter visible indexed truecolor intermediate "
+                    + "c1-intermediate "),
+            ToolANSISegment(id: 1, text: "red", foreground: .red),
+        ])
+        XCTAssertFalse(stream.plainText.contains("hidden title"))
+        XCTAssertFalse(stream.copyText.unicodeScalars.contains("\u{001B}"))
+    }
+
     func testControlAndSegmentBombsRemainBoundedAndVisibleAsTruncated() throws {
         let hidden = "\u{001B}]" + String(
             repeating: "secret", count: ToolOutputCodec.maximumRawWorkScalars) + "TAIL"
