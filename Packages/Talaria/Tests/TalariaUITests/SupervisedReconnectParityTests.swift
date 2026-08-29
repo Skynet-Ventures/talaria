@@ -3,6 +3,31 @@ import XCTest
 @testable import TalariaKit
 @testable import TalariaUI
 
+private actor ForegroundPingLatch {
+    private(set) var count = 0
+    private var firstWaiter: CheckedContinuation<Void, Never>?
+
+    func enter() async {
+        count += 1
+        if count == 1 {
+            await withCheckedContinuation { firstWaiter = $0 }
+        }
+    }
+
+    var isWaiting: Bool { firstWaiter != nil }
+
+    func release() {
+        firstWaiter?.resume()
+        firstWaiter = nil
+    }
+}
+
+private actor ForegroundPingCounter {
+    private(set) var count = 0
+
+    func increment() { count += 1 }
+}
+
 final class SupervisedReconnectParityTests: XCTestCase {
     @MainActor
     private struct Fixture {
@@ -61,6 +86,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
         fixture.registry.remove(id: fixture.gateway.id)
         ConnectionSupervisor.shared.diagnostics.removeValue(forKey: fixture.gateway.id)
         ConnectionSupervisor.shared.resetTestingSeams()
+        ConnectionSupervisor.shared.healthProbe = { gateway in
+            await GatewayDiagnostics.probe(gateway)
+        }
         ManagedCloudBootRuntime.shared.resetForTesting()
     }
 
@@ -134,8 +162,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
         supervisor.postBootRecovery = PostBootReconnectRecovery(
             gatewayID: fixture.gateway.id, baseURL: fixture.baseURL, elapsed: 100)
         var continuation: CheckedContinuation<Void, Never>?
-        supervisor.dial = { _ in
+        supervisor.dial = { client in
             await withCheckedContinuation { continuation = $0 }
+            await client.setForegroundReadinessForTesting(true)
         }
 
         fixture.model.reconnectNow()
@@ -149,6 +178,217 @@ final class SupervisedReconnectParityTests: XCTestCase {
         XCTAssertFalse(fixture.model.isOffline)
         XCTAssertNil(supervisor.episodeSource)
         XCTAssertNil(fixture.model.postBootReconnectRecovery)
+    }
+
+    @MainActor
+    func testInboundTrafficFromExactCurrentClientClearsStaleOfflinePublication() throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+
+        XCTAssertTrue(fixture.model.isOffline)
+        fixture.model.noteCurrentPrimaryInboundActivity(
+            from: fixture.client, transportIsCurrentAndReady: true)
+
+        XCTAssertFalse(fixture.model.isOffline)
+        XCTAssertEqual(fixture.registry.health[fixture.gateway.id]?.state, .connected)
+    }
+
+    @MainActor
+    func testInboundTrafficFromReplacedClientCannotClearPrimaryOfflinePublication() throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let replaced = GatewayClient(
+            baseURL: fixture.baseURL, credential: fixture.credential)
+
+        fixture.model.noteCurrentPrimaryInboundActivity(
+            from: replaced, transportIsCurrentAndReady: true)
+
+        XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
+    func testBufferedInboundTrafficFromNoncurrentTransportCannotClearOffline() throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+
+        fixture.model.noteCurrentPrimaryInboundActivity(
+            from: fixture.client, transportIsCurrentAndReady: false)
+
+        XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
+    func testForegroundHalfOpenPingFailureEntersReconnectBeforeHTTPProbe() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+        await fixture.client.setRPCExecutorForTesting { method, _, timeout in
+            guard method == "gateway.ping" else {
+                return .object(["profiles": .array([]), "jobs": .array([])])
+            }
+            XCTAssertEqual(method, "gateway.ping")
+            XCTAssertEqual(timeout, 3)
+            throw GatewayError(code: -5, message: "request timed out: gateway.ping")
+        }
+        supervisor.healthProbe = { _ in
+            XCTFail("saved-gateway HTTP probes must not delay failed foreground ping recovery")
+            return (.offline, GatewayDiagnostics())
+        }
+        var dial: CheckedContinuation<Void, Never>?
+        supervisor.dial = { _ in
+            await withCheckedContinuation { dial = $0 }
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { dial != nil }
+
+        XCTAssertTrue(fixture.model.isReconnecting)
+        dial?.resume()
+        await LiveRuntime.shared.reconnectTask?.value
+    }
+
+    @MainActor
+    func testDuplicateUIKitAndSceneWakeShareOneHalfOpenValidation() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+
+        let ping = ForegroundPingLatch()
+        await fixture.client.setRPCExecutorForTesting { method, _, _ in
+            guard method == "gateway.ping" else {
+                return .object(["profiles": .array([]), "jobs": .array([])])
+            }
+            await ping.enter()
+            throw GatewayError(code: -5, message: "request timed out: gateway.ping")
+        }
+
+        var dialCount = 0
+        supervisor.dial = { _ in
+            dialCount += 1
+            throw URLError(.cannotConnectToHost)
+        }
+
+        // UIApplicationDelegate and SwiftUI scenePhase both publish this edge.
+        // The second callback must not cancel/restart the request already
+        // proving the exact suspended transport.
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<1_000 {
+            if await ping.isWaiting { break }
+            await Task.yield()
+        }
+        let firstPingIsWaiting = await ping.isWaiting
+        XCTAssertTrue(firstPingIsWaiting)
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<20 { await Task.yield() }
+
+        let observedPingCount = await ping.count
+        XCTAssertEqual(observedPingCount, 1)
+        await ping.release()
+        await waitUntil { dialCount > 0 }
+        XCTAssertTrue(fixture.model.isOffline)
+    }
+
+    @MainActor
+    func testLaterWakeValidatesAgainWhilePriorAncillaryRefreshIsStillRunning() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+
+        let pings = ForegroundPingCounter()
+        await fixture.client.setRPCExecutorForTesting { method, _, _ in
+            if method == "gateway.ping" {
+                await pings.increment()
+            }
+            return .object(["ok": .bool(true)])
+        }
+
+        // Hold the first wake after its socket ping has succeeded. A genuine
+        // second lock/unlock must not be dropped merely because this slower
+        // saved-gateway refresh is still completing.
+        let refresh = ForegroundPingLatch()
+        supervisor.healthProbe = { _ in
+            await refresh.enter()
+            return (.connected, GatewayDiagnostics())
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<1_000 {
+            if await refresh.isWaiting { break }
+            await Task.yield()
+        }
+        let firstRefreshIsWaiting = await refresh.isWaiting
+        let firstPingCount = await pings.count
+        XCTAssertTrue(firstRefreshIsWaiting)
+        XCTAssertEqual(firstPingCount, 1)
+        XCTAssertNil(supervisor.foregroundValidationTask,
+                     "the lease ends with socket validation, not ancillary refresh")
+
+        fixture.model.applicationDidBecomeActive()
+        for _ in 0..<1_000 {
+            if await pings.count == 2 { break }
+            await Task.yield()
+        }
+
+        let finalPingCount = await pings.count
+        XCTAssertEqual(finalPingCount, 2,
+                       "a later foreground edge must validate the socket again")
+        await refresh.release()
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    @MainActor
+    func testForegroundAlreadyDisconnectedEntersExactSourceReconnectImmediately() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(false)
+        await fixture.client.setRPCExecutorForTesting { method, _, _ in
+            if method == "gateway.ping" {
+                XCTFail("disconnected foreground link must not attempt ping")
+            }
+            return .object(["profiles": .array([]), "jobs": .array([])])
+        }
+        supervisor.healthProbe = { _ in
+            XCTFail("HTTP probe must not precede reconnect for a disconnected current socket")
+            return (.offline, GatewayDiagnostics())
+        }
+        var dial: CheckedContinuation<Void, Never>?
+        supervisor.dial = { client in
+            XCTAssertTrue(client === fixture.client)
+            await withCheckedContinuation { dial = $0 }
+        }
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil { dial != nil }
+
+        XCTAssertTrue(fixture.model.isReconnecting)
+        dial?.resume()
+        await LiveRuntime.shared.reconnectTask?.value
+    }
+
+    @MainActor
+    func testForegroundTrafficFenceNeverReconnectsAroundLifecycleAuthority() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        await fixture.client.setForegroundReadinessForTesting(true)
+        await fixture.client.setTrafficAdmission { nil }
+        await fixture.client.setRPCExecutorForTesting { _, _, _ in
+            XCTFail("traffic-fenced wake must not reach the socket")
+            return .object(["ok": .bool(true)])
+        }
+        var dialCount = 0
+        supervisor.dial = { _ in dialCount += 1 }
+
+        fixture.model.applicationDidBecomeActive()
+        // Let the foreground task cross the actor boundary and settle.
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertEqual(dialCount, 0)
+        XCTAssertNil(LiveRuntime.shared.reconnectTask)
+        XCTAssertFalse(fixture.model.isReconnecting)
     }
 
     @MainActor
@@ -247,7 +487,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
         let fixture = try fixture()
         defer { cleanup(fixture) }
         let originalGeneration = LiveRuntime.shared.generation
-        ConnectionSupervisor.shared.dial = { _ in }
+        ConnectionSupervisor.shared.dial = { client in
+            await client.setForegroundReadinessForTesting(true)
+        }
 
         let outcome = await fixture.model.attemptReconnectOutcome()
 
@@ -273,6 +515,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         ConnectionSupervisor.shared.dial = { client in
             await client.replaceCredentialForTesting(refreshed)
             fixture.registry.setCredentialForTesting(refreshed, for: fixture.gateway)
+            await client.setForegroundReadinessForTesting(true)
         }
 
         let outcome = await fixture.model.attemptReconnectOutcome()
@@ -355,7 +598,10 @@ final class SupervisedReconnectParityTests: XCTestCase {
         ) {
             try await fixture.model.connectGateway(
                 baseURL: targetCURL, credential: credential,
-                connectionOperation: { client in winningClient = client },
+                connectionOperation: { client in
+                    winningClient = client
+                    await client.setForegroundReadinessForTesting(true)
+                },
                 adoptionOperations: operations)
         }
         switchContinuation?.resume()

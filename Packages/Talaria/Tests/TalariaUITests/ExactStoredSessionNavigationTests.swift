@@ -226,6 +226,7 @@ final class ExactStoredSessionNavigationTests: XCTestCase {
         model.client = client
         model.mode = .live
         runtime.baseURL = baseURL
+        await client.setForegroundReadinessForTesting(true)
 
         do {
             try await model.finishConnectedGatewayAdoption(

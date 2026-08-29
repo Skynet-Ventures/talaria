@@ -1126,17 +1126,24 @@ extension AppModel {
         runtime.routedClient = client
         runtime.pump?.cancel()
 
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: GatewayEpochEventDelivery.self)
         runtime.pump = Task { @MainActor [weak self] in
-            for await event in stream {
-                self?.routeToolEvent(event)
+            for await delivery in stream {
+                guard ChatRuntime.shared.routedClient === client,
+                      await client.isCurrentReadyTransport(
+                        epoch: delivery.transportEpoch) else { continue }
+                self?.routeToolEvent(delivery.event)
             }
         }
         Task {
             if let previous, let previousClient {
                 await previousClient.removeEventHandler(previous)
             }
-            let id = await client.addEventHandler { continuation.yield($0) }
+            let id = await client.addEpochEventHandler { event, transportEpoch in
+                continuation.yield(GatewayEpochEventDelivery(
+                    event: event, transportEpoch: transportEpoch))
+            }
             await MainActor.run { ChatRuntime.shared.routerHandler = id }
         }
     }

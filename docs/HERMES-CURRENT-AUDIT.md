@@ -22,6 +22,23 @@ change or a material portable-contract delta creates a parity blocker;
 metadata, test-only, or non-portable drift can be recorded without chasing the
 moving head.
 
+## Targeted post-cutoff gateway-heartbeat audit
+
+A bounded audit of the later Hermes gateway/client liveness change identified
+one additive portable contract after the reproducible `40643cba` authority
+cutoff:
+
+| Commits | Upstream change | Talaria disposition |
+|---|---|---|
+| `9a71cb95c` | The gateway advertises `heartbeat: true` in `gateway.ready` and implements the JSON-RPC `gateway.ping` method. | **Implemented, compatible by feature detection.** Talaria starts no application heartbeat unless the exact socket advertises support. |
+| `9153be2a5`, `e3f695e5e` | Desktop/shared clients and TUI send a ping every 15 seconds and invalidate a generation after 45 seconds without inbound traffic. | **Implemented in `GatewayTransport`.** A monotonic state machine admits only the exact heartbeat response id as acknowledgement, treats any inbound frame as liveness, closes a silent half-open socket at the deadline, and lets the existing connection owner perform replacement/recovery. Invalid policy values disable the feature. |
+
+This targeted audit does not silently repin the five broader authority hashes
+or certify unrelated post-cutoff movement. Automated evidence is
+`GatewayHeartbeatTests`, the full Talaria test suite, and `talaria-verify`;
+real-device Wi-Fi/cellular handoff and a deliberately black-holed socket remain
+live certification cases.
+
 ## Upstream movement after `c1e25cad`
 
 The GitHub comparison reports 13 commits ahead of `c1e25cad` (a 14-commit

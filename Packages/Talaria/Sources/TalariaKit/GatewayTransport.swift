@@ -9,8 +9,9 @@ import Foundation
 //   ({"method":"event","params":{type, session_id, payload}}).
 // - Pooled handlers respond OUT OF ORDER — correlate strictly by id.
 // - Streaming deltas are coalesced server-side (~30 fps); expect bursts.
-// - No application-level heartbeat is required; on public binds the server
-//   pings at the protocol level every 20 s.
+// - Current gateways advertise `heartbeat:true` on gateway.ready and answer
+//   `gateway.ping`; Talaria then detects silent half-open sockets. Older peers
+//   remain on the URLSession/WebSocket close-event path.
 // - On disconnect, live sessions are parked for ~20 s; reconnect and
 //   session.resume within the grace window reattaches in-flight state.
 
@@ -51,15 +52,21 @@ public actor GatewayTransport {
     private var pending: [String: CheckedContinuation<SequencedResponse, Error>] = [:]
     private var inboundSequence: UInt64 = 0
     private var eventContinuation: AsyncStream<GatewayEvent>.Continuation?
+    private let heartbeatPolicy: GatewayHeartbeatPolicy
+    private var heartbeat = GatewayHeartbeatState(policy: .current)
+    private var heartbeatTask: Task<Void, Never>?
     private(set) public var state: TransportState = .idle
 
     /// All server events, in arrival order. Single consumer.
     public nonisolated let events: AsyncStream<GatewayEvent>
     private nonisolated let eventsCont: AsyncStream<GatewayEvent>.Continuation
 
-    public init(url: URL, session: URLSession = .shared) {
+    public init(url: URL, session: URLSession = .shared,
+                heartbeatPolicy: GatewayHeartbeatPolicy = .current) {
         self.url = url
         self.session = session
+        self.heartbeatPolicy = heartbeatPolicy
+        self.heartbeat = GatewayHeartbeatState(policy: heartbeatPolicy)
         var cont: AsyncStream<GatewayEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .unbounded) { cont = $0 }
         self.eventsCont = cont
@@ -168,6 +175,7 @@ public actor GatewayTransport {
         while true {
             do {
                 let message = try await task.receive()
+                heartbeat.recordInbound(responseID: nil, now: Self.uptime)
                 switch message {
                 case .string(let text):
                     handleFrame(text)
@@ -192,6 +200,11 @@ public actor GatewayTransport {
 
         // Event notification: {"method":"event","params":{type,session_id,payload}}
         if obj["method"]?.stringValue == "event", let params = obj["params"] {
+            if params["type"]?.stringValue == "gateway.ready" {
+                let advertised = params["payload"]?["heartbeat"]?.boolValue == true
+                heartbeat.activate(advertised: advertised, now: Self.uptime)
+                if advertised { startHeartbeat() }
+            }
             let event = GatewayEvent(type: params["type"]?.stringValue ?? "",
                                      sessionID: params["session_id"]?.stringValue ?? "",
                                      payload: params["payload"],
@@ -202,6 +215,8 @@ public actor GatewayTransport {
 
         // Response: correlate by id. id may be encoded as string or number.
         let id: String? = obj["id"]?.stringValue ?? obj["id"]?.intValue.map(String.init)
+        heartbeat.recordInbound(responseID: id, now: Self.uptime)
+        if id?.hasPrefix("talaria-heartbeat-") == true { return }
         guard let id, let cont = pending.removeValue(forKey: id) else { return }
 
         if let error = obj["error"] {
@@ -216,6 +231,9 @@ public actor GatewayTransport {
     }
 
     private func finish(reason: String?) {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        heartbeat.stop()
         state = .disconnected(reason: reason)
         task = nil
         for (_, cont) in pending {
@@ -223,5 +241,60 @@ public actor GatewayTransport {
         }
         pending.removeAll()
         eventsCont.finish()
+    }
+
+    private static var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    private func startHeartbeat() {
+        guard heartbeatPolicy.isEnabled, heartbeatTask == nil else { return }
+        let interval = heartbeatPolicy.interval
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(interval))
+                } catch { return }
+                guard !Task.isCancelled, let self else { return }
+                await self.heartbeatTick()
+            }
+        }
+    }
+
+    private func heartbeatTick() {
+        guard case .ready = state, let socket = task else { return }
+        switch heartbeat.tick(now: Self.uptime) {
+        case .none:
+            return
+        case .invalidate:
+            socket.cancel(with: .goingAway,
+                          reason: Data("heartbeat acknowledgement timed out".utf8))
+            finish(reason: "heartbeat acknowledgement timed out")
+        case .send(let id):
+            let frame = JSONValue.object([
+                "jsonrpc": .string("2.0"),
+                "id": .string(id),
+                "method": .string("gateway.ping"),
+                "params": .object([:]),
+            ])
+            guard let data = try? JSONEncoder().encode(frame),
+                  let text = String(data: data, encoding: .utf8) else {
+                socket.cancel(with: .goingAway, reason: nil)
+                finish(reason: "heartbeat encode failure")
+                return
+            }
+            Task { [weak self, weak socket] in
+                guard let socket else { return }
+                do {
+                    try await socket.send(.string(text))
+                } catch {
+                    await self?.heartbeatSendFailed(socket: socket, error: error)
+                }
+            }
+        }
+    }
+
+    private func heartbeatSendFailed(socket: URLSessionWebSocketTask, error: Error) {
+        guard task === socket, case .ready = state else { return }
+        socket.cancel(with: .goingAway, reason: nil)
+        finish(reason: "heartbeat send failed: \((error as NSError).localizedDescription)")
     }
 }

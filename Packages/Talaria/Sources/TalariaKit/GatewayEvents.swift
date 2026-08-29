@@ -25,7 +25,7 @@ public struct GatewayEvent: Sendable {
 /// Typed views over the events Talaria renders. Anything unlisted still flows
 /// through as `.other` so screens can opt in without protocol churn.
 public enum TypedGatewayEvent: Sendable {
-    case gatewayReady(skin: JSONValue?, changeEvents: Bool)
+    case gatewayReady(skin: JSONValue?, changeEvents: Bool, heartbeat: Bool)
     case messageStart(parts: TranscriptPartsUpdate?)
     case messageDelta(text: String, parts: TranscriptPartsUpdate?)
     case messageInterim(text: String, alreadyStreamed: Bool,
@@ -56,7 +56,10 @@ public enum TypedGatewayEvent: Sendable {
         let p = event.payload
         switch event.type {
         case "gateway.ready":
-            self = .gatewayReady(skin: p?["skin"], changeEvents: p?["change_events"]?.boolValue ?? false)
+            self = .gatewayReady(
+                skin: p?["skin"],
+                changeEvents: p?["change_events"]?.boolValue ?? false,
+                heartbeat: p?["heartbeat"]?.boolValue == true)
         case "message.start":
             self = .messageStart(parts: TranscriptPartsCodec.update(
                 from: p, defaultMode: .replace))

@@ -248,10 +248,15 @@ extension AppModel {
         if runtime.routerTask != nil, runtime.attachedClient === client { return }
         detachSettingsDiagnostics()
         runtime.attachedClient = client
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: GatewayEpochEventDelivery.self)
         runtime.routerTask = Task { @MainActor in
-            for await event in stream {
-                guard case .sessionInfo(let info) = TypedGatewayEvent(event) else { continue }
+            for await delivery in stream {
+                guard SettingsRuntime.shared.attachedClient === client,
+                      await client.isCurrentReadyTransport(
+                        epoch: delivery.transportEpoch),
+                      case .sessionInfo(let info) = TypedGatewayEvent(delivery.event)
+                else { continue }
                 let settings = SettingsRuntime.shared
                 if info.desktopContract > 0 { settings.desktopContract = info.desktopContract }
                 if !info.model.isEmpty { settings.runtimeModel = info.model }
@@ -259,7 +264,10 @@ extension AppModel {
             }
         }
         Task { @MainActor in
-            let id = await client.addEventHandler { continuation.yield($0) }
+            let id = await client.addEpochEventHandler { event, transportEpoch in
+                continuation.yield(GatewayEpochEventDelivery(
+                    event: event, transportEpoch: transportEpoch))
+            }
             // The link was replaced (or dropped) while the registration was in
             // flight. Without this the handler stays on the departed client for
             // the life of the process and `handlerID` names an attachment

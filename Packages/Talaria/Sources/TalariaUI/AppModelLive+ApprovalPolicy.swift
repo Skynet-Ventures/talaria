@@ -630,14 +630,21 @@ extension AppModel {
 
             // Same funnel the approval bridges use: events leave the client
             // actor through one stream so MainActor delivery keeps wire order.
-            let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
+            let (stream, continuation) = AsyncStream.makeStream(
+                of: GatewayEpochEventDelivery.self)
             store.watchPump = Task { @MainActor [weak self] in
-                for await event in stream where event.type == "pairing.changed" {
-                    guard let self, self.approvalPolicyGatewayID == gatewayID else { return }
+                for await delivery in stream where delivery.event.type == "pairing.changed" {
+                    guard let self, store.watchedClient === client,
+                          self.approvalPolicyGatewayID == gatewayID else { return }
+                    guard await client.isCurrentReadyTransport(
+                        epoch: delivery.transportEpoch) else { continue }
                     await self.loadPairing()
                 }
             }
-            let handler = await client.addEventHandler { continuation.yield($0) }
+            let handler = await client.addEpochEventHandler { event, transportEpoch in
+                continuation.yield(GatewayEpochEventDelivery(
+                    event: event, transportEpoch: transportEpoch))
+            }
             // Registering costs an actor hop, and a detach can land inside it —
             // the screen closing or a gateway selection changing. Assigning
             // the id blindly would leave a handler pumping into a cancelled

@@ -315,7 +315,7 @@ final class A2ARuntime {
     @ObservationIgnored var deferredRestores: [GatewayBotRoute: Set<String>] = [:]
     @ObservationIgnored var deferredRestoreTasks: [GatewayBotRoute: Task<Void, Never>] = [:]
     @ObservationIgnored var eventToken: UUID?
-    /// addEventHandler is asynchronous; a late token from a departing client
+    /// addEpochEventHandler is asynchronous; a late token from a departing client
     /// must not replace the subscription installed for its successor.
     @ObservationIgnored var eventClient: ObjectIdentifier?
     @ObservationIgnored var eventGeneration: UInt64 = 0
@@ -1132,8 +1132,16 @@ private extension AppModel {
                                 gatewayID sourceGatewayID: String?) {
         let identity = ObjectIdentifier(client)
         Task { @MainActor in
-            let token = await client.addEventHandler { event in
+            let token = await client.addEpochEventHandler { event, transportEpoch in
                 Task { @MainActor [weak self] in
+                    guard await client.isCurrentReadyTransport(epoch: transportEpoch) else {
+                        return
+                    }
+                    let runtime = A2ARuntime.shared
+                    guard runtime.eventGeneration == generation,
+                          runtime.eventClient == identity,
+                          runtime.routedClient == identity,
+                          runtime.inboxGatewayID == sourceGatewayID else { return }
                     self?.routeA2AChange(event, sourceGatewayID: sourceGatewayID)
                 }
             }

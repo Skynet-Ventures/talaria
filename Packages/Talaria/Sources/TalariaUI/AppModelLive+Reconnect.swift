@@ -4,6 +4,16 @@ import SwiftUI
 import TalariaKit
 import TalariaTheme
 
+/// UIKit's application-active callback is the reliable wake edge on iOS.
+/// SwiftUI's scenePhase remains useful, but production devices have shown it
+/// can miss a lock-screen return while the mounted root view survives.  The
+/// app target posts this notification from UIApplicationDelegate and the root
+/// funnels both lifecycle sources through the same coalesced validation.
+public extension Notification.Name {
+    static let talariaApplicationDidBecomeActive = Notification.Name(
+        "bot.talaria.applicationDidBecomeActive")
+}
+
 // Connection supervision for every post-boot socket-loss path.
 //
 // Event-pump completion is the disconnect signal. The single supervised loop
@@ -99,6 +109,8 @@ final class ConnectionSupervisor {
     /// App-lifetime watch loop; nil until the first start request.
     @ObservationIgnored var watchTask: Task<Void, Never>?
     @ObservationIgnored var reconnectTaskToken: UUID?
+    @ObservationIgnored var foregroundValidationTask: Task<Void, Never>?
+    @ObservationIgnored var foregroundValidationToken: UUID?
     @ObservationIgnored var episodeSource: EpisodeSource?
     @ObservationIgnored var episodeStartedAt: TimeInterval?
     @ObservationIgnored var episodeAttempt = 0
@@ -133,9 +145,25 @@ final class ConnectionSupervisor {
         dial = { client in try await client.connect() }
         switchConnect = nil
         reconnectTaskToken = nil
+        foregroundValidationTask?.cancel()
+        foregroundValidationTask = nil
+        foregroundValidationToken = nil
         resetEpisode(for: .cleanOpen)
         isReconnecting = false
         reauthGateway = nil
+    }
+
+    /// End only the foreground validation lease owned by `token`.
+    ///
+    /// The lease coalesces duplicate UIKit/SwiftUI callbacks while the
+    /// bounded socket ping is in flight. It must not cover the slower roster,
+    /// diagnostics, and room refresh that follows a successful ping: a real
+    /// later lock/unlock needs to validate the transport again even if that
+    /// ancillary refresh is still running.
+    func releaseForegroundValidation(ifOwnedBy token: UUID) {
+        guard foregroundValidationToken == token else { return }
+        foregroundValidationTask = nil
+        foregroundValidationToken = nil
     }
 
     func note(error: Error, forGatewayID id: String?) {
@@ -261,6 +289,24 @@ private struct SupervisedReconnectAuthority {
 
 extension AppModel {
 
+    /// Reconcile the global link flag with authenticated traffic delivered by
+    /// the exact current primary client. This is deliberately source-fenced:
+    /// a late event from a replaced client or a secondary gateway can never
+    /// make the primary banner healthy.
+    func noteCurrentPrimaryInboundActivity(
+        from sourceClient: GatewayClient,
+        transportIsCurrentAndReady: Bool
+    ) {
+        guard transportIsCurrentAndReady,
+              mode == .live, client === sourceClient, isOffline else { return }
+        isOffline = false
+        if let base = LiveRuntime.shared.baseURL {
+            ConnectionRegistry.shared.noteState(.connected, forURL: base)
+            connections = ConnectionRegistry.shared.rows
+        }
+        Task { @MainActor [weak self] in await self?.flushComposeQueue() }
+    }
+
     /// The gateway that needs a fresh sign-in, or nil. Observable: reading it
     /// from a view body subscribes to changes.
     public var needsReauth: URL? { ConnectionSupervisor.shared.reauthGateway }
@@ -337,22 +383,62 @@ extension AppModel {
 
     // MARK: Foreground / manual entry points
 
-    /// Scene-phase hook (`scenePhase == .active`). Re-probes every saved
-    /// gateway, then either reconnects a dead link immediately or refreshes the
-    /// roster of a healthy one.
+    /// Scene-phase hook (`scenePhase == .active`). Validates the exact current
+    /// socket before waiting on any saved-gateway HTTP diagnostics, then either
+    /// enters supervised reconnect immediately or refreshes a healthy source.
     public func applicationDidBecomeActive() {
         startLinkSupervision()
-        // The socket that was supposed to deliver `message.complete` died when
-        // the process was parked, so the roster's "working" flags are beliefs
-        // and not facts until `session.active_list` says otherwise. Asked
-        // before the roster refresh below and independently of it: this runs
-        // even when the link is down (it records the debt and the reaper pays
-        // it once the link is back), and it is the only thing that clears a
-        // bot left spinning on a turn that finished while we were away.
-        foregroundReseed()
-        Task { @MainActor in
+        let supervisor = ConnectionSupervisor.shared
+        // UIKit and SwiftUI normally publish the same foreground edge a few
+        // milliseconds apart. Do not cancel a liveness RPC already crossing
+        // the half-open transport: cancellation can retire its waiter while a
+        // replacement request is still queued behind that same dead socket.
+        // The check is bounded to three seconds, so one exact-source
+        // single-flight is both faster and safer than cancel-and-restart.
+        guard supervisor.foregroundValidationTask == nil else { return }
+        let token = UUID()
+        supervisor.foregroundValidationToken = token
+        supervisor.foregroundValidationTask = Task { @MainActor [weak self] in
+            defer {
+                supervisor.releaseForegroundValidation(ifOwnedBy: token)
+            }
+            guard !Task.isCancelled, let self else { return }
+            guard mode == .live, let client,
+                  let capturedSource = currentReconnectAuthority()?.episodeSource else {
+                await refreshConnectionHealth()
+                return
+            }
+            let liveness = await client.validateForegroundLiveness()
+            guard !Task.isCancelled else { return }
+            // A gateway switch, credential rotation, client replacement, or
+            // generation change while ping was suspended makes its answer
+            // irrelevant. Never reconnect or publish against ambient state.
+            guard currentReconnectAuthority()?.episodeSource == capturedSource else { return }
+            // Only the bounded exact-socket validation is single-flight.
+            // Release before any potentially slow HTTP/roster/room work so a
+            // distinct later foreground edge cannot be silently discarded.
+            supervisor.releaseForegroundValidation(ifOwnedBy: token)
+            switch liveness {
+            case .reconnectRequired:
+                reconnectNow()
+                return
+            case .trafficFenced:
+                // Profile-lifecycle authority intentionally rejected local
+                // traffic. Do not mistake that for a dead socket or route
+                // around the fence; the next active/watch pass can validate.
+                return
+            case .healthy:
+                break
+            }
+            // Only ask the socket for liveness/session snapshots after the
+            // explicit ping proved it survived suspension. Failed links are
+            // reseeded by reconnect housekeeping; fenced links must not route
+            // around lifecycle authority.
+            foregroundReseed()
             await refreshConnectionHealth()
-            guard mode == .live, let client else { return }
+            guard !Task.isCancelled else { return }
+            guard mode == .live, self.client === client,
+                  currentReconnectAuthority()?.episodeSource == capturedSource else { return }
             guard await client.isConnected else {
                 reconnectNow()
                 return
@@ -636,6 +722,11 @@ extension AppModel {
         let adoptedGeneration = runtime.generation
         OperatorSettingsRuntime.shared.completeReconnectAttempt()
         runtime.resetSessionState()
+        guard await authority.client.publishCurrentTransportForEvents() else {
+            isOffline = true
+            ConnectionRegistry.shared.noteState(.offline, forURL: authority.baseURL)
+            return false
+        }
         // Pending approvals replay through session.resume below; keeping the
         // old cards would let the user answer request ids that no longer exist.
         approvals.removeAll { GatewayBotRoute(qualifiedID: $0.botID) == nil }
@@ -695,7 +786,17 @@ extension AppModel {
             await pump.value
             guard !Task.isCancelled, let self,
                   LiveRuntime.shared.generation == generation else { return }
-            guard self.mode == .live, self.client != nil else { return }
+            guard self.mode == .live, self.client === client else { return }
+
+            // A socket can die while the initial adoption transaction is
+            // awaiting an ancillary refresh. Revoke that exact transaction
+            // before reconnecting so its next source-authority check cancels
+            // instead of publishing late state or CAS-removing the successor.
+            // Generation + client identity prove this token cannot belong to a
+            // newer primary attempt.
+            if LiveRuntime.shared.connectionAttemptToken != nil {
+                LiveRuntime.shared.connectionAttemptToken = nil
+            }
             self.isOffline = true
             if let base = LiveRuntime.shared.baseURL {
                 ConnectionRegistry.shared.noteState(.offline, forURL: base)

@@ -19,7 +19,6 @@ import UIKit
 struct TalariaApp: App {
 
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @Environment(\.scenePhase) private var scenePhase
 
     /// The single observable state tree for the whole app (demo or live).
     @State private var model: AppModel
@@ -54,12 +53,6 @@ struct TalariaApp: App {
                     DeepLinkRouter(model: model).open(url)
                 }
         }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            // Refresh saved-gateway health whenever we come to the front so
-            // the network chip and Connections rows are honest.
-            Task { await ConnectionRegistry.shared.probeAll() }
-        }
     }
 }
 
@@ -67,6 +60,11 @@ struct TalariaApp: App {
 /// SwiftUI equivalent are forwarded into the package layer.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        NotificationCenter.default.post(
+            name: .talariaApplicationDidBecomeActive, object: application)
+    }
 
     /// APNs registration succeeded — hand the token to PushCoordinator, which
     /// exposes it awaitably for the gateway relay registration RPC.

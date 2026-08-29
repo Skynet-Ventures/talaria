@@ -795,8 +795,11 @@ public extension AppModel {
         runtime.reset()
         runtime.routedClient = client
         Task { @MainActor in
-            _ = await client.addEventHandler { event in
+            _ = await client.addEpochEventHandler { event, transportEpoch in
                 Task { @MainActor in
+                    guard CronDetailRuntime.shared.routedClient === client,
+                          await client.isCurrentReadyTransport(
+                            epoch: transportEpoch) else { return }
                     guard case .changed(let what) = TypedGatewayEvent(event),
                           what == "cron.changed" else { return }
                     CronDetailRuntime.shared.changeTick &+= 1

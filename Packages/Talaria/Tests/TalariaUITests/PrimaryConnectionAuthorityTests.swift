@@ -72,6 +72,75 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         }
     }
 
+    private func waitUntil(_ predicate: () -> Bool,
+                           file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<1_000 where !predicate() { await Task.yield() }
+        XCTAssertTrue(predicate(), file: file, line: line)
+    }
+
+    func testRetiredPrimaryTransportMessageStartCannotMutateMainOrChatPump() async throws {
+        let model = AppModel()
+        let baseURL = url("event-epoch")
+        defer { removeSavedRows(for: [baseURL]) }
+        var connectedClient: GatewayClient?
+
+        try await model.connectGateway(
+            baseURL: baseURL, credential: credential,
+            connectionOperation: { client in
+                connectedClient = client
+                // The package seam models an installed, ready transport without
+                // opening a real WebSocket in this consumer-boundary test.
+                await client.setForegroundReadinessForTesting(true)
+            },
+            adoptionOperations: operations())
+        let client = try XCTUnwrap(connectedClient)
+        let botID = "epoch-worker"
+        let sessionID = "epoch-runtime"
+        model.bots = [Bot(id: botID, job: "", shape: .circle, hue: .violet)]
+        let chat = model.chat(for: botID)
+        chat.sessionID = sessionID
+        LiveRuntime.shared.sessionToBot[sessionID] = botID
+
+        let priorChatHandler = ChatRuntime.shared.routerHandler
+        model.attachChatEventRouter()
+        await waitUntil {
+            ChatRuntime.shared.routedClient === client
+                && ChatRuntime.shared.routerHandler != priorChatHandler
+        }
+
+        // Install a successor epoch while retaining an event that was received
+        // by the prior transport. Readiness remains true, proving rejection is
+        // caused by exact transport identity rather than an offline shortcut.
+        let retiredEpoch = await client.advanceTransportEpochForTesting()
+        await client.emitEventForTesting(GatewayEvent(
+            type: "message.start", sessionID: sessionID, payload: [:]),
+            eventAuthorityEpoch: retiredEpoch)
+        for _ in 0..<100 { await Task.yield() }
+
+        XCTAssertEqual(model.bots.first?.status, .idle)
+        XCTAssertFalse(LiveRuntime.shared.workingBotIDs.contains(botID))
+        XCTAssertFalse(chat.isTyping)
+        XCTAssertFalse(chat.isRunning)
+
+        // A delivery from the current ready transport still reaches both
+        // independent consumers: AppModel's main pump owns roster working
+        // state, while ChatRuntime owns the Stop/running state.
+        let published = await client.publishCurrentTransportForEvents()
+        XCTAssertTrue(published)
+        let currentEpoch = await client.eventAuthorityEpochForTesting()
+        await client.emitEventForTesting(GatewayEvent(
+            type: "message.start", sessionID: sessionID, payload: [:]),
+            eventAuthorityEpoch: currentEpoch)
+        await waitUntil {
+            model.bots.first?.status == .working
+                && LiveRuntime.shared.workingBotIDs.contains(botID)
+                && chat.isTyping
+                && chat.isRunning
+        }
+
+        await model.disconnectGateway()
+    }
+
     func testDisconnectDuringSuspendedConnectSuppressesEveryLatePublication() async throws {
         let model = AppModel()
         let baseURL = url("dial-disconnect")
@@ -114,7 +183,10 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
 
         try await model.connectGateway(
             baseURL: newURL, credential: credential,
-            connectionOperation: { replacementClient = $0 },
+            connectionOperation: { client in
+                replacementClient = client
+                await client.setForegroundReadinessForTesting(true)
+            },
             adoptionOperations: operations())
         let replacementID = try XCTUnwrap(LiveRuntime.shared.gatewayID)
         let replacement = try XCTUnwrap(replacementClient)
@@ -141,7 +213,9 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         let task = Task { @MainActor in
             try await model.connectGateway(
                 baseURL: baseURL, credential: credential,
-                connectionOperation: { _ in },
+                connectionOperation: { client in
+                    await client.setForegroundReadinessForTesting(true)
+                },
                 adoptionOperations: operations(adopt: { client, gatewayID in
                     let snapshot = try await pool.adoptWithGeneration(client, for: gatewayID)
                     adoptedGatewayID = gatewayID
@@ -172,7 +246,9 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         let oldTask = Task { @MainActor in
             try await model.connectGateway(
                 baseURL: oldURL, credential: credential,
-                connectionOperation: { _ in },
+                connectionOperation: { client in
+                    await client.setForegroundReadinessForTesting(true)
+                },
                 adoptionOperations: operations(roster: {
                     oldGatewayID = LiveRuntime.shared.gatewayID
                     await gate.suspend()
@@ -182,7 +258,10 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
 
         try await model.connectGateway(
             baseURL: newURL, credential: credential,
-            connectionOperation: { replacementClient = $0 },
+            connectionOperation: { client in
+                replacementClient = client
+                await client.setForegroundReadinessForTesting(true)
+            },
             adoptionOperations: operations())
         let replacementID = try XCTUnwrap(LiveRuntime.shared.gatewayID)
         let replacement = try XCTUnwrap(replacementClient)
@@ -219,14 +298,19 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         let first = Task { @MainActor in
             try await model.connectGateway(
                 baseURL: firstURL, credential: credential,
-                connectionOperation: { _ in }, adoptionOperations: operations())
+                connectionOperation: { client in
+                    await client.setForegroundReadinessForTesting(true)
+                }, adoptionOperations: operations())
         }
         for _ in 0..<20 { await Task.yield() }
         var secondClient: GatewayClient?
         let second = Task { @MainActor in
             try await model.connectGateway(
                 baseURL: secondURL, credential: credential,
-                connectionOperation: { secondClient = $0 },
+                connectionOperation: { client in
+                    secondClient = client
+                    await client.setForegroundReadinessForTesting(true)
+                },
                 adoptionOperations: operations())
         }
         for _ in 0..<20 { await Task.yield() }
@@ -264,25 +348,42 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         await pool.disconnectAll()
     }
 
-    func testDisconnectMonitorArmsOnlyAfterInitialAdoptionTransactionFinishes() async throws {
+    func testDisconnectDuringInitialAdoptionRevokesTransactionAndStartsRecovery() async throws {
         let model = AppModel()
         let baseURL = url("monitor-order")
-        defer { removeSavedRows(for: [baseURL]) }
+        defer {
+            LiveRuntime.shared.reconnectTask?.cancel()
+            LiveRuntime.shared.reconnectTask = nil
+            ConnectionSupervisor.shared.resetTestingSeams()
+            removeSavedRows(for: [baseURL])
+        }
         let gate = ConnectionSuspensionGate()
+        let pumpGate = ConnectionSuspensionGate()
         LiveRuntime.shared.monitorTask?.cancel()
         LiveRuntime.shared.monitorTask = nil
+        ConnectionSupervisor.shared.sleep = { _ in throw CancellationError() }
 
         let task = Task { @MainActor in
             try await model.connectGateway(
                 baseURL: baseURL, credential: credential,
-                connectionOperation: { _ in },
+                connectionOperation: { client in
+                    await client.setForegroundReadinessForTesting(true)
+                    await client.setEventsTaskForTesting(Task {
+                        await pumpGate.suspend()
+                    })
+                },
                 adoptionOperations: operations(roster: { await gate.suspend() }))
         }
         await gate.waitUntilEntered()
-        XCTAssertNil(LiveRuntime.shared.monitorTask)
+        XCTAssertNotNil(LiveRuntime.shared.monitorTask)
+
+        await pumpGate.release()
+        await waitUntil {
+            LiveRuntime.shared.connectionAttemptToken == nil && model.isOffline
+        }
 
         await gate.release()
-        try await task.value
+        await assertCancelled(task)
         XCTAssertNotNil(LiveRuntime.shared.monitorTask)
         await model.disconnectGateway()
     }

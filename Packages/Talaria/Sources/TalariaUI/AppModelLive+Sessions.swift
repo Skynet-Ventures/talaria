@@ -1361,13 +1361,26 @@ extension AppModel {
         runtime.attachedClient = client
         // One AsyncStream so MainActor delivery preserves wire order, same
         // shape as the main event pump.
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: GatewayEpochEventDelivery.self)
         runtime.routerTask = Task { @MainActor [weak self] in
-            for await event in stream { self?.routeSessionEvent(event) }
+            for await delivery in stream {
+                guard SessionsRuntime.shared.attachedClient === client,
+                      await client.isCurrentReadyTransport(
+                        epoch: delivery.transportEpoch) else { continue }
+                self?.routeSessionEvent(delivery.event)
+            }
         }
-        Task {
-            let id = await client.addEventHandler { continuation.yield($0) }
-            await MainActor.run { SessionsRuntime.shared.handlerID = id }
+        Task { @MainActor in
+            let id = await client.addEpochEventHandler { event, transportEpoch in
+                continuation.yield(GatewayEpochEventDelivery(
+                    event: event, transportEpoch: transportEpoch))
+            }
+            guard SessionsRuntime.shared.attachedClient === client else {
+                await client.removeEventHandler(id)
+                return
+            }
+            SessionsRuntime.shared.handlerID = id
         }
     }
 

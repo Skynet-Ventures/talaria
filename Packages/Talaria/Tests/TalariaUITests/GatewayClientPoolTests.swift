@@ -1,6 +1,6 @@
 #if canImport(XCTest)
 import XCTest
-import TalariaKit
+@testable import TalariaKit
 @testable import TalariaUI
 
 private actor ConnectorCounter {
@@ -55,6 +55,22 @@ private func eventually(_ condition: () async -> Bool) async -> Bool {
 final class GatewayClientPoolTests: XCTestCase {
     private let url = URL(string: "https://gateway.example")!
     private let credential = GatewayCredential.sessionToken("test-token")
+
+    func testConnectedSecondaryPublishesEpochAuthorityBeforePoolReturnsIt() async throws {
+        let connected = GatewayClient(baseURL: url, credential: credential)
+        let pool = GatewayClientPool { _, _ in
+            await connected.setForegroundReadinessForTesting(true)
+            return connected
+        }
+
+        let snapshot = try await pool.connectWithGeneration(
+            gatewayID: "secondary", baseURL: url, credential: credential)
+        let epoch = await snapshot.client.eventAuthorityEpochForTesting()
+        let ready = await snapshot.client.isCurrentReadyTransport(epoch: epoch)
+
+        XCTAssertTrue(ready)
+        await pool.disconnectAll()
+    }
 
     func testConcurrentLookupsReuseOneClient() async throws {
         let counter = ConnectorCounter()

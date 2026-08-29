@@ -1,6 +1,18 @@
 import Foundation
 import TalariaKit
 
+/// An event tagged with the exact GatewayClient transport that received it.
+///
+/// The UI has several focused event pumps in addition to the primary one. A
+/// GatewayClient survives a reconnect, so an object-identity check alone
+/// cannot distinguish an event buffered by the retired socket from a new
+/// transport's event. Every consumer must validate `transportEpoch` at its
+/// MainActor boundary before it mutates UI state.
+struct GatewayEpochEventDelivery: Sendable {
+    let event: GatewayEvent
+    let transportEpoch: UInt64
+}
+
 /// Failed-turn evidence can arrive twice: first on the live terminal frame,
 /// then again in `session.resume.inflight` when the socket died around that
 /// frame. Keep the evidence on one assistant row and only make it more
@@ -404,15 +416,32 @@ extension AppModel {
         // Events fan out of the client on its own actor; funnel them through
         // one AsyncStream so MainActor delivery preserves wire order (deltas
         // arrive in ~30 fps bursts and must append in order).
-        let (stream, continuation) = AsyncStream.makeStream(of: GatewayEvent.self)
-        _ = await client.addEventHandler { continuation.yield($0) }
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: GatewayEpochEventDelivery.self)
+        _ = await client.addEpochEventHandler { event, transportEpoch in
+            continuation.yield(GatewayEpochEventDelivery(
+                event: event, transportEpoch: transportEpoch))
+        }
         guard isCurrentConnectionAttempt(authority), !Task.isCancelled else {
             continuation.finish()
             await disconnectCapturedClientIfUnowned(authority)
             throw CancellationError()
         }
         runtime.eventPump = Task { @MainActor [weak self] in
-            for await event in stream { self?.handle(event: event) }
+            for await delivery in stream {
+                guard let self else { return }
+                // The client actor survives reconnect, so identity alone is
+                // insufficient: reject a buffered event from an old transport
+                // or one whose replacement dial has already failed.
+                guard self.client === client else { continue }
+                let transportIsCurrentAndReady = await client.isCurrentReadyTransport(
+                    epoch: delivery.transportEpoch)
+                guard transportIsCurrentAndReady else { continue }
+                self.noteCurrentPrimaryInboundActivity(
+                    from: client,
+                    transportIsCurrentAndReady: transportIsCurrentAndReady)
+                self.handle(event: delivery.event)
+            }
         }
 
         do {
@@ -530,6 +559,21 @@ extension AppModel {
 
         // Source, credential and pooled-client authority are all installed now.
         // Signal before profiles.list or any other ancillary refresh can fail.
+        guard await client.publishCurrentTransportForEvents() else {
+            _ = await registry.clientPool.disconnectIfCurrent(
+                poolSnapshot, for: savedGateway.id)
+            throw GatewayError(
+                code: -3,
+                message: "connected gateway transport was not ready for adoption")
+        }
+        // Socket ownership is established at publication, not after the
+        // ancillary roster/routine/session/room refreshes below. Those calls
+        // can legitimately take seconds on a phone. If iOS suspends and drops
+        // the socket inside that window, an end-of-transaction monitor leaves
+        // no observer to start recovery and the offline banner can remain
+        // stuck indefinitely. Arm now; the monitor source-fences the exact
+        // generation/client and invalidates this transaction before it dials.
+        startSupervisedMonitor(for: client, generation: authority.generation)
         retryExactStoredSessionNavigation()
         registry.noteState(.connected, forURL: baseURL)
 
@@ -556,9 +600,6 @@ extension AppModel {
         await operations.reseedRoomProjection(savedGateway.id)
         try await requireCurrentConnectionAttempt(
             authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        // Arm socket-loss recovery only after the initial adoption transaction
-        // can no longer resume and CAS-remove this same pooled client.
-        startSupervisedMonitor(for: client, generation: authority.generation)
     }
 
     private func isCurrentConnectionAttempt(_ authority: PrimaryConnectionAttemptAuthority) -> Bool {

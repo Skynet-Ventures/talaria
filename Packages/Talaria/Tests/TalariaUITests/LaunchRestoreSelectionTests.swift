@@ -229,7 +229,10 @@ final class LaunchRestoreSelectionTests: XCTestCase {
         var winningClient: GatewayClient?
         try await fixture.model.connectGateway(
             baseURL: secondURL, credential: .sessionToken("second-token"),
-            connectionOperation: { client in winningClient = client },
+            connectionOperation: { client in
+                winningClient = client
+                await client.setForegroundReadinessForTesting(true)
+            },
             adoptionOperations: operations)
         await gate.release()
         await restore.value
