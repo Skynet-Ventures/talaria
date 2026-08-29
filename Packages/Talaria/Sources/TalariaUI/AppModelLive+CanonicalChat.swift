@@ -894,7 +894,7 @@ extension AppModel {
             // history window; a flaky REST read keeps the stub/cache instead
             // of failing the open. Mutation-proof paths still request a
             // full projection.
-            let restTarget = attachRestTarget(target, durableID: durableID)
+            let restTarget = Self.attachRestTarget(target, durableID: durableID)
             let pageTask: Task<JSONValue?, Error>? = hydrate && restTarget != nil
                 ? Task {
                     try await client.latestSessionMessages(
