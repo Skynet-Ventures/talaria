@@ -65,6 +65,10 @@ public extension Notification.Name {
 //      to already own the registry credential; OAuth/port-repair drift
 //      failed ownsCredential and reconnectNow did not retry `.stale`.
 //      Rebind registry → client on the same live row, then dial.
+//      d85ec3c — DEVICE SUCCESS on after-background reconnect. Follow-up is
+//      presentation only: suppress unreachable chrome during the brief wake
+//      redial grace; cold chat open keeps Loading chat…; warm transcripts
+//      keep messages with a subtle reconnect bar.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //

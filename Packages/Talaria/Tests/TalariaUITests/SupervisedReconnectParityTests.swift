@@ -723,7 +723,8 @@ final class SupervisedReconnectParityTests: XCTestCase {
         let fixture = try fixture()
         defer { cleanup(fixture) }
         await fixture.client.adoptCredential(.sessionToken("stale-in-memory-token"))
-        XCTAssertFalse(await fixture.client.ownsCredential(fixture.credential))
+        let ownsBeforeRebind = await fixture.client.ownsCredential(fixture.credential)
+        XCTAssertFalse(ownsBeforeRebind)
 
         let supervisor = ConnectionSupervisor.shared
         supervisor.suspendedForBackground = true

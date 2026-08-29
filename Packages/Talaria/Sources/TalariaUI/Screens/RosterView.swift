@@ -650,7 +650,7 @@ public struct RosterView: View {
     }
 
     private var netChip: some View {
-        let chip = TalariaVoice.netChip(offline: model.isOffline,
+        let chip = TalariaVoice.netChip(offline: model.showsOfflineUnreachableChrome,
                                         connections: model.connections,
                                         theme.id)
         let color = TalariaVoice.netColor(chip.tone, theme: theme)
