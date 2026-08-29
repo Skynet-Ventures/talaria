@@ -677,3 +677,82 @@ public enum GeneratedRemoteImageLoader {
         return data
     }
 }
+
+public struct RemoteAssistantMediaPayload: Sendable {
+    public let data: Data
+    public let mimeType: String?
+
+    public init(data: Data, mimeType: String?) {
+        self.data = data
+        self.mimeType = mimeType
+    }
+}
+
+public extension GatewayClient {
+    func assistantManagedFile(path: String, maximumDecodedBytes: Int) async throws
+        -> RemoteAssistantMediaPayload {
+        guard maximumDecodedBytes > 0,
+              maximumDecodedBytes <= 100 * 1_024 * 1_024 else {
+            throw GatewayError(code: -11, message: "Invalid media response limit.")
+        }
+        let maximumEncoded = ((maximumDecodedBytes + 2) / 3) * 4
+        let payload = try await restJSONBoundedNoRedirect(
+            path: "api/files/read", query: [URLQueryItem(name: "path", value: path)],
+            timeout: 60, maximumResponseBytes: maximumEncoded + 8_192)
+        guard let declaredSize = payload["size"]?.intValue,
+              declaredSize >= 0, declaredSize <= maximumDecodedBytes,
+              let declaredMIME = payload["mime_type"]?.stringValue?.lowercased(),
+              declaredMIME.utf8.count <= 128,
+              let value = payload["data_url"]?.stringValue,
+              value.utf8.count <= maximumEncoded + 256,
+              let comma = value.firstIndex(of: ","),
+              value[..<comma].lowercased() == "data:\(declaredMIME);base64",
+              let data = Data(base64Encoded: String(value[value.index(after: comma)...])),
+              data.count == declaredSize, data.count <= maximumDecodedBytes else {
+            throw GatewayError(code: 415, message: "Gateway returned malformed managed media.")
+        }
+        return RemoteAssistantMediaPayload(data: data, mimeType: declaredMIME)
+    }
+}
+
+/// Explicit-action loader for public transcript media. It deliberately shares
+/// the generated-image host policy: no credentials, cookies, redirects, or
+/// private DNS answers are admitted before bounded bytes reach the renderer.
+public enum RemoteAssistantMediaLoader {
+    public static func load(_ url: URL, maximumBytes: Int) async throws
+        -> RemoteAssistantMediaPayload {
+        try await load(url, maximumBytes: maximumBytes, resolver: { host in
+            await RemoteGeneratedImagePolicy.systemResolve(host)
+        })
+    }
+
+    static func load(_ url: URL, maximumBytes: Int,
+                     resolver: RemoteGeneratedImagePolicy.Resolver,
+                     configuration suppliedConfiguration: URLSessionConfiguration? = nil)
+        async throws
+        -> RemoteAssistantMediaPayload {
+        guard maximumBytes > 0,
+              let host = url.host(), RemoteGeneratedImagePolicy.hostIsPublic(host),
+              url.scheme?.lowercased() == "http" || url.scheme?.lowercased() == "https"
+        else { throw GatewayError(code: 403, message: "Private media hosts are not allowed.") }
+        guard await RemoteGeneratedImagePolicy.resolvedHostIsPublic(host, resolver: resolver)
+        else { throw GatewayError(code: 403, message: "Media host resolved to a private address.") }
+        var request = URLRequest(url: url, timeoutInterval: 45)
+        request.httpMethod = "GET"
+        request.setValue("application/octet-stream,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        let configuration = suppliedConfiguration ?? URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.httpShouldSetCookies = false
+        let (data, response) = try await GatewayBoundedRESTLoader.load(
+            request, limit: maximumBytes, configuration: configuration,
+            rejectsRedirects: true)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw GatewayError(code: (response as? HTTPURLResponse)?.statusCode ?? 0,
+                               message: "Remote media could not be loaded.")
+        }
+        return RemoteAssistantMediaPayload(data: data,
+                                           mimeType: http.mimeType?.lowercased())
+    }
+}

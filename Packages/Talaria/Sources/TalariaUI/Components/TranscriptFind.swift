@@ -188,20 +188,43 @@ public enum TranscriptFindPolicy {
             let visibleText = message.author == .bot
                 ? GeneratedImageEchoPolicy.suppress(in: message)
                 : message.text
-            guard !visibleText.isEmpty else { continue }
+            let searchableText: String
+            var projectedSegments: [String]?
+            if message.author == .bot {
+                let media = AssistantMediaProjection.project(
+                    visibleText, isStreaming: message.isStreaming)
+                guard !media.isClipped else {
+                    truncated = true
+                    continue
+                }
+                searchableText = media.text
+                if !media.references.isEmpty {
+                    var mediaSegments: [String] = []
+                    for run in media.runs {
+                        guard case .text(let text) = run, !text.isEmpty else { continue }
+                        try Task.checkCancellation()
+                        mediaSegments.append(contentsOf: MarkdownParser.searchSegments(
+                            text, isCancelled: { Task.isCancelled }))
+                    }
+                    projectedSegments = mediaSegments
+                }
+            } else {
+                searchableText = visibleText
+            }
+            guard !searchableText.isEmpty else { continue }
             guard indexedMessages < maximumIndexedMessages,
                   remainingCharacters > 0, remainingSegments > 0 else {
                 truncated = true
                 break
             }
             indexedMessages += 1
-            guard sourceIsAdmissible(visibleText) else {
+            guard sourceIsAdmissible(searchableText) else {
                 truncated = true
                 continue
             }
 
-            let projected = MarkdownParser.searchSegments(
-                visibleText, isCancelled: { Task.isCancelled })
+            let projected = projectedSegments ?? MarkdownParser.searchSegments(
+                searchableText, isCancelled: { Task.isCancelled })
             try Task.checkCancellation()
             let allowance = min(maximumSegmentsPerMessage, remainingSegments)
             let admittedSegments = projected.prefix(allowance)

@@ -191,6 +191,20 @@ public struct ChatView: View {
             messageRowID: message.rowID, messageRevisionID: message.id)
     }
 
+    private func assistantMediaSource(
+        for message: ChatMessage,
+        visibleText: String,
+        reference: AssistantMediaProjection.Reference
+    ) -> AssistantMediaPresentationSource? {
+        guard let route = model.stateRoute(for: botID) ?? model.gatewayRoute(for: botID),
+              let chat, let stored = chat.storedSessionID, !stored.isEmpty else { return nil }
+        return AssistantMediaPresentationSource(
+            model: model, botID: botID, route: route,
+            storedSessionID: stored, liveSessionID: chat.sessionID ?? "",
+            messageRowID: message.rowID, messageRevisionID: message.id,
+            visibleMessageText: visibleText, reference: reference)
+    }
+
     public var body: some View {
         dialogContent
     }
@@ -1052,14 +1066,26 @@ public struct ChatView: View {
                         .padding(.bottom, 4)
                 }
                 let visibleText = GeneratedImageEchoPolicy.suppress(in: message)
+                let mediaProjection = AssistantMediaProjection.project(
+                    visibleText, isStreaming: message.isStreaming)
                 if let reasoning = message.reasoning, !reasoning.isEmpty,
                    transcriptPolicy.showsReasoning(isLive: message.isStreaming) {
                     ThoughtBlock(reasoning: reasoning, theme: theme,
-                                 isLive: message.isStreaming && visibleText.isEmpty)
-                        .padding(.bottom, visibleText.isEmpty ? 0 : 5)
+                                 isLive: message.isStreaming && mediaProjection.runs.isEmpty)
+                        .padding(.bottom, mediaProjection.runs.isEmpty ? 0 : 5)
                 }
-                if !visibleText.isEmpty {
-                    botBubble(visibleText, findHighlight: findHighlight(for: message))
+                if mediaProjection.isClipped {
+                    botBubble("This response was too large to project media safely.",
+                              findHighlight: nil)
+                        .contextMenu { messageMenu(message) }
+                } else if mediaProjection.references.isEmpty {
+                    if !visibleText.isEmpty {
+                        botBubble(visibleText, findHighlight: findHighlight(for: message))
+                            .contextMenu { messageMenu(message) }
+                    }
+                } else {
+                    assistantMediaRuns(mediaProjection.runs, message: message,
+                                       visibleText: visibleText)
                         .contextMenu { messageMenu(message) }
                 }
                 let visibleToolCalls = transcriptPolicy.visibleToolCalls(message.toolCalls)
@@ -1067,7 +1093,7 @@ public struct ChatView: View {
                     ToolCallList(calls: visibleToolCalls, theme: theme, copy: copy,
                                  accent: botColor,
                                  generatedImageSource: generatedImageSource(for: message))
-                        .padding(.top, visibleText.isEmpty ? 0 : 7)
+                        .padding(.top, mediaProjection.runs.isEmpty ? 0 : 7)
                         .padding(.leading, theme.id == .ink ? 12 : 0)
                 }
                 if let card = message.card {
@@ -1098,6 +1124,54 @@ public struct ChatView: View {
             Spacer(minLength: 44) // ≈ the prototype's 86% max width
         }
         .modifier(ChatEntrance())
+    }
+
+    @ViewBuilder private func assistantMediaRuns(
+        _ runs: [AssistantMediaProjection.Run],
+        message: ChatMessage,
+        visibleText: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(runs.enumerated()), id: \.offset) { index, run in
+                switch run {
+                case .text(let text):
+                    if !text.isEmpty {
+                        botBubble(text, findHighlight: assistantMediaFindHighlight(
+                            runs: runs, runIndex: index,
+                            selection: findHighlight(for: message)))
+                    }
+                case .media(let reference):
+                    if let source = assistantMediaSource(
+                        for: message, visibleText: visibleText, reference: reference) {
+                        AssistantMediaCard(source: source, theme: theme, accent: botColor)
+                    } else {
+                        AssistantMediaUnavailableCard(
+                            reference: reference, theme: theme, accent: botColor)
+                    }
+                }
+            }
+        }
+    }
+
+    private func assistantMediaFindHighlight(
+        runs: [AssistantMediaProjection.Run],
+        runIndex: Int,
+        selection: TranscriptFindSelection?
+    ) -> TranscriptFindSelection? {
+        guard var selection else { return nil }
+        var segmentOffset = 0
+        for (index, run) in runs.enumerated() {
+            guard case .text(let text) = run, !text.isEmpty else { continue }
+            let count = MarkdownParser.searchSegments(text).count
+            if index == runIndex {
+                guard selection.address.segment >= segmentOffset,
+                      selection.address.segment < segmentOffset + count else { return nil }
+                selection.address.segment -= segmentOffset
+                return selection
+            }
+            segmentOffset += count
+        }
+        return nil
     }
 
     private func diagnosticsAction(for message: ChatMessage) -> (() -> Void)? {
@@ -1152,7 +1226,7 @@ public struct ChatView: View {
 
     @ViewBuilder private func messageMenu(_ message: ChatMessage) -> some View {
         Button {
-            copyToPasteboard(GeneratedImageEchoPolicy.suppress(in: message))
+            copyToPasteboard(AssistantMediaProjection.copyText(in: message))
         } label: {
             Label(copy.copyMessage(theme.id), systemImage: "doc.on.doc")
         }
