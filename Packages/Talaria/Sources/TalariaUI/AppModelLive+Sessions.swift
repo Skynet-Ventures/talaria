@@ -2,6 +2,26 @@ import Foundation
 import TalariaKit
 import TalariaTheme
 
+@MainActor
+private final class LegacySessionOwnerBackfillCoordinator {
+    static let shared = LegacySessionOwnerBackfillCoordinator()
+
+    private var attemptedScopes: Set<String> = []
+
+    func begin(gatewayID: String, profile: String) -> Bool {
+        let key = Self.key(gatewayID: gatewayID, profile: profile)
+        return attemptedScopes.insert(key).inserted
+    }
+
+    func rearm(gatewayID: String, profile: String) {
+        attemptedScopes.remove(Self.key(gatewayID: gatewayID, profile: profile))
+    }
+
+    private static func key(gatewayID: String, profile: String) -> String {
+        gatewayID + "\u{1f}" + profile
+    }
+}
+
 // The live sessions area: the bot's stored-session list, the context
 // breakdown, opening a stored session in chat, the row actions (rename,
 // delete), the turn controls (branch, compress, export) and cross-session
@@ -205,6 +225,7 @@ extension AppModel {
                   self.client.map(ObjectIdentifier.init) == ObjectIdentifier(client),
                   chats[botID].map({ ObjectIdentifier($0) == chatID }) == true else { return }
             publishSessionRows(rows, botID: botID)
+            scheduleLegacySessionOwnerBackfill(client: client, route: route)
         } catch {
             guard profileLifecycleAccepts(lifecycle) else { return }
             runtime.loadErrors[botID] = Self.sessionFailure(error, theme: theme)
@@ -233,6 +254,8 @@ extension AppModel {
             guard await exactSessionListRefreshIsCurrent(
                 botID: botID, authority: authority) else { return false }
             publishSessionRows(rows, botID: botID)
+            scheduleLegacySessionOwnerBackfill(
+                client: authority.client, route: authority.route)
             return true
         } catch {
             guard await exactSessionListRefreshIsCurrent(
@@ -298,6 +321,33 @@ extension AppModel {
         // (the demo-shaped index) — keep both in step so it goes live too.
         sessions[botID] = summaries
         runtime.loadErrors[botID] = nil
+    }
+
+    /// Enumeration proves the exact serving gateway/profile. Under a real
+    /// registry topology, ask that backend once to stamp only its own legacy
+    /// NULL-owner rows. The migration never blocks or fails the list that
+    /// discovered it; 404 is permanent version skew, while transient failures
+    /// re-arm the scope for a later refresh.
+    private func scheduleLegacySessionOwnerBackfill(
+        client: GatewayClient, route: GatewayBotRoute
+    ) {
+        let registry = ConnectionRegistry.shared
+        guard registry.saved.count > 1,
+              registry.saved.contains(where: { $0.id == route.gatewayID }),
+              LegacySessionOwnerBackfillCoordinator.shared.begin(
+                gatewayID: route.gatewayID, profile: route.profile) else { return }
+        Task { @MainActor in
+            do {
+                _ = try await client.backfillLegacySessionOwners(profile: route.profile)
+            } catch let error as GatewayError where error.code == 404 {
+                // An older Hermes does not expose the migration. Keep this
+                // scope attempted for the process lifetime; repeated probes
+                // cannot make the endpoint appear.
+            } catch {
+                LegacySessionOwnerBackfillCoordinator.shared.rearm(
+                    gatewayID: route.gatewayID, profile: route.profile)
+            }
+        }
     }
 
     /// Why the last `refreshSessions` failed, in the current theme's voice.
