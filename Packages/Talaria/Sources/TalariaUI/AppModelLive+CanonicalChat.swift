@@ -418,6 +418,45 @@ enum TranscriptHydrationMerge {
                     merged[index].deferredStructuredOutput = nil
                 }
             }
+            let storedSearchEvidence = ToolWebSearchOutput.merging(
+                newer: merged[index].webSearchOutput,
+                preserving: merged[index].deferredWebSearchOutput)
+            let overlaySearchEvidence = ToolWebSearchOutput.merging(
+                newer: overlay.webSearchOutput,
+                preserving: overlay.deferredWebSearchOutput)
+            let storedHadSearchEvidence = storedSearchEvidence != nil
+            let preservesSearchFailure = storedHadSearchEvidence
+                && stored[index].state == .failed && overlay.state != .failed
+            if ToolWebSearchCodec.isWebSearchTool(merged[index].name) {
+                merged[index].webSearchOutput = preservesSearchFailure
+                    ? ToolWebSearchOutput.merging(
+                        newer: storedSearchEvidence, preserving: overlaySearchEvidence)
+                    : ToolWebSearchOutput.merging(
+                        newer: overlaySearchEvidence, preserving: storedSearchEvidence)
+                merged[index].deferredWebSearchOutput = nil
+                let promotedSearchFailure =
+                    merged[index].deferredWebSearchHasExplicitError
+                    || overlay.deferredWebSearchHasExplicitError
+                merged[index].deferredWebSearchHasExplicitError = false
+                merged[index].webSearchQuery = overlay.webSearchQuery
+                    ?? merged[index].webSearchQuery
+                if merged[index].webSearchOutput?.query == nil {
+                    let query = merged[index].webSearchQuery
+                        ?? ToolWebSearchCodec.query(from: merged[index].arguments)
+                    merged[index].webSearchOutput?.query = query
+                }
+                if promotedSearchFailure { merged[index].state = .failed }
+            } else if merged[index].name.isEmpty || merged[index].name == "Tool" {
+                merged[index].deferredWebSearchOutput = ToolWebSearchOutput.merging(
+                    newer: overlay.deferredWebSearchOutput,
+                    preserving: merged[index].deferredWebSearchOutput)
+                merged[index].deferredWebSearchHasExplicitError =
+                    merged[index].deferredWebSearchHasExplicitError
+                    || overlay.deferredWebSearchHasExplicitError
+            } else {
+                merged[index].deferredWebSearchOutput = nil
+                merged[index].deferredWebSearchHasExplicitError = false
+            }
             if var liveDiff = overlay.fileDiff ?? overlay.deferredFileDiff,
                ToolDiffCodec.isFileEditTool(merged[index].name) {
                 // The live event owns the current body. Raw storage may enrich
@@ -442,6 +481,10 @@ enum TranscriptHydrationMerge {
                 // Exact stored failure evidence is monotonic. A sparse or
                 // stale success overlay may enrich missing streams, but it
                 // cannot repaint the invocation as successful.
+                merged[index].state = .failed
+            }
+            if storedHadSearchEvidence || overlaySearchEvidence != nil,
+               stored[index].state == .failed, overlay.state != .failed {
                 merged[index].state = .failed
             }
             if merged[index].diagnostic == nil { merged[index].diagnostic = overlay.diagnostic }

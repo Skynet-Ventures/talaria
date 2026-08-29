@@ -39,7 +39,9 @@ enum ToolRunPresentationPolicy {
             generic.removeAll(keepingCapacity: true)
         }
         for call in calls {
-            if call.fileDiff != nil, ToolDiffCodec.isFileEditTool(call.name) {
+            if (call.fileDiff != nil && ToolDiffCodec.isFileEditTool(call.name))
+                || (call.webSearchOutput != nil
+                    && ToolWebSearchCodec.isWebSearchTool(call.name)) {
                 flush()
                 runs.append([call])
             } else {
@@ -408,7 +410,8 @@ public struct ToolChip: View {
     }
 
     private var expandable: Bool {
-        (detail != nil || call.structuredOutput != nil) && call.state != .running
+        (detail != nil || call.structuredOutput != nil || call.webSearchOutput != nil)
+            && call.state != .running
     }
 
     private var statusText: String {
@@ -467,6 +470,10 @@ public struct ToolChip: View {
             if expanded {
                 if let output = call.structuredOutput {
                     StructuredToolOutputView(output: output, theme: theme)
+                }
+                if let output = call.webSearchOutput,
+                   ToolWebSearchCodec.isWebSearchTool(call.name) {
+                    WebSearchResultsView(output: output, theme: theme)
                 }
                 if let detail { resultPanel(detail) }
             }
@@ -659,6 +666,128 @@ public struct ToolChip: View {
                     Rectangle().fill(theme.line).frame(height: 1)
                 }
         }
+    }
+}
+
+private struct WebSearchResultsView: View {
+    let output: ToolWebSearchOutput
+    let theme: ThemePack
+
+    private var presented: ToolWebSearchOutput {
+        ToolWebSearchOutput(
+            state: output.state, query: output.query, hits: output.hits,
+            isTruncated: output.isTruncated, diagnostic: output.diagnostic)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let query = presented.query {
+                Text(verbatim: query)
+                    .font(.system(.subheadline))
+                    .foregroundStyle(theme.sub)
+                    .textSelection(.enabled)
+                    .accessibilityLabel("Search query, \(query)")
+            }
+            if let diagnostic = presented.diagnostic {
+                Text(verbatim: diagnostic)
+                    .font(.system(.caption))
+                    .foregroundStyle(presented.state == .malformed ? theme.danger : theme.faint)
+                    .textSelection(.enabled)
+            }
+            if presented.state == .available, presented.hits.isEmpty {
+                Text("No search results were retained.")
+                    .font(.system(.caption)).foregroundStyle(theme.faint)
+            }
+            ForEach(presented.hits) { hit in
+                WebSearchHitRow(hit: hit, theme: theme)
+            }
+        }
+        .padding(.horizontal, theme.id == .ink ? 8 : 10)
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct WebSearchHitRow: View {
+    let hit: ToolWebSearchHit
+    let theme: ThemePack
+    @State private var copiedLink = false
+    @State private var copiedSnippet = false
+
+    private var safeURL: String? { ToolWebSearchCodec.admittedURL(hit.url) }
+    private var host: String? { WebSearchPresentationPolicy.visibleDestinationHost(hit) }
+    private var title: String { hit.title.isEmpty ? (host ?? "Search result") : hit.title }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .top, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let rawURL = safeURL, let url = URL(string: rawURL) {
+                        Link(destination: url) {
+                            HStack(spacing: 4) {
+                                Text(verbatim: title).lineLimit(3)
+                                Image(systemName: "arrow.up.right").accessibilityHidden(true)
+                            }
+                            .font(.system(WebSearchPresentationPolicy.titleTextStyle)
+                                .weight(.semibold))
+                            .foregroundStyle(theme.accent)
+                            .frame(minHeight: WebSearchPresentationPolicy.minimumInteractiveDimension,
+                                   alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel(WebSearchPresentationPolicy.accessibilityLabel(hit))
+                        .accessibilityHint("Opens this destination in your browser.")
+                    } else {
+                        Text(verbatim: title)
+                            .font(.system(WebSearchPresentationPolicy.titleTextStyle)
+                                .weight(.semibold))
+                            .foregroundStyle(theme.ink)
+                    }
+                    if let host {
+                        Text(verbatim: host)
+                            .font(.system(WebSearchPresentationPolicy.hostTextStyle)
+                                .weight(.medium))
+                            .foregroundStyle(theme.faint)
+                            .textSelection(.enabled)
+                            .accessibilityLabel("Destination host, \(host)")
+                    }
+                }
+                Spacer(minLength: 0)
+                if let rawURL = safeURL {
+                    Button {
+                        copyToPasteboard(rawURL); copiedLink = true
+                    } label: {
+                        Image(systemName: copiedLink ? "checkmark" : "doc.on.doc")
+                            .frame(minWidth: WebSearchPresentationPolicy.minimumInteractiveDimension,
+                                   minHeight: WebSearchPresentationPolicy.minimumInteractiveDimension)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(copiedLink ? "Link copied" : "Copy result link")
+                }
+            }
+            if let snippet = hit.snippet {
+                HStack(alignment: .top, spacing: 4) {
+                    Text(verbatim: snippet)
+                        .font(.system(WebSearchPresentationPolicy.snippetTextStyle))
+                        .foregroundStyle(theme.sub)
+                        .lineLimit(5)
+                        .textSelection(.enabled)
+                        .accessibilityLabel("Snippet, \(snippet)")
+                    Spacer(minLength: 0)
+                    Button {
+                        copyToPasteboard(snippet); copiedSnippet = true
+                    } label: {
+                        Image(systemName: copiedSnippet ? "checkmark" : "doc.on.doc")
+                            .frame(minWidth: WebSearchPresentationPolicy.minimumInteractiveDimension,
+                                   minHeight: WebSearchPresentationPolicy.minimumInteractiveDimension)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(copiedSnippet ? "Snippet copied" : "Copy snippet")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
     }
 }
 

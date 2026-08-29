@@ -472,6 +472,12 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
     /// Bounded explicit diff material awaiting an exact file-edit tool name.
     /// Never rendered or treated as a specialist until promoted by exact ID.
     public var deferredFileDiff: ToolFileDiff?
+    /// Exact bounded `web_search` evidence. Unknown names retain only the
+    /// inert deferred candidate until exact-ID pairing establishes authority.
+    public var webSearchOutput: ToolWebSearchOutput?
+    public var deferredWebSearchOutput: ToolWebSearchOutput?
+    public var deferredWebSearchHasExplicitError: Bool
+    public var webSearchQuery: String?
     public var provenance: Provenance
     public var diagnostic: String?
 
@@ -483,6 +489,10 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
                 structuredOutput: ToolStructuredOutput? = nil,
                 deferredStructuredOutput: ToolStructuredOutput? = nil,
                 deferredFileDiff: ToolFileDiff? = nil,
+                webSearchOutput: ToolWebSearchOutput? = nil,
+                deferredWebSearchOutput: ToolWebSearchOutput? = nil,
+                deferredWebSearchHasExplicitError: Bool = false,
+                webSearchQuery: String? = nil,
                 provenance: Provenance = .live, diagnostic: String? = nil) {
         self.id = id; self.name = name; self.context = context; self.state = state
         self.summary = summary; self.resultText = resultText
@@ -493,6 +503,11 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         self.structuredOutput = structuredOutput
         self.deferredStructuredOutput = deferredStructuredOutput
         self.deferredFileDiff = deferredFileDiff
+        self.webSearchOutput = webSearchOutput
+        self.deferredWebSearchOutput = deferredWebSearchOutput
+        self.deferredWebSearchHasExplicitError = deferredWebSearchHasExplicitError
+        self.webSearchQuery = ToolWebSearchCodec.safeText(
+            webSearchQuery, maximum: ToolWebSearchCodec.maximumQueryScalars).text
         self.provenance = provenance; self.diagnostic = diagnostic
     }
 
@@ -500,6 +515,8 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
         case id, gatewayToolID, name, context, state, summary, resultText
         case durationSeconds, arguments, result, fileDiff, structuredOutput
         case deferredStructuredOutput, deferredFileDiff
+        case webSearchOutput, deferredWebSearchOutput
+        case deferredWebSearchHasExplicitError, webSearchQuery
         case provenance, diagnostic
     }
 
@@ -523,6 +540,15 @@ public struct ToolCall: Identifiable, Codable, Sendable, Equatable {
             ToolStructuredOutput.self, forKey: .deferredStructuredOutput)
         deferredFileDiff = try values.decodeIfPresent(
             ToolFileDiff.self, forKey: .deferredFileDiff)
+        webSearchOutput = try values.decodeIfPresent(
+            ToolWebSearchOutput.self, forKey: .webSearchOutput)
+        deferredWebSearchOutput = try values.decodeIfPresent(
+            ToolWebSearchOutput.self, forKey: .deferredWebSearchOutput)
+        deferredWebSearchHasExplicitError = try values.decodeIfPresent(
+            Bool.self, forKey: .deferredWebSearchHasExplicitError) ?? false
+        webSearchQuery = ToolWebSearchCodec.safeText(
+            try values.decodeIfPresent(String.self, forKey: .webSearchQuery),
+            maximum: ToolWebSearchCodec.maximumQueryScalars).text
         provenance = try values.decodeIfPresent(Provenance.self, forKey: .provenance) ?? .live
         diagnostic = try values.decodeIfPresent(String.self, forKey: .diagnostic)
     }
