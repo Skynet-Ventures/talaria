@@ -126,7 +126,9 @@ final class GatewayAuthHTTPAdmissionTests: XCTestCase {
         XCTAssertTrue(status.gatewayRunning)
 
         let ticketClient = client { request in
-            (self.http(request, status: 200), Data(#"{"ticket":"one-use"}"#.utf8))
+            XCTAssertEqual(request.timeoutInterval, 8,
+                           "ws-ticket is a finite HTTP POST; default 60s is a connect stall")
+            return (self.http(request, status: 200), Data(#"{"ticket":"one-use"}"#.utf8))
         }
         let ticket = try await ticketClient.mintWSTicket(
             credential: .sessionToken("secret"))

@@ -891,6 +891,7 @@ extension AppModel {
         let chat = chat(for: botID)
         let rebinding = !Self.sameOpenChatBinding(
             chat.storedSessionID, target: target, durableID: durableID)
+        var pageTask: Task<JSONValue?, Error>?
         do {
             try Task.checkCancellation()
             // Bind with a deferred resume so first paint is not the full
@@ -899,22 +900,23 @@ extension AppModel {
             // of failing the open. Mutation-proof paths still request a
             // full projection.
             let restTarget = Self.attachRestTarget(target, durableID: durableID)
-            let pageTask: Task<JSONValue?, Error>? = hydrate && restTarget != nil
+            pageTask = hydrate && restTarget != nil
                 ? Task {
                     try await client.latestSessionMessages(
                         storedID: restTarget ?? target, profile: route.profile)
                 }
                 : nil
-            defer { pageTask?.cancel() }
             let live = try await client.resumeSession(
                 target, profile: route.profile,
                 deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
             try Task.checkCancellation()
             guard profileLifecycleAcceptsGatewaySnapshot(
                 route: route, client: client, generation: gatewayGeneration) else {
+                pageTask?.cancel()
                 throw CancellationError()
             }
             guard !live.sessionID.isEmpty else {
+                pageTask?.cancel()
                 return .failed(GatewayError(code: -8, message: "session.resume returned no id"))
             }
             // `target` may have been the TITLE; the ack carries the real key.
@@ -926,24 +928,29 @@ extension AppModel {
             // hydration's merge preserves the newer value.
             replayInflight(live, botID: botID, replacingTranscript: rebinding)
             if hydrate {
-                try await hydrateOpenChat(
-                    live, botID: botID, profile: route.profile,
-                    client: client, storedID: stored, clearWhenEmpty: rebinding,
-                    prefetchedPage: {
-                        guard let pageTask else { return nil }
-                        return try await pageTask.value
-                    })
-                guard profileLifecycleAcceptsGatewaySnapshot(
-                    route: route, client: client, generation: gatewayGeneration) else {
-                    throw CancellationError()
+                // REST latest page is 30s. First paint is the bind + stub/cache,
+                // not this read. Awaiting it is the 20s empty-chat wait after
+                // defer_history is already on the wire.
+                Task { @MainActor [weak self] in
+                    try? await self?.hydrateOpenChat(
+                        live, botID: botID, profile: route.profile,
+                        client: client, storedID: stored, clearWhenEmpty: rebinding,
+                        prefetchedPage: {
+                            guard let pageTask else { return nil }
+                            return try await pageTask.value
+                        })
                 }
+            } else {
+                pageTask?.cancel()
             }
             replayPendingPrompts(live, sourceGatewayID: route.gatewayID)
             return .attached(sessionID: live.sessionID, storedID: stored)
         } catch let error as GatewayError where error.code == GatewayError.storedSessionGone {
+            pageTask?.cancel()
             forget(target, botID: botID)
             return .missing
         } catch {
+            pageTask?.cancel()
             return .failed(error)
         }
     }

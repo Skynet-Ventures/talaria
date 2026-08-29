@@ -791,15 +791,23 @@ public actor GatewayClient {
         try Task.checkCancellation()
         let transport = GatewayTransport(url: url)
         self.transport = transport
-        try await transport.connect()
-        try Task.checkCancellation()
-
+        // Single consumer of `events`. Start the pump BEFORE waiting for
+        // ready so connect() does not own the iterator (that left RPCs
+        // unanswered after gateway.ready — a ~15s dead link).
         eventsTask = Task {
             for await event in transport.events {
                 for handler in self.handlerSnapshot() {
                     handler(event)
                 }
             }
+        }
+        do {
+            try await transport.connect()
+            try Task.checkCancellation()
+        } catch {
+            eventsTask?.cancel()
+            eventsTask = nil
+            throw error
         }
     }
 

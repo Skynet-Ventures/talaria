@@ -168,9 +168,12 @@ public struct GatewayAuthClient: Sendable {
 
     /// Mint a single-use WS ticket (30 s TTL). Call immediately before every
     /// (re)connect; in gated mode legacy ?token= is rejected.
+    /// Bounded at 8s: URLSession's default 60s request clock is a first-launch
+    /// / redial stall that looks like a dead gateway.ready wait.
     public func mintWSTicket(credential: GatewayCredential) async throws -> String {
         var req = URLRequest(url: baseURL.appending(path: "api/auth/ws-ticket"))
         req.httpMethod = "POST"
+        req.timeoutInterval = 8
         apply(credential: credential, to: &req)
         let (data, response) = try await session.data(for: req)
         try Self.admitHTTPResponse(response, data: data, endpoint: "ws-ticket")
@@ -190,9 +193,11 @@ public struct GatewayAuthClient: Sendable {
 
     /// Refresh native tokens. 401 session_expired ⇒ drop tokens and re-login;
     /// 503 (provider unreachable) ⇒ keep tokens and retry later.
+    /// Same 8s HTTP bound as ws-ticket — this sits on the connect() path.
     public func refresh(_ tokens: TokenSet) async throws -> TokenSet {
         var req = URLRequest(url: baseURL.appending(path: "auth/native/refresh"))
         req.httpMethod = "POST"
+        req.timeoutInterval = 8
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(JSONValue.object([
             "refresh_token": .string(tokens.refreshToken),

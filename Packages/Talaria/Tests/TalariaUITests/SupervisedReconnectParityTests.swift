@@ -549,6 +549,19 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
+    func testResignWithoutWakeBannerSaysDidBecomeActiveNeverArrived() throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+
+        fixture.model.applicationWillResignActive()
+        XCTAssertTrue(
+            fixture.model.lastReconnectStep.contains("never got didBecomeActive"),
+            fixture.model.lastReconnectStep)
+        XCTAssertTrue(fixture.model.reconnectTraceForTesting.contains("resign"))
+        XCTAssertFalse(fixture.model.reconnectTraceForTesting.contains("didBecomeActive"))
+    }
+
+    @MainActor
     func testSuccessfulReconnectTraceReachesAdopted() async throws {
         let fixture = try fixture()
         defer { cleanup(fixture) }

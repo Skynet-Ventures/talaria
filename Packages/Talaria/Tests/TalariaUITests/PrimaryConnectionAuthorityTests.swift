@@ -188,7 +188,9 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         let replacement = try XCTUnwrap(replacementClient)
 
         await gate.release()
-        await assertCancelled(oldTask)
+        // Ancillary roster no longer holds connectGateway. The old dial
+        // succeeds; the stale refresh must still not flush the replacement.
+        try await oldTask.value
 
         XCTAssertNotEqual(oldGatewayID, replacementID)
         XCTAssertEqual(model.client.map(ObjectIdentifier.init), ObjectIdentifier(replacement))
@@ -264,7 +266,7 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
         await pool.disconnectAll()
     }
 
-    func testDisconnectMonitorArmsOnlyAfterInitialAdoptionTransactionFinishes() async throws {
+    func testDisconnectMonitorArmsBeforeAncillaryRosterRefresh() async throws {
         let model = AppModel()
         let baseURL = url("monitor-order")
         defer { removeSavedRows(for: [baseURL]) }
@@ -278,11 +280,13 @@ final class PrimaryConnectionAuthorityTests: XCTestCase {
                 connectionOperation: { _ in },
                 adoptionOperations: operations(roster: { await gate.suspend() }))
         }
+        try await task.value
+        XCTAssertNotNil(LiveRuntime.shared.monitorTask,
+                        "a live socket must be watched before profiles.list returns")
         await gate.waitUntilEntered()
-        XCTAssertNil(LiveRuntime.shared.monitorTask)
+        XCTAssertNotNil(LiveRuntime.shared.monitorTask)
 
         await gate.release()
-        try await task.value
         XCTAssertNotNil(LiveRuntime.shared.monitorTask)
         await model.disconnectGateway()
     }

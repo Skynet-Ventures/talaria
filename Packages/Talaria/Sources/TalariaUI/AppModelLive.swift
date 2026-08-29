@@ -447,10 +447,10 @@ extension AppModel {
         }
     }
 
-    /// Publish an authenticated post-dial client, then perform ancillary world
-    /// refreshes. Exact-route recovery is signalled at the publication boundary:
-    /// a later profiles.list timeout must not strand a retained notification or
-    /// URL until some unrelated lifecycle event happens to nudge it again.
+    /// Publish an authenticated post-dial client and arm the disconnect watch.
+    /// Roster / routines / rooms run after return: a profiles.list timeout
+    /// (default RPC 120s, often ~20s with include_sessions) must not hold
+    /// launch, fail the live socket, or strand a retained notification.
     ///
     /// `rosterRefresh` is the real refresh in production and a focused failure
     /// injection in the ordering regression; source readiness itself is never
@@ -538,27 +538,42 @@ extension AppModel {
         PushCoordinator.shared.registerWithRelayIfConnected()
         #endif
 
-        try await performConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id,
-            operation: operations.refreshRoster)
-        try requireCurrentConnectionAttempt(authority)
-        await operations.refreshRoutines()
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        connections = registry.rows
-        try requireCurrentConnectionAttempt(authority)
-        await operations.hideOwnedSessions()
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        await operations.flushComposeQueue()
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        await operations.reseedRoomProjection(savedGateway.id)
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        // Arm socket-loss recovery only after the initial adoption transaction
-        // can no longer resume and CAS-remove this same pooled client.
+        // Arm the disconnect watch as soon as the WS is live. Waiting for
+        // profiles.list (default RPC 120s, often ~20s with include_sessions)
+        // left launch and first-open sitting on a live socket with no
+        // monitor and no chats.
         startSupervisedMonitor(for: client, generation: authority.generation)
+        connections = registry.rows
+
+        Task { @MainActor [weak self] in
+            await self?.resyncSurfacesAfterConnect(
+                client: client, generation: authority.generation,
+                gatewayID: savedGateway.id, operations: operations)
+        }
+    }
+
+    private func resyncSurfacesAfterConnect(
+        client: GatewayClient,
+        generation: Int,
+        gatewayID: String,
+        operations: ConnectedGatewayAdoptionOperations
+    ) async {
+        func stillThisLink() -> Bool {
+            LiveRuntime.shared.generation == generation
+                && self.client.map(ObjectIdentifier.init) == ObjectIdentifier(client)
+                && LiveRuntime.shared.gatewayID == gatewayID
+        }
+        guard stillThisLink() else { return }
+        try? await operations.refreshRoster()
+        guard stillThisLink() else { return }
+        await operations.refreshRoutines()
+        guard stillThisLink() else { return }
+        connections = ConnectionRegistry.shared.rows
+        await operations.hideOwnedSessions()
+        guard stillThisLink() else { return }
+        await operations.flushComposeQueue()
+        guard stillThisLink() else { return }
+        await operations.reseedRoomProjection(gatewayID)
     }
 
     private func isCurrentConnectionAttempt(_ authority: PrimaryConnectionAttemptAuthority) -> Bool {
@@ -592,39 +607,6 @@ extension AppModel {
         guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
             throw CancellationError()
         }
-    }
-
-    private func requireCurrentConnectionAttempt(
-        _ authority: PrimaryConnectionAttemptAuthority,
-        poolSnapshot: GatewayClientPool.ConnectionSnapshot,
-        gatewayID: String
-    ) async throws {
-        guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
-            _ = await ConnectionRegistry.shared.clientPool.disconnectIfCurrent(
-                poolSnapshot, for: gatewayID)
-            throw CancellationError()
-        }
-    }
-
-    private func performConnectionAttempt(
-        _ authority: PrimaryConnectionAttemptAuthority,
-        poolSnapshot: GatewayClientPool.ConnectionSnapshot,
-        gatewayID: String,
-        operation: () async throws -> Void
-    ) async throws {
-        try requireCurrentConnectionAttempt(authority)
-        do {
-            try await operation()
-        } catch {
-            guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
-                _ = await ConnectionRegistry.shared.clientPool.disconnectIfCurrent(
-                    poolSnapshot, for: gatewayID)
-                throw CancellationError()
-            }
-            throw error
-        }
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: gatewayID)
     }
 
     /// Deliberate disconnect (Settings → Connections). No reconnect follows.

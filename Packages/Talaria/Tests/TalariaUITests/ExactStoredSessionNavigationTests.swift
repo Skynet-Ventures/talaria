@@ -227,24 +227,22 @@ final class ExactStoredSessionNavigationTests: XCTestCase {
         model.mode = .live
         runtime.baseURL = baseURL
 
-        do {
-            try await model.finishConnectedGatewayAdoption(
-                client, baseURL: baseURL, credential: credential,
-                rosterRefresh: {
-                    let adopted = await registry.clientPool.client(for: saved.id)
-                    refreshObservedExactAdoption = model.activeGatewayID == saved.id
-                        && adopted.map(ObjectIdentifier.init) == ObjectIdentifier(client)
-                    throw GatewayError(code: -5, message: "RPC timed out")
-                })
-            XCTFail("the injected ancillary roster timeout must propagate")
-        } catch let error as GatewayError {
-            XCTAssertEqual(error.code, -5)
-        }
+        try await model.finishConnectedGatewayAdoption(
+            client, baseURL: baseURL, credential: credential,
+            rosterRefresh: {
+                let adopted = await registry.clientPool.client(for: saved.id)
+                refreshObservedExactAdoption = model.activeGatewayID == saved.id
+                    && adopted.map(ObjectIdentifier.init) == ObjectIdentifier(client)
+                throw GatewayError(code: -5, message: "RPC timed out")
+            })
 
-        // The adoption-boundary nudge survives the thrown ancillary refresh.
-        // It proves production readiness from the saved live source and opens
-        // through the exact route seam once; no alternate saved source is used.
+        // Roster is detached from the live link. Adoption must succeed even
+        // when profiles.list later times out; the publication-boundary nudge
+        // still runs, and the thrown refresh must not fail the socket.
         await model.exactStoredSessionRouteQueue.awaitCurrentAttempt()
+        for _ in 0..<1_000 where !refreshObservedExactAdoption {
+            await Task.yield()
+        }
         XCTAssertTrue(refreshObservedExactAdoption)
         XCTAssertEqual(model.activeGatewayID, saved.id)
         XCTAssertEqual(authoritativeOpens, [exact])

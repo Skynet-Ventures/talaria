@@ -38,9 +38,15 @@ public extension Notification.Name {
 //      5923674 — hard-redial + ephemeral session still looked dead because
 //      adopt waited on a full `session.resume` of every parked forever-chat
 //      (hydrate: false still downloaded history). Same 20s stall as first
-//      open. This pass binds with `defer_history`, detaches roster/rooms
-//      from the live path, and records a client-side trace so the next
-//      fail names the last step.
+//      open.
+//      12594f3 — defer_history + roster-off-reconnect-adopt + wake trace.
+//      Device still saw ~20s first load and a dead redial. History stayed.
+//      The waits that exist on that build: connect() owned the single-consumer
+//      `events` stream for the 15s gateway.ready bound (so the event pump
+//      never ran and the supervised monitor treated the socket as already
+//      dead); launch adoption awaited profiles.list (~20s) before arming
+//      the monitor; open-chat attach awaited the 30s REST latest page after
+//      defer_history was already on the wire. This pass fixes those waits.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -203,6 +209,22 @@ final class ConnectionSupervisor {
         ReconnectTraceLog.logger.info("\(label, privacy: .public)")
         #endif
     }
+
+    /// Device-facing reason. A dead wake must say whether connect timed out,
+    /// resume failed, or UIKit never delivered `didBecomeActive`.
+    var bannerReason: String {
+        guard let last = reconnectTrace.last else { return lastReconnectStep }
+        switch last.step {
+        case "connect.failed":
+            return last.detail.isEmpty ? "connect.failed" : "connect.failed \(last.detail)"
+        case "resume.failed":
+            return last.detail.isEmpty ? "resume.failed" : "resume.failed \(last.detail)"
+        case "resign", "transport.dropped":
+            return "never got didBecomeActive (\(last.step))"
+        default:
+            return lastReconnectStep
+        }
+    }
 }
 
 /// One breadcrumb on the reconnect path. Device verify of 5923674 had no
@@ -340,8 +362,9 @@ extension AppModel {
     public var isReconnecting: Bool { ConnectionSupervisor.shared.isReconnecting }
 
     /// Last reconnect breadcrumb (resign / wake / connect / resume / adopt).
-    /// Rendered on the offline banner so a device fail has a client-side reason.
-    public var lastReconnectStep: String { ConnectionSupervisor.shared.lastReconnectStep }
+    /// Classified for the offline banner: `connect.failed`, `resume.failed`,
+    /// or `never got didBecomeActive` when resign ran and the wake never did.
+    public var lastReconnectStep: String { ConnectionSupervisor.shared.bannerReason }
 
     /// Package-test projection of the reconnect breadcrumb log.
     var reconnectTraceForTesting: [String] {
@@ -894,6 +917,9 @@ extension AppModel {
 
     /// The client's event pump finishes exactly when the socket dies; awaiting
     /// it is the disconnect signal (ws-protocol §3 — liveness is socket-level).
+    /// The pump must be the only `events` consumer — if `connect()` already
+    /// iterated that stream for `gateway.ready`, this wait returns immediately
+    /// and the banner looks like a failed reconnect.
     func startSupervisedMonitor(for client: GatewayClient, generation: Int) {
         let runtime = LiveRuntime.shared
         runtime.monitorTask?.cancel()
