@@ -701,9 +701,17 @@ public actor GatewayClient {
         credential == candidate
     }
 
+    /// Adopt the registry/Keychain credential before a wake redial.
+    /// Port repair and OAuth refresh can leave the in-memory client holding
+    /// a different token set than the saved row; without this, the reconnect
+    /// fence returns `reconnect.stale authority` and never dials.
+    public func adoptCredential(_ replacement: GatewayCredential) {
+        credential = replacement
+    }
+
     /// Deterministic seam for credential-rotation lifecycle tests.
     func replaceCredentialForTesting(_ replacement: GatewayCredential) {
-        credential = replacement
+        adoptCredential(replacement)
     }
 
     func setForegroundReadinessForTesting(_ ready: Bool?) {

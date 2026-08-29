@@ -60,6 +60,11 @@ public extension Notification.Name {
 //      unbounded await on hung background invalidate + dual wake clearing
 //      suspendedForBackground inside the Task. Cap invalidate, cancel it
 //      on reconnectNow, capture the after-background edge synchronously.
+//      a9e387c — dial path advanced; banner dead-ended on
+//      `reconnect.stale authority`. Pre-dial fence required the live client
+//      to already own the registry credential; OAuth/port-repair drift
+//      failed ownsCredential and reconnectNow did not retry `.stale`.
+//      Rebind registry → client on the same live row, then dial.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -650,8 +655,21 @@ extension AppModel {
             guard supervisor.reconnectTaskToken == token else { return }
             supervisor.reconnectTaskToken = nil
             runtime.reconnectTask = nil
-            if outcome == .retryable, let source {
-                self.scheduleSupervisedReconnect(continuing: source)
+            switch outcome {
+            case .retryable:
+                if let continuing = self.currentReconnectAuthority()?.episodeSource ?? source {
+                    self.scheduleSupervisedReconnect(continuing: continuing)
+                }
+            case .stale:
+                // Device a9e387c: wake dead-ended on `reconnect.stale
+                // authority` with no further try. A foreground return that
+                // still owns an offline live row must keep dialing.
+                if self.isOffline,
+                   let fresh = self.currentReconnectAuthority()?.episodeSource {
+                    self.scheduleSupervisedReconnect(continuing: fresh)
+                }
+            case .success, .reauth:
+                break
             }
         }
     }
@@ -754,28 +772,112 @@ extension AppModel {
     private func reconnectAuthorityIsCurrent(
         _ authority: SupervisedReconnectAuthority
     ) async -> Bool {
+        await reconnectAuthorityFailureReason(authority) == nil
+    }
+
+    /// Why the pre-dial fence rejected this authority, for banner diagnosis.
+    private func reconnectAuthorityFailureReason(
+        _ authority: SupervisedReconnectAuthority
+    ) async -> String? {
+        guard reconnectSourceIdentityIsCurrent(authority) else {
+            return reconnectSourceIdentityFailureReason(authority)
+        }
         let registry = ConnectionRegistry.shared
-        guard reconnectSourceIdentityIsCurrent(authority),
-              let saved = registry.gateway(forURL: authority.baseURL),
-              let credential = registry.credential(for: saved),
-              await authority.client.ownsCredential(credential),
-              reconnectSourceIdentityIsCurrent(authority),
-              registry.credential(for: saved) == credential else { return false }
-        return true
+        guard let saved = registry.gateway(forURL: authority.baseURL) else {
+            return "authority saved-row"
+        }
+        guard let credential = registry.credential(for: saved) else {
+            return "authority credential-missing"
+        }
+        guard await authority.client.ownsCredential(credential) else {
+            return "authority credential"
+        }
+        guard reconnectSourceIdentityIsCurrent(authority) else {
+            return reconnectSourceIdentityFailureReason(authority)
+        }
+        guard registry.credential(for: saved) == credential else {
+            return "authority credential-race"
+        }
+        return nil
     }
 
     private func reconnectSourceIdentityIsCurrent(
         _ authority: SupervisedReconnectAuthority
     ) -> Bool {
+        reconnectSourceIdentityFailureReason(authority) == nil
+    }
+
+    private func reconnectSourceIdentityFailureReason(
+        _ authority: SupervisedReconnectAuthority
+    ) -> String? {
         let runtime = LiveRuntime.shared
         let registry = ConnectionRegistry.shared
-        guard mode == .live, runtime.generation == authority.generation,
-              runtime.baseURL?.absoluteString == authority.baseURL.absoluteString,
-              runtime.gatewayID == authority.gatewayID,
-              client === authority.client,
-              let saved = registry.gateway(forURL: authority.baseURL),
-              saved.id == authority.gatewayID else { return false }
-        return true
+        guard mode == .live else { return "authority mode" }
+        guard runtime.generation == authority.generation else {
+            return "authority generation"
+        }
+        guard runtime.baseURL?.absoluteString == authority.baseURL.absoluteString else {
+            return "authority base"
+        }
+        guard runtime.gatewayID == authority.gatewayID else {
+            return "authority gateway"
+        }
+        guard client === authority.client else { return "authority client" }
+        guard let saved = registry.gateway(forURL: authority.baseURL),
+              saved.id == authority.gatewayID else {
+            return "authority saved-row"
+        }
+        return nil
+    }
+
+    /// Same live gateway row as the wake/manual episode. Allow :9119 repair
+    /// (baseURL string) and credential/client rebind on that row — those are
+    /// how a foreground return recovers. A different gatewayID or live
+    /// generation is a real source switch and must stay stale.
+    private func reconnectSourceCompatible(
+        _ expected: ConnectionSupervisor.EpisodeSource,
+        with authority: SupervisedReconnectAuthority
+    ) -> Bool {
+        expected.gatewayID == authority.gatewayID
+            && expected.generation == authority.generation
+    }
+
+    /// Registry/Keychain is source of truth after background. Port repair and
+    /// OAuth refresh can desync the in-memory client; adopt before dial so
+    /// the fence does not dead-end on `reconnect.stale authority`.
+    private func rebindReconnectAuthorityIfNeeded(
+        _ authority: SupervisedReconnectAuthority
+    ) async -> SupervisedReconnectAuthority? {
+        if await reconnectAuthorityIsCurrent(authority) { return authority }
+
+        // Live row may already point at a replacement client for the same
+        // gateway (wake vs pool). Prefer that over the captured pointer.
+        if let live = currentReconnectAuthority(),
+           live.gatewayID == authority.gatewayID,
+           live.generation == authority.generation,
+           await reconnectAuthorityIsCurrent(live) {
+            if live.client !== authority.client {
+                ConnectionSupervisor.shared.noteReconnect("client.rebound")
+            }
+            return live
+        }
+
+        guard reconnectSourceIdentityIsCurrent(authority) else { return nil }
+        let registry = ConnectionRegistry.shared
+        guard let saved = registry.gateway(forURL: authority.baseURL),
+              let credential = registry.credential(for: saved) else { return nil }
+        if await authority.client.ownsCredential(credential) {
+            return await reconnectAuthorityIsCurrent(authority) ? authority : nil
+        }
+        await authority.client.adoptCredential(credential)
+        ConnectionSupervisor.shared.noteReconnect("credential.rebound")
+        let rebound = SupervisedReconnectAuthority(
+            generation: authority.generation,
+            baseURL: authority.baseURL,
+            gatewayID: authority.gatewayID,
+            client: authority.client,
+            credential: credential)
+        return await reconnectAuthorityIsCurrent(rebound) ? rebound : nil
     }
 
     private func reconnectSessionExpiryIsCurrent(
@@ -846,7 +948,19 @@ extension AppModel {
             }
         }
 
-        guard let authority = currentReconnectAuthority() else {
+        let registry = ConnectionRegistry.shared
+        // Repair :9119 before capturing authority so the wake episode source
+        // and the live row agree on one baseURL. Doing this after the fence
+        // made a repaired runtime look like a different authority.
+        if let base = runtime.baseURL {
+            let wire = registry.repairStoredBase(matching: base)
+            if wire.absoluteString != base.absoluteString {
+                runtime.baseURL = wire
+                supervisor.noteReconnect("url.repaired", GatewayURL.originForDisplay(wire))
+            }
+        }
+
+        guard let captured = currentReconnectAuthority() else {
             // Missing credential is re-auth only when the remaining source
             // coordinates still describe the exact live row.
             if mode == .live, let base = runtime.baseURL,
@@ -859,14 +973,15 @@ extension AppModel {
             }
             return stale("no-authority")
         }
-        if let source, source != authority.episodeSource {
+        if let source, !reconnectSourceCompatible(source, with: captured) {
             return stale("source-mismatch")
         }
         guard supervisor.reconnectGeneration == attemptGeneration else {
             return stale("generation")
         }
-        guard await reconnectAuthorityIsCurrent(authority) else {
-            return stale("authority")
+        guard let authority = await rebindReconnectAuthorityIfNeeded(captured) else {
+            let reason = await reconnectAuthorityFailureReason(captured) ?? "authority"
+            return stale(reason)
         }
         guard supervisor.reconnectGeneration == attemptGeneration else {
             return stale("generation")
@@ -894,45 +1009,51 @@ extension AppModel {
         }
         if Task.isCancelled { return stale("cancelled") }
 
-        let registry = ConnectionRegistry.shared
-        let wire = registry.repairStoredBase(matching: authority.baseURL)
-        if wire.absoluteString != authority.baseURL.absoluteString {
-            LiveRuntime.shared.baseURL = wire
-            supervisor.noteReconnect("url.repaired", GatewayURL.originForDisplay(wire))
+        // Re-check after invalidate await — a dual wake may have rebound the
+        // live row. Prefer a fresh same-gateway authority over dead-ending.
+        guard let liveAuthority = await rebindReconnectAuthorityIfNeeded(
+            currentReconnectAuthority() ?? authority
+        ) else {
+            let reason = await reconnectAuthorityFailureReason(authority) ?? "authority"
+            return stale(reason)
         }
+        if let source, !reconnectSourceCompatible(source, with: liveAuthority) {
+            return stale("source-mismatch")
+        }
+
         do {
             let tryNumber = supervisor.episodeAttempt + 1
             supervisor.noteReconnect(
                 "connect.started",
-                "try \(tryNumber) \(GatewayURL.originForDisplay(wire))")
-            try await supervisor.dial(authority.client)
+                "try \(tryNumber) \(GatewayURL.originForDisplay(liveAuthority.baseURL))")
+            try await supervisor.dial(liveAuthority.client)
             supervisor.noteReconnect("gateway.ready")
         } catch AuthError.sessionExpired {
             guard supervisor.reconnectGeneration == attemptGeneration,
-                  reconnectSessionExpiryIsCurrent(authority) else {
+                  reconnectSessionExpiryIsCurrent(liveAuthority) else {
                 return stale("session-fence")
             }
             supervisor.noteReconnect("connect.failed", "session-expired")
-            supervisor.reauthGateway = authority.baseURL
+            supervisor.reauthGateway = liveAuthority.baseURL
             supervisor.note(error: AuthError.sessionExpired,
-                            forGatewayID: authority.gatewayID)
+                            forGatewayID: liveAuthority.gatewayID)
             isOffline = true
             return .reauth
         } catch {
             guard supervisor.reconnectGeneration == attemptGeneration,
-                  await reconnectAuthorityIsCurrent(authority) else {
+                  await reconnectAuthorityIsCurrent(liveAuthority) else {
                 return stale("fail-fence")
             }
             supervisor.noteReconnect("connect.failed", GatewayDiagnostics.shortMessage(for: error))
             isOffline = true
-            registry.noteState(.offline, forURL: authority.baseURL)
-            supervisor.note(error: error, forGatewayID: authority.gatewayID)
+            registry.noteState(.offline, forURL: liveAuthority.baseURL)
+            supervisor.note(error: error, forGatewayID: liveAuthority.gatewayID)
             connections = registry.rows
             return .retryable
         }
 
         guard supervisor.reconnectGeneration == attemptGeneration,
-              await reconnectAuthorityIsCurrent(authority) else {
+              await reconnectAuthorityIsCurrent(liveAuthority) else {
             return stale("adopt-fence")
         }
         // Park runtime sids only after the replacement socket is up. Doing
@@ -940,7 +1061,7 @@ extension AppModel {
         // invited a hydrate to replace its transcript with an empty page.
         let parked = parkPrimarySessionsForReconnect()
         supervisor.reauthGateway = nil
-        let adopted = await adoptReconnectedLink(authority: authority, parked: parked)
+        let adopted = await adoptReconnectedLink(authority: liveAuthority, parked: parked)
         return adopted ? .success : stale("adopt")
     }
 

@@ -684,6 +684,78 @@ final class SupervisedReconnectParityTests: XCTestCase {
             fixture.model.reconnectTraceForTesting.joined(separator: ","))
     }
 
+    /// Device a9e387c: banner dead-ended on `reconnect.stale authority`.
+    /// In-memory client tokens can drift from the registry/Keychain after
+    /// OAuth refresh or :9119 repair; wake must rebind and dial.
+    @MainActor
+    func testCredentialDriftRebindsAndDialsAfterBackground() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        await fixture.client.adoptCredential(.sessionToken("stale-in-memory-token"))
+        XCTAssertFalse(await fixture.client.ownsCredential(fixture.credential))
+
+        let supervisor = ConnectionSupervisor.shared
+        supervisor.suspendedForBackground = true
+        fixture.model.isOffline = true
+
+        var dialCount = 0
+        var dialOwnedRegistryCredential = false
+        supervisor.dial = { client in
+            dialCount += 1
+            dialOwnedRegistryCredential = await client.ownsCredential(fixture.credential)
+            throw URLError(.cannotConnectToHost)
+        }
+
+        fixture.model.applicationDidBecomeActive()
+        await waitUntil {
+            fixture.model.reconnectTraceForTesting.contains("connect.started")
+        }
+        await waitUntil { dialCount > 0 }
+        await LiveRuntime.shared.reconnectTask?.value
+
+        let steps = fixture.model.reconnectTraceForTesting
+        XCTAssertTrue(steps.contains("credential.rebound"), steps.joined(separator: ","))
+        XCTAssertTrue(steps.contains("connect.started"), steps.joined(separator: ","))
+        XCTAssertTrue(steps.contains("connect.failed"), steps.joined(separator: ","))
+        XCTAssertTrue(dialOwnedRegistryCredential)
+        XCTAssertFalse(
+            fixture.model.lastReconnectStep.contains("reconnect.stale"),
+            fixture.model.lastReconnectStep)
+    }
+
+    /// A wake that still hits `.stale` while offline must not dead-end — it
+    /// schedules another supervised episode instead of leaving the banner on
+    /// `reconnect.stale authority` with no further try.
+    @MainActor
+    func testReconnectNowSchedulesRetryAfterRecoverableStale() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        let supervisor = ConnectionSupervisor.shared
+        fixture.model.isOffline = true
+        supervisor.randomUnit = { 0 }
+        supervisor.sleep = { _ in }
+
+        var dialCount = 0
+        supervisor.dial = { _ in
+            dialCount += 1
+            // Force a post-dial adopt fence miss on the first attempt only by
+            // swapping the live client after connect succeeds.
+            if dialCount == 1 {
+                fixture.model.client = GatewayClient(
+                    baseURL: fixture.baseURL, credential: fixture.credential)
+            }
+        }
+
+        fixture.model.reconnectNow()
+        await waitUntil { dialCount >= 2 }
+        await LiveRuntime.shared.reconnectTask?.value
+
+        XCTAssertGreaterThanOrEqual(dialCount, 2)
+        XCTAssertTrue(
+            fixture.model.reconnectTraceForTesting.contains("connect.started"),
+            fixture.model.reconnectTraceForTesting.joined(separator: ","))
+    }
+
     @MainActor
     func testRedialBannerNamesTheTryWhileConnectIsInFlight() async throws {
         let fixture = try fixture()
