@@ -119,13 +119,50 @@ public struct SessionBranch: Sendable {
 /// child Talaria asked for. A malformed/wrong-parent/count response is an
 /// ambiguous mutation outcome: never open it and never replay the write.
 enum SessionBranchAckAuthority {
+    /// Whole-session branching does not send a prefix count. Validate only
+    /// evidence the client actually knows: exact parent/child identities and
+    /// a sane count reported by Hermes.
+    static func requireWholeSessionExact(
+        _ branch: SessionBranch,
+        parentRuntimeSessionID: String,
+        parentStoredSessionID: String
+    ) throws {
+        try requireIdentity(
+            branch, parentRuntimeSessionID: parentRuntimeSessionID,
+            parentStoredSessionID: parentStoredSessionID)
+        guard branch.messageCount >= 0 else {
+            throw AckValidationError(
+                operation: "Branch session",
+                detail: "Hermes returned an invalid branch message count.")
+        }
+    }
+
     static func requireExact(_ branch: SessionBranch,
                              parentRuntimeSessionID: String,
                              parentStoredSessionID: String,
                              requestedCount: Int) throws {
+        guard requestedCount > 0 else {
+            throw AckValidationError(
+                operation: "Branch session",
+                detail: "Talaria has no valid branch message prefix.")
+        }
+        try requireIdentity(
+            branch, parentRuntimeSessionID: parentRuntimeSessionID,
+            parentStoredSessionID: parentStoredSessionID)
+        guard branch.messageCount == requestedCount else {
+            throw AckValidationError(
+                operation: "Branch session",
+                detail: "Hermes returned a different branch message count.")
+        }
+    }
+
+    private static func requireIdentity(
+        _ branch: SessionBranch,
+        parentRuntimeSessionID: String,
+        parentStoredSessionID: String
+    ) throws {
         let trim = CharacterSet.whitespacesAndNewlines
-        guard requestedCount > 0,
-              !branch.sessionID.isEmpty,
+        guard !branch.sessionID.isEmpty,
               branch.sessionID == branch.sessionID.trimmingCharacters(in: trim),
               !branch.storedSessionID.isEmpty,
               branch.storedSessionID
@@ -144,11 +181,6 @@ enum SessionBranchAckAuthority {
             throw AckValidationError(
                 operation: "Branch session",
                 detail: "Hermes returned a different parent session identity.")
-        }
-        guard branch.messageCount == requestedCount else {
-            throw AckValidationError(
-                operation: "Branch session",
-                detail: "Hermes returned a different branch message count.")
         }
     }
 }

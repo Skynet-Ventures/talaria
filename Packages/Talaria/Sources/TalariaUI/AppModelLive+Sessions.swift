@@ -67,6 +67,10 @@ final class SessionsRuntime {
     /// production authority checks and publication path remain intact.
     var listSessionsForTesting:
         (@MainActor (GatewayClient, String) async throws -> [StoredSession])?
+    /// Page-aware seam for paging publication/fencing tests. The legacy
+    /// rows-only seam above remains source-compatible with existing tests.
+    var listSessionPageForTesting:
+        (@MainActor (GatewayClient, String) async throws -> SessionListPage)?
 
     static func key(botID: String, sessionID: String) -> String {
         botID + "\u{0}" + sessionID
@@ -141,8 +145,8 @@ struct ExactSessionListRefreshAuthority {
     var savedURLString: String
     var wasPrimary: Bool
     var chatID: ObjectIdentifier
-    var sessionID: String
-    var storedSessionID: String
+    var sessionID: String?
+    var storedSessionID: String?
 }
 
 private struct ExactSessionControlLease {
@@ -150,6 +154,19 @@ private struct ExactSessionControlLease {
     var lifecycle: ProfileLifecycleGenerationToken
     var chatID: ObjectIdentifier
     var connectionGeneration: Int
+    var wasPrimary: Bool
+    var savedURLString: String
+}
+
+private struct ExactSessionControlSource {
+    var client: GatewayClient
+    var snapshot: GatewayClientPool.ConnectionSnapshot
+    var lease: GatewayClientPool.ConnectionLease
+}
+
+private enum SessionControlSourceError: Error {
+    case staleAuthority
+    case unavailableSource
 }
 
 /// The result of a session action, ready to render as one themed line plus an
@@ -181,34 +198,40 @@ extension AppModel {
     public func refreshSessions(botID: String) async {
         let runtime = SessionsRuntime.shared
         guard mode == .live else {
-            chat(for: botID).storedSessions = sessions[botID] ?? sessions["default"] ?? []
+            let chat = chat(for: botID)
+            chat.storedSessions = sessions[botID] ?? sessions["default"] ?? []
+            chat.storedSessionsTotal = nil
+            chat.storedSessionsHasMore = false
             runtime.loadErrors[botID] = nil
             return
         }
         guard let lifecycle = profileLifecycleGenerationToken(for: botID),
               let route = gatewayRoute(for: botID),
-              let client = try? await routedClient(for: route) else {
+              let saved = ConnectionRegistry.shared.saved.first(where: {
+                  $0.id == route.gatewayID
+              }), let baseURL = saved.baseURL,
+              let credential = ConnectionRegistry.shared.credential(for: saved),
+              let snapshot = try? await ConnectionRegistry.shared.clientPool
+                .connectWithGeneration(
+                    gatewayID: route.gatewayID, baseURL: baseURL,
+                    credential: credential) else {
             if profileLifecycleGenerationToken(for: botID) != nil {
                 runtime.loadErrors[botID] = theme.copy.sessUnreachable(theme.themeID)
             }
             return
         }
-        let generation = LiveRuntime.shared.generation
-        let chatID = ObjectIdentifier(chat(for: botID))
+        let chat = chat(for: botID)
         guard profileLifecycleAccepts(lifecycle) else { return }
-        do {
-            let rows = try await client.listSessions(limit: 200, profile: route.profile,
-                                                     includeHidden: true)
-            guard profileLifecycleAccepts(lifecycle),
-                  LiveRuntime.shared.generation == generation,
-                  gatewayRoute(for: botID) == route,
-                  self.client.map(ObjectIdentifier.init) == ObjectIdentifier(client),
-                  chats[botID].map({ ObjectIdentifier($0) == chatID }) == true else { return }
-            publishSessionRows(rows, botID: botID)
-        } catch {
-            guard profileLifecycleAccepts(lifecycle) else { return }
-            runtime.loadErrors[botID] = Self.sessionFailure(error, theme: theme)
-        }
+        _ = await refreshSessionsFromExactSource(
+            botID: botID,
+            authority: ExactSessionListRefreshAuthority(
+                route: route, client: snapshot.client, snapshot: snapshot,
+                lifecycle: lifecycle,
+                connectionGeneration: LiveRuntime.shared.generation,
+                savedURLString: saved.urlString,
+                wasPrimary: route.gatewayID == activeGatewayID,
+                chatID: ObjectIdentifier(chat), sessionID: chat.sessionID,
+                storedSessionID: chat.storedSessionID))
     }
 
     /// Reconcile the session list through the exact source already used by a
@@ -223,16 +246,20 @@ extension AppModel {
         guard await exactSessionListRefreshIsCurrent(
             botID: botID, authority: authority) else { return false }
         do {
-            let rows: [StoredSession]
-            if let override = runtime.listSessionsForTesting {
-                rows = try await override(authority.client, authority.route.profile)
+            let page: SessionListPage
+            if let override = runtime.listSessionPageForTesting {
+                page = try await override(authority.client, authority.route.profile)
+            } else if let override = runtime.listSessionsForTesting {
+                page = SessionListPage(
+                    sessions: try await override(
+                        authority.client, authority.route.profile))
             } else {
-                rows = try await authority.client.listSessions(
+                page = try await authority.client.listSessionPage(
                     limit: 200, profile: authority.route.profile, includeHidden: true)
             }
             guard await exactSessionListRefreshIsCurrent(
                 botID: botID, authority: authority) else { return false }
-            publishSessionRows(rows, botID: botID)
+            publishSessionPage(page, botID: botID)
             return true
         } catch {
             guard await exactSessionListRefreshIsCurrent(
@@ -274,8 +301,9 @@ extension AppModel {
         return true
     }
 
-    private func publishSessionRows(_ rows: [StoredSession], botID: String) {
+    private func publishSessionPage(_ page: SessionListPage, botID: String) {
         let runtime = SessionsRuntime.shared
+        let rows = page.sessions
         var summaries: [SessionSummary] = []
         summaries.reserveCapacity(rows.count)
         for row in rows where !row.id.isEmpty {
@@ -291,9 +319,17 @@ extension AppModel {
                     : row.title)
             summaries.append(SessionSummary(
                 id: row.id, title: title, when: SessionClock.stamp(row.startedAt),
-                messageCount: row.messageCount))
+                messageCount: row.messageCount,
+                preview: preview.isEmpty ? nil : preview,
+                startedAt: row.startedAt, lastActive: row.lastActive,
+                lineageRootID: row.lineageRootID,
+                parentSessionID: row.parentSessionID,
+                branchParentRootID: row.branchParentRootID))
         }
-        chat(for: botID).storedSessions = summaries
+        let chat = chat(for: botID)
+        chat.storedSessions = summaries
+        chat.storedSessionsTotal = page.total
+        chat.storedSessionsHasMore = page.hasMore
         // The bot sheet's "Recent sessions" group reads `sessions[botID]`
         // (the demo-shaped index) — keep both in step so it goes live too.
         sessions[botID] = summaries
@@ -979,23 +1015,42 @@ extension AppModel {
             await hook(lease.claim)
         }
         guard sessionControlAuthorityIsCurrent(lease) else { return needsLiveSession }
-        let route = lease.claim.target.route
-        guard let client = try? await routedClient(for: route),
-              sessionControlAuthorityIsCurrent(lease) else { return needsLiveSession }
         do {
-            let branch: SessionBranch
-            if let override = SessionMutationCoordinator.shared.wholeBranchForTesting {
-                branch = try await override(client, lease.claim.target.runtimeSessionID)
-            } else {
-                branch = try await client.branchSession(
-                    lease.claim.target.runtimeSessionID)
+            let source = try await acquireSessionControlSource(lease)
+            do {
+                try await requireSessionControlSourceAuthority(lease, source: source)
+                let branch: SessionBranch
+                if let override = SessionMutationCoordinator.shared.wholeBranchForTesting {
+                    branch = try await override(
+                        source.client, lease.claim.target.runtimeSessionID)
+                } else {
+                    branch = try await source.client.branchSession(
+                        lease.claim.target.runtimeSessionID)
+                }
+                try SessionBranchAckAuthority.requireWholeSessionExact(
+                    branch,
+                    parentRuntimeSessionID: lease.claim.target.runtimeSessionID,
+                    parentStoredSessionID: lease.claim.target.storedSessionID)
+                try await requireSessionControlSourceAuthority(lease, source: source)
+                _ = await refreshSessionsFromExactSource(
+                    botID: lease.claim.botID,
+                    authority: ExactSessionListRefreshAuthority(
+                        route: lease.claim.target.route, client: source.client,
+                        snapshot: source.snapshot, lifecycle: lease.lifecycle,
+                        connectionGeneration: lease.connectionGeneration,
+                        savedURLString: lease.savedURLString,
+                        wasPrimary: lease.wasPrimary, chatID: lease.chatID,
+                        sessionID: lease.claim.target.runtimeSessionID,
+                        storedSessionID: lease.claim.target.storedSessionID))
+                await ConnectionRegistry.shared.clientPool.release(source.lease)
+                return SessionActionOutcome(
+                    ok: true,
+                    headline: theme.copy.sessBranched(theme.themeID),
+                    detail: branch.title.isEmpty ? nil : branch.title)
+            } catch {
+                await ConnectionRegistry.shared.clientPool.release(source.lease)
+                throw error
             }
-            guard sessionControlAuthorityIsCurrent(lease) else { return needsLiveSession }
-            await refreshSessions(botID: botID)
-            return SessionActionOutcome(
-                ok: true,
-                headline: theme.copy.sessBranched(theme.themeID),
-                detail: branch.title.isEmpty ? nil : branch.title)
         } catch {
             return SessionActionOutcome(ok: false,
                                         headline: Self.sessionFailure(error, theme: theme))
@@ -1091,6 +1146,9 @@ extension AppModel {
               let chat = chats[botID],
               chat.sessionID == sessionID,
               let storedSessionID = chat.storedSessionID,
+              let saved = ConnectionRegistry.shared.saved.first(where: {
+                  $0.id == route.gatewayID
+              }), ConnectionRegistry.shared.credential(for: saved) != nil,
               let target = ExactSessionMutationTarget(
                 route: route, runtimeSessionID: sessionID,
                 storedSessionID: storedSessionID),
@@ -1102,19 +1160,29 @@ extension AppModel {
         return ExactSessionControlLease(
             claim: claim, lifecycle: lifecycle,
             chatID: ObjectIdentifier(chat),
-            connectionGeneration: LiveRuntime.shared.generation)
+            connectionGeneration: LiveRuntime.shared.generation,
+            wasPrimary: route.gatewayID == activeGatewayID,
+            savedURLString: saved.urlString)
     }
 
     private func sessionControlAuthorityIsCurrent(
         _ lease: ExactSessionControlLease
     ) -> Bool {
         let claim = lease.claim
+        let nowPrimary = claim.target.route.gatewayID == activeGatewayID
         guard SessionMutationCoordinator.shared.owns(claim),
               mode == .live,
-              LiveRuntime.shared.generation == lease.connectionGeneration,
+              nowPrimary == lease.wasPrimary,
               gatewayRoute(for: claim.botID) == claim.target.route,
               stateRoute(for: claim.botID) == claim.target.route,
               profileLifecycleAccepts(lease.lifecycle),
+              profileLifecycleAllowsGatewayTraffic(claim.target.route.gatewayID),
+              !exactStoredSessionSourceIsInvalidated(
+                gatewayID: claim.target.route.gatewayID),
+              let saved = ConnectionRegistry.shared.saved.first(where: {
+                  $0.id == claim.target.route.gatewayID
+                    && $0.urlString == lease.savedURLString
+              }), ConnectionRegistry.shared.credential(for: saved) != nil,
               let chat = chats[claim.botID],
               ObjectIdentifier(chat) == lease.chatID,
               chat.sessionID == claim.target.runtimeSessionID,
@@ -1124,7 +1192,52 @@ extension AppModel {
               !turnMutationIsActive(botID: claim.botID, target: claim.target) else {
             return false
         }
+        if nowPrimary {
+            guard LiveRuntime.shared.generation == lease.connectionGeneration else {
+                return false
+            }
+        }
         return true
+    }
+
+    private func acquireSessionControlSource(
+        _ controlLease: ExactSessionControlLease
+    ) async throws -> ExactSessionControlSource {
+        let route = controlLease.claim.target.route
+        guard let saved = ConnectionRegistry.shared.saved.first(where: {
+            $0.id == route.gatewayID && $0.urlString == controlLease.savedURLString
+        }), let baseURL = saved.baseURL,
+              let credential = ConnectionRegistry.shared.credential(for: saved) else {
+            throw SessionControlSourceError.unavailableSource
+        }
+        let pool = ConnectionRegistry.shared.clientPool
+        let snapshot = try await pool.connectWithGeneration(
+            gatewayID: route.gatewayID, baseURL: baseURL, credential: credential)
+        guard let poolLease = await pool.acquireLease(snapshot, for: route.gatewayID) else {
+            throw SessionControlSourceError.staleAuthority
+        }
+        return ExactSessionControlSource(
+            client: snapshot.client, snapshot: snapshot, lease: poolLease)
+    }
+
+    private func requireSessionControlSourceAuthority(
+        _ controlLease: ExactSessionControlLease,
+        source: ExactSessionControlSource
+    ) async throws {
+        try Task.checkCancellation()
+        guard await ConnectionRegistry.shared.clientPool.isCurrent(
+            source.snapshot, for: controlLease.claim.target.route.gatewayID) else {
+            throw SessionControlSourceError.staleAuthority
+        }
+        try Task.checkCancellation()
+        guard sessionControlAuthorityIsCurrent(controlLease) else {
+            throw SessionControlSourceError.staleAuthority
+        }
+        if controlLease.wasPrimary {
+            guard client.map(ObjectIdentifier.init) == ObjectIdentifier(source.client) else {
+                throw SessionControlSourceError.staleAuthority
+            }
+        }
     }
 
     // MARK: - Cross-session search
@@ -1312,6 +1425,11 @@ extension AppModel {
         runtime.previews[key] = nil
         if let chat = chats[botID] {
             chat.storedSessions.removeAll { $0.id == id }
+            // This is now a local optimistic projection rather than the exact
+            // session.list page that supplied the paging controls. Discard
+            // those controls until the authoritative changed-event refresh.
+            chat.storedSessionsTotal = nil
+            chat.storedSessionsHasMore = false
             // The deleted row was this chat's binding: forget it so the next
             // open creates a fresh session instead of resuming a dead key.
             if chat.storedSessionID == id {

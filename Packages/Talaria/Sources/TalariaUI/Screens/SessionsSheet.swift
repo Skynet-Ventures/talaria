@@ -34,6 +34,7 @@ public struct SessionsSheet: View {
     private let onOpen: ((String) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var query = ""
     @State private var loading = true
@@ -47,6 +48,7 @@ public struct SessionsSheet: View {
     @State private var renameText = ""
     @State private var showArchived = false
     @State private var exported: ExportedFile?
+    @State private var expandedRootIDs: Set<String> = []
     @FocusState private var renameFocused: Bool
 
     /// `onOpen` fires after the chat has been rebound onto the tapped
@@ -74,40 +76,93 @@ public struct SessionsSheet: View {
         /// A full-text hit outside the loaded page — no local counts for it.
         let remote: Bool
         var pinned: Bool = false
+        var rootID: String
+        var logicalLevel: Int = 0
+        var orphan: Bool = false
+        var branchCount: Int = 0
+        var hasChildren: Bool = false
     }
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    /// Loaded rows, pinned first. A pin is a "this must always be reachable"
-    /// statement, so it outranks recency — the same rule the desktop sidebar's
-    /// Pinned section encodes.
-    private var storedRows: [Row] {
-        let stored = model.chats[botID]?.storedSessions ?? []
-        let needle = trimmedQuery
-        let rows: [Row] = stored.compactMap { session in
-            let preview = model.sessionPreview(session.id, botID: botID) ?? ""
-            guard needle.isEmpty
-                    || session.title.lowercased().contains(needle)
-                    || preview.lowercased().contains(needle) else { return nil }
-            return Row(id: session.id, title: session.title, when: session.when,
-                       messageCount: session.messageCount, preview: preview, remote: false,
-                       pinned: model.isSessionPinned(session.id, botID: botID))
+    private var lineage: SessionLineageProjection {
+        let summaries = (model.chats[botID]?.storedSessions ?? []).map { summary in
+            var projected = summary
+            if projected.preview == nil {
+                projected.preview = model.sessionPreview(summary.id, botID: botID)
+            }
+            return projected
         }
-        return rows.filter(\.pinned) + rows.filter { !$0.pinned }
+        return SessionLineageProjection(summaries)
+    }
+
+    private var currentRootID: String? {
+        guard let currentSessionID else { return nil }
+        return lineage.entries.first(where: { $0.id == currentSessionID
+            || $0.summary.lineageRootID == currentSessionID })?.rootID
+    }
+
+    private var rootsExpandedForPresentation: Set<String> {
+        var roots = expandedRootIDs
+        if let currentRootID { roots.insert(currentRootID) }
+        return roots
+    }
+
+    /// Loaded rows are projected into durable lineage before filtering. A pin
+    /// on any descendant promotes the entire root group without detaching that
+    /// descendant from its parent.
+    private var storedRows: [Row] {
+        let needle = trimmedQuery
+        let searched = lineage.search(needle)
+        let pinnedRoots = Set(lineage.entries.compactMap { entry in
+            model.isSessionPinned(entry.id, botID: botID) ? entry.rootID : nil
+        })
+        let ordered = searched.filter { pinnedRoots.contains($0.rootID) }
+            + searched.filter { !pinnedRoots.contains($0.rootID) }
+        let expanded = rootsExpandedForPresentation
+        let branchCounts = Dictionary(grouping: lineage.entries, by: \.rootID)
+            .mapValues { max(0, $0.count - 1) }
+        return ordered.compactMap { entry in
+            guard !needle.isEmpty || entry.isRoot || expanded.contains(entry.rootID) else {
+                return nil
+            }
+            let session = entry.summary
+            let preview = session.preview
+                ?? model.sessionPreview(session.id, botID: botID) ?? ""
+            return Row(id: session.id, title: session.title, when: session.when,
+                       messageCount: session.messageCount, preview: preview,
+                       remote: false,
+                       pinned: model.isSessionPinned(session.id, botID: botID),
+                       rootID: entry.rootID, logicalLevel: entry.logicalLevel,
+                       orphan: entry.isOrphan,
+                       branchCount: entry.isRoot ? (branchCounts[entry.rootID] ?? 0) : 0,
+                       hasChildren: entry.isRoot && (branchCounts[entry.rootID] ?? 0) > 0)
+        }
     }
 
     private var remoteRows: [Row] {
-        let known = Set(storedRows.map(\.id))
+        let known = SessionsSheetLineagePresentationPolicy.knownSessionIdentities(
+            lineage.entries)
         return hits.compactMap { hit in
-            guard !known.contains(hit.sessionID) else { return nil }
+            guard SessionsSheetLineagePresentationPolicy.isFullTextOnly(
+                sessionID: hit.sessionID, knownSessionIDs: known) else { return nil }
             return Row(id: hit.sessionID, title: hit.title, when: hit.when,
-                       messageCount: 0, preview: hit.snippet, remote: true)
+                       messageCount: 0, preview: hit.snippet, remote: true,
+                       rootID: hit.sessionID)
         }
     }
 
     private var archived: [ArchivedSessionRecord] { model.archivedSessions(botID: botID) }
+
+    private var authoritativeRemainderNotice: String? {
+        let chat = model.chats[botID]
+        return SessionsSheetLineagePresentationPolicy.remainderNotice(
+            loadedCount: lineage.entries.count,
+            total: chat?.storedSessionsTotal,
+            hasMore: chat?.storedSessionsHasMore ?? false)
+    }
 
     private var isEmpty: Bool { storedRows.isEmpty && remoteRows.isEmpty }
 
@@ -291,6 +346,10 @@ public struct SessionsSheet: View {
                 ForEach(remoteRows) { row in sessionRow(row) }
             }
 
+            if let authoritativeRemainderNotice {
+                noteRow(authoritativeRemainderNotice, tone: theme.faint)
+            }
+
             if !archived.isEmpty { archivedSection }
 
             if !loading, !isEmpty {
@@ -305,48 +364,41 @@ public struct SessionsSheet: View {
     }
 
     private func sessionRow(_ row: Row) -> some View {
-        Button {
-            open(row)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        if row.pinned {
-                            Text(verbatim: "◆")
-                                .font(theme.mono(9, weight: .bold))
-                                .foregroundStyle(theme.accent)
-                        }
-                        Text(row.title)
-                            .font(theme.id == .ink ? theme.body(15.5, weight: .semibold)
-                                                   : theme.body(13.5, weight: .semibold))
-                            .foregroundStyle(theme.ink)
-                            .lineLimit(1)
-                    }
-                    Text(metaLine(row))
-                        .font(theme.id == .soft ? theme.body(11, weight: .medium)
-                                                : theme.mono(theme.id == .ink ? 9 : 10))
-                        .foregroundStyle(theme.faint)
-                        .lineLimit(1)
-                    if !row.preview.isEmpty {
-                        Text(row.preview)
-                            .font(theme.id == .control ? theme.mono(10)
-                                                       : theme.body(theme.id == .ink ? 13 : 12))
-                            .italic(theme.id == .ink)
-                            .foregroundStyle(theme.sub)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Text(verbatim: "›")
-                    .font(theme.body(13, weight: .semibold))
-                    .foregroundStyle(theme.faint)
-                    .padding(.top, 1)
+        HStack(alignment: .center, spacing: 0) {
+            Button {
+                open(row)
+            } label: {
+                sessionRowLabel(row)
+                    .frame(maxWidth: .infinity, minHeight:
+                            SessionsSheetLineagePresentationPolicy.minimumActionSize,
+                           alignment: .leading)
+                    .contentShape(Rectangle())
             }
-            .padding(EdgeInsets(top: 11, leading: 13, bottom: 11, trailing: 13))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityLabel(SessionsSheetLineagePresentationPolicy.voiceOverLabel(
+                title: row.title, logicalLevel: row.logicalLevel,
+                branchCount: row.branchCount, orphan: row.orphan,
+                current: row.id == currentSessionID))
+
+            if row.hasChildren, trimmedQuery.isEmpty {
+                Button {
+                    toggleExpanded(row.rootID)
+                } label: {
+                    Text(verbatim: rootsExpandedForPresentation.contains(row.rootID) ? "▾" : "▸")
+                        .font(theme.mono(11, weight: .bold))
+                        .foregroundStyle(theme.faint)
+                        .frame(minWidth: SessionsSheetLineagePresentationPolicy.minimumActionSize,
+                               minHeight: SessionsSheetLineagePresentationPolicy.minimumActionSize)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(rootsExpandedForPresentation.contains(row.rootID)
+                                    ? "Collapse branches" : "Expand branches")
+                .accessibilityValue("\(row.branchCount) branches")
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.leading, CGFloat(
+            SessionsSheetLineagePresentationPolicy.visualIndentLevel(row.logicalLevel)) * 14)
         .modifier(SessionRowChrome(theme: theme))
         .listRowInsets(EdgeInsets(top: theme.rowStyle == .ledger ? 0 : 3, leading: 20,
                                   bottom: theme.rowStyle == .ledger ? 0 : 3, trailing: 20))
@@ -371,6 +423,68 @@ public struct SessionsSheet: View {
             .tint(theme.accent)
         }
         .contextMenu { rowMenu(row) }
+    }
+
+    private func sessionRowLabel(_ row: Row) -> some View {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        if row.pinned {
+                            Text(verbatim: "◆")
+                                .font(theme.mono(9, weight: .bold))
+                                .foregroundStyle(theme.accent)
+                        }
+                        Text(row.title)
+                            .font(theme.id == .ink ? theme.body(15.5, weight: .semibold)
+                                                   : theme.body(13.5, weight: .semibold))
+                            .foregroundStyle(theme.ink)
+                            .lineLimit(1)
+                        if row.orphan {
+                            Text(verbatim: "Branch")
+                                .font(theme.mono(8, weight: .semibold))
+                                .foregroundStyle(theme.faint)
+                        }
+                    }
+                    Text(metaLine(row))
+                        .font(theme.id == .soft ? theme.body(11, weight: .medium)
+                                                : theme.mono(theme.id == .ink ? 9 : 10))
+                        .foregroundStyle(theme.faint)
+                        .lineLimit(1)
+                    if !row.preview.isEmpty {
+                        Text(row.preview)
+                            .font(theme.id == .control ? theme.mono(10)
+                                                       : theme.body(theme.id == .ink ? 13 : 12))
+                            .italic(theme.id == .ink)
+                            .foregroundStyle(theme.sub)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                    if row.branchCount > 0 {
+                        Text("\(row.branchCount) \(row.branchCount == 1 ? "branch" : "branches")")
+                            .font(theme.id == .soft ? theme.body(10, weight: .medium)
+                                                    : theme.mono(9, weight: .semibold))
+                            .foregroundStyle(theme.faint)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(verbatim: "›")
+                    .font(theme.body(13, weight: .semibold))
+                    .foregroundStyle(theme.faint)
+                    .padding(.top, 1)
+            }
+            .padding(EdgeInsets(top: 11, leading: 13, bottom: 11, trailing: 13))
+    }
+
+    private func toggleExpanded(_ rootID: String) {
+        let update = {
+            if expandedRootIDs.contains(rootID) {
+                expandedRootIDs.remove(rootID)
+            } else {
+                expandedRootIDs.insert(rootID)
+            }
+        }
+        if reduceMotion { update() }
+        else { withAnimation(.easeOut(duration: 0.2)) { update() } }
     }
 
     /// The tucked-away verb set. Long-press is deliberately the only door: none
@@ -789,6 +903,66 @@ public struct SessionsSheet: View {
                   q == query.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
             hits = found
         }
+    }
+}
+
+// MARK: - Lineage presentation policy
+
+/// Framework-light constants and accessibility copy kept outside the view so
+/// layout and VoiceOver behavior can be verified without snapshot tests.
+enum SessionsSheetLineagePresentationPolicy {
+    static let minimumActionSize: CGFloat = 44
+    static let maximumVisualIndentLevel = 2
+    static let maximumAnnouncedLogicalLevel = SessionLineageProjection.maximumDepth
+
+    static func visualIndentLevel(_ logicalLevel: Int) -> Int {
+        min(max(0, logicalLevel), maximumVisualIndentLevel)
+    }
+
+    static func isFullTextOnly(sessionID: String, knownSessionIDs: Set<String>) -> Bool {
+        !knownSessionIDs.contains(sessionID)
+    }
+
+    static func knownSessionIdentities(
+        _ entries: [SessionLineageEntry]
+    ) -> Set<String> {
+        var known = Set<String>()
+        known.reserveCapacity(min(entries.count * 2, SessionLineageProjection.maximumRows * 2))
+        for entry in entries.prefix(SessionLineageProjection.maximumRows) {
+            known.insert(entry.id)
+            if let root = entry.summary.lineageRootID,
+               !root.isEmpty {
+                known.insert(root)
+            }
+        }
+        return known
+    }
+
+    static func remainderNotice(loadedCount: Int, total: Int?, hasMore: Bool) -> String? {
+        let boundedLoaded = min(max(0, loadedCount), SessionLineageProjection.maximumRows)
+        let authoritativeMore = hasMore || (total.map { $0 > boundedLoaded } ?? false)
+        guard authoritativeMore else { return nil }
+        if let total, total > boundedLoaded {
+            return "Showing \(boundedLoaded) of \(total) sessions. More remain on this gateway."
+        }
+        return "Showing the first \(boundedLoaded) sessions. More remain on this gateway."
+    }
+
+    static func voiceOverLabel(title: String, logicalLevel: Int,
+                               branchCount: Int, orphan: Bool,
+                               current: Bool) -> String {
+        var parts = [title]
+        if logicalLevel > 0 {
+            let bounded = min(logicalLevel, maximumAnnouncedLogicalLevel)
+            parts.append("branch level \(bounded)")
+        } else if orphan {
+            parts.append("branch")
+        }
+        if branchCount > 0 {
+            parts.append("\(branchCount) \(branchCount == 1 ? "branch" : "branches")")
+        }
+        if current { parts.append("current session") }
+        return parts.joined(separator: ", ")
     }
 }
 

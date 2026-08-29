@@ -95,6 +95,7 @@ final class MessageBranchingFlowTests: XCTestCase {
         runtime.afterHistoryForTesting = nil
         let sessions = SessionsRuntime.shared
         sessions.listSessionsForTesting = nil
+        sessions.listSessionPageForTesting = nil
         sessions.exactOpenProfilesForTesting = nil
         sessions.exactOpenResumeForTesting = nil
         ChatRuntime.shared.interruptForTesting = nil
@@ -367,6 +368,19 @@ final class MessageBranchingFlowTests: XCTestCase {
         XCTAssertThrowsError(try SessionBranchAckAuthority.requireExact(
             fractional, parentRuntimeSessionID: "parent-runtime",
             parentStoredSessionID: "parent-stored", requestedCount: 2))
+    }
+
+    func testWholeSessionAckValidatesOnlyKnownIdentityAndSaneCount() throws {
+        XCTAssertNoThrow(try SessionBranchAckAuthority.requireWholeSessionExact(
+            branch(count: 0), parentRuntimeSessionID: "parent-runtime",
+            parentStoredSessionID: "parent-stored"))
+        XCTAssertThrowsError(try SessionBranchAckAuthority.requireWholeSessionExact(
+            branch(count: -1), parentRuntimeSessionID: "parent-runtime",
+            parentStoredSessionID: "parent-stored"))
+        XCTAssertThrowsError(try SessionBranchAckAuthority.requireWholeSessionExact(
+            branch(parent: "wrong", count: 2),
+            parentRuntimeSessionID: "parent-runtime",
+            parentStoredSessionID: "parent-stored"))
     }
 
     func testAmbiguousTimeoutNeverRetriesMutation() async throws {
@@ -662,6 +676,151 @@ final class MessageBranchingFlowTests: XCTestCase {
                 botID: fixture.botID))
             XCTAssertTrue(SessionMutationCoordinator.shared.isAvailable(target),
                           "a failed whole-session branch must release its claim")
+        }
+    }
+
+    func testWholeSessionBranchPublishesLineageOnlyFromAuthoritativeRefresh() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, sessionID in
+                XCTAssertEqual(sessionID, "parent-runtime")
+                // The acknowledgement deliberately carries no lineage fields.
+                return self.branch(count: 2)
+            }
+            SessionsRuntime.shared.listSessionPageForTesting = { client, profile in
+                XCTAssertTrue(client === fixture.client)
+                XCTAssertEqual(profile, fixture.profile)
+                listCalls += 1
+                return SessionListPage(sessions: [
+                    StoredSession(.object([
+                        "id": .string("parent-stored"),
+                        "title": .string("Parent"),
+                        "message_count": .number(4),
+                    ])),
+                    StoredSession(.object([
+                        "id": .string("child-stored"),
+                        "title": .string("Authoritative child"),
+                        "message_count": .number(2),
+                        "parent_session_id": .string("parent-stored"),
+                        "branch_parent_root_id": .string("parent-stored"),
+                    ])),
+                ], total: 250, hasMore: true)
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertTrue(outcome.ok)
+            XCTAssertEqual(listCalls, 1)
+            let child = try XCTUnwrap(fixture.chat.storedSessions.first(where: {
+                $0.id == "child-stored"
+            }))
+            XCTAssertEqual(child.title, "Authoritative child")
+            XCTAssertEqual(child.parentSessionID, "parent-stored")
+            XCTAssertEqual(child.branchParentRootID, "parent-stored")
+            XCTAssertEqual(fixture.chat.storedSessionsTotal, 250)
+            XCTAssertTrue(fixture.chat.storedSessionsHasMore)
+        }
+    }
+
+    func testLegacyPageAuthoritativelyClearsPriorPagingMetadata() async throws {
+        try await withPrimaryFixture { fixture in
+            fixture.chat.storedSessionsTotal = 999
+            fixture.chat.storedSessionsHasMore = true
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, _ in
+                self.branch(count: 2)
+            }
+            SessionsRuntime.shared.listSessionsForTesting = { _, _ in
+                self.listedSessions
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertTrue(outcome.ok)
+            XCTAssertNil(fixture.chat.storedSessionsTotal)
+            XCTAssertFalse(fixture.chat.storedSessionsHasMore)
+        }
+    }
+
+    func testWholeSessionBranchRejectsMismatchedAckBeforeListRefresh() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, _ in
+                self.branch(parent: "wrong-parent", count: 2)
+            }
+            SessionsRuntime.shared.listSessionsForTesting = { _, _ in
+                listCalls += 1
+                return self.listedSessions
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertFalse(outcome.ok)
+            XCTAssertEqual(listCalls, 0)
+            XCTAssertTrue(fixture.chat.storedSessions.isEmpty)
+        }
+    }
+
+    func testWholeSessionBranchRejectsNegativeCountBeforeListRefresh() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, _ in
+                self.branch(count: -1)
+            }
+            SessionsRuntime.shared.listSessionPageForTesting = { _, _ in
+                listCalls += 1
+                return SessionListPage(sessions: self.listedSessions,
+                                       total: 250, hasMore: true)
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertFalse(outcome.ok)
+            XCTAssertEqual(listCalls, 0)
+            XCTAssertNil(fixture.chat.storedSessionsTotal)
+            XCTAssertFalse(fixture.chat.storedSessionsHasMore)
+        }
+    }
+
+    func testPageMetadataSupersessionCannotPublishAfterResponse() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, _ in
+                self.branch(count: 2)
+            }
+            SessionsRuntime.shared.listSessionPageForTesting = { _, _ in
+                listCalls += 1
+                fixture.model.invalidateProfileLifecycleRouteForTesting(fixture.route)
+                return SessionListPage(sessions: self.listedSessions,
+                                       total: 250, hasMore: true)
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertTrue(outcome.ok, "the branch ack remains definitive")
+            XCTAssertEqual(listCalls, 1)
+            XCTAssertTrue(fixture.chat.storedSessions.isEmpty)
+            XCTAssertNil(fixture.chat.storedSessionsTotal)
+            XCTAssertFalse(fixture.chat.storedSessionsHasMore)
+        }
+    }
+
+    func testWholeSessionBranchProfileSupersessionCannotPublishRefresh() async throws {
+        try await withPrimaryFixture { fixture in
+            var listCalls = 0
+            SessionMutationCoordinator.shared.wholeBranchForTesting = { _, _ in
+                fixture.model.invalidateProfileLifecycleRouteForTesting(fixture.route)
+                return self.branch(count: 2)
+            }
+            SessionsRuntime.shared.listSessionsForTesting = { _, _ in
+                listCalls += 1
+                return self.listedSessions
+            }
+
+            let outcome = await fixture.model.branchSession(botID: fixture.botID)
+
+            XCTAssertFalse(outcome.ok)
+            XCTAssertEqual(listCalls, 0)
+            XCTAssertTrue(fixture.chat.storedSessions.isEmpty)
         }
     }
 
