@@ -67,10 +67,12 @@ public actor GatewayTransport {
             // A dedicated ephemeral session per socket. Writing onto a
             // half-open `URLSession.shared` WebSocket after iOS parks the
             // process wedges the shared session; the next dial never returns.
+            // Ephemeral session, Apple request/resource timeouts left at
+            // defaults. Those clocks are for finite HTTP transfers: a
+            // WebSocket never "finishes", and request=15s is shorter than
+            // Hermes' 20s protocol ping. Connect is bounded in `connect()`.
             let configuration = URLSessionConfiguration.ephemeral
             configuration.waitsForConnectivity = false
-            configuration.timeoutIntervalForRequest = 15
-            configuration.timeoutIntervalForResource = 30
             self.session = URLSession(configuration: configuration)
             self.ownsSession = true
         }
