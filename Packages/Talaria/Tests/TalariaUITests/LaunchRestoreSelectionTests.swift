@@ -61,6 +61,8 @@ final class LaunchRestoreSelectionTests: XCTestCase {
         fixture.model.launchSavedGatewaysOverrideForTesting = nil
         fixture.registry.setCredentialForTesting(nil, for: fixture.first)
         fixture.registry.setCredentialForTesting(nil, for: fixture.second)
+        fixture.registry.setSecondaryRosterForTesting(nil, gatewayID: fixture.first.id)
+        fixture.registry.setSecondaryRosterForTesting(nil, gatewayID: fixture.second.id)
         fixture.registry.remove(id: fixture.first.id)
         fixture.registry.remove(id: fixture.second.id)
         if let previous = fixture.previousDemoChoice {
@@ -243,6 +245,38 @@ final class LaunchRestoreSelectionTests: XCTestCase {
                      "a cancelled launch attempt must not mark its saved row offline")
         XCTAssertNil(fixture.model.managedCloudBootOutage)
 
+        await fixture.model.disconnectGateway()
+    }
+
+    @MainActor
+    func testCachedRosterPaintsBeforeConnectReady() async throws {
+        let fixture = try fixture()
+        defer { tearDownFixture(fixture) }
+        fixture.registry.setSecondaryRosterForTesting(
+            SecondaryRoster(
+                profiles: [SecondaryProfile(name: "hermes", job: "home",
+                                           preview: "cached line")],
+                fetchedAt: Date(), freshness: .stale),
+            gatewayID: fixture.first.id)
+        let operations = connectionOperations()
+        let gate = LaunchGate()
+        fixture.model.launchConnectOverrideForTesting = { base, credential in
+            try await fixture.model.connectGateway(
+                baseURL: base, credential: credential,
+                connectionOperation: { _ in await gate.wait() },
+                adoptionOperations: operations)
+        }
+
+        let restore = Task { @MainActor in await fixture.model.restoreWorldAtLaunch() }
+        let entered = await eventually { await gate.hasEntered() }
+        XCTAssertTrue(entered)
+        XCTAssertEqual(fixture.model.mode, .live)
+        XCTAssertTrue(fixture.model.isOffline)
+        XCTAssertEqual(fixture.model.bots.map(\.id), ["hermes"])
+        XCTAssertEqual(fixture.model.bots.first?.preview, "cached line")
+
+        await gate.release()
+        await restore.value
         await fixture.model.disconnectGateway()
     }
 }

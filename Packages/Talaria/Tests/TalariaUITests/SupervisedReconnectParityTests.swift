@@ -549,6 +549,25 @@ final class SupervisedReconnectParityTests: XCTestCase {
     }
 
     @MainActor
+    func testRedialBannerNamesTheTryWhileConnectIsInFlight() async throws {
+        let fixture = try fixture()
+        defer { cleanup(fixture) }
+        var hung: CheckedContinuation<Void, Error>?
+        ConnectionSupervisor.shared.dial = { _ in
+            try await withCheckedThrowingContinuation { hung = $0 }
+        }
+
+        fixture.model.reconnectNow()
+        await waitUntil { hung != nil && ConnectionSupervisor.shared.isReconnecting }
+        XCTAssertEqual(fixture.model.reconnectTryNumber, 1)
+        XCTAssertTrue(fixture.model.lastReconnectStep.contains("try 1"),
+                      fixture.model.lastReconnectStep)
+
+        hung?.resume(throwing: URLError(.cannotConnectToHost))
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    @MainActor
     func testResignWithoutWakeBannerSaysDidBecomeActiveNeverArrived() throws {
         let fixture = try fixture()
         defer { cleanup(fixture) }

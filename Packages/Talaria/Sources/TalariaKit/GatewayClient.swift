@@ -754,7 +754,11 @@ public actor GatewayClient {
 
     /// Connect (or reconnect). Refreshes OAuth tokens when near expiry and
     /// mints a fresh single-use WS ticket per attempt.
-    public func connect() async throws {
+    ///
+    /// `readyTimeout` is the `gateway.ready` bound (default 15s). Redials
+    /// pass `PostBootReconnectPolicy.redialReadyTimeout` so an unreachable
+    /// host fails into the next visible try instead of one frozen 15s wait.
+    public func connect(readyTimeout: TimeInterval = 15) async throws {
         try Task.checkCancellation()
         if case .oauth(let tokens) = credential, tokens.needsRefresh {
             do {
@@ -802,7 +806,7 @@ public actor GatewayClient {
             }
         }
         do {
-            try await transport.connect()
+            try await transport.connect(timeout: readyTimeout)
             try Task.checkCancellation()
         } catch {
             eventsTask?.cancel()

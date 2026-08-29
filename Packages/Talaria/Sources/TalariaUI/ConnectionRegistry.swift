@@ -468,6 +468,18 @@ public final class ConnectionRegistry {
         secondaryRosters[gatewayID] = roster
     }
 
+    /// Snapshot the live `profiles.list` into the persisted roster cache so
+    /// the next launch can paint last-known rows before `gateway.ready`.
+    func rememberLiveRoster(_ profiles: [HermesProfile], gatewayID: String) {
+        let projection = Self.secondaryRosterProjection(from: profiles)
+        secondaryRosters[gatewayID] = SecondaryRoster(
+            profiles: projection.profiles,
+            fetchedAt: Date(),
+            freshness: projection.freshness)
+        noteBotCountForSecondary(projection.profiles.count, gatewayID: gatewayID)
+        persistRosters()
+    }
+
     /// Probe every saved gateway in parallel.
     public func probeAll() async {
         let rows = saved

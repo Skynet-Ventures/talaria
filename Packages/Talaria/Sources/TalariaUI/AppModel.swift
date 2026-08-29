@@ -240,6 +240,10 @@ public final class AppModel {
                 // an implicit failover target.
                 registry.noteState(.offline, forURL: selected.base)
                 connections = registry.rows
+                if mode == .live, client != nil {
+                    isOffline = true
+                    scheduleSupervisedReconnect()
+                }
             }
             return
         }

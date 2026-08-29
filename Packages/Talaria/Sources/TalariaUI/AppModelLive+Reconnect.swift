@@ -46,7 +46,12 @@ public extension Notification.Name {
 //      never ran and the supervised monitor treated the socket as already
 //      dead); launch adoption awaited profiles.list (~20s) before arming
 //      the monitor; open-chat attach awaited the 30s REST latest page after
-//      defer_history was already on the wire. This pass fixes those waits.
+//      defer_history was already on the wire.
+//      Device journal (2026-08-29): repeated `Gateway unreachable` /
+//      `100.87.108.5`, last recovered 2026-08-28. Mini and a same-tailnet
+//      MacBook are healthy. First paint now uses last-known roster without
+//      waiting on ready; redials use a 5s ready bound and show try N
+//      instead of one frozen 15s connect().
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -149,7 +154,10 @@ final class ConnectionSupervisor {
     @ObservationIgnored var sleep: Sleep = ConnectionSupervisor.productionSleep
     @ObservationIgnored var randomUnit: RandomUnit = { Double.random(in: 0..<1) }
     @ObservationIgnored var now: Now = { ProcessInfo.processInfo.systemUptime }
-    @ObservationIgnored var dial: Dial = { client in try await client.connect() }
+    @ObservationIgnored var dial: Dial = { client in
+        try await client.connect(
+            readyTimeout: PostBootReconnectPolicy.redialReadyTimeout)
+    }
     @ObservationIgnored var switchConnect: SwitchConnect?
 
     private static let productionSleep: Sleep = { delay in
@@ -174,7 +182,10 @@ final class ConnectionSupervisor {
         sleep = Self.productionSleep
         randomUnit = { Double.random(in: 0..<1) }
         now = { ProcessInfo.processInfo.systemUptime }
-        dial = { client in try await client.connect() }
+        dial = { client in
+            try await client.connect(
+                readyTimeout: PostBootReconnectPolicy.redialReadyTimeout)
+        }
         switchConnect = nil
         reconnectTaskToken = nil
         reconnectGeneration = 0
@@ -365,6 +376,18 @@ extension AppModel {
     /// Classified for the offline banner: `connect.failed`, `resume.failed`,
     /// or `never got didBecomeActive` when resign ran and the wake never did.
     public var lastReconnectStep: String { ConnectionSupervisor.shared.bannerReason }
+
+    /// 1-based try shown on the banner while a redial episode is alive.
+    public var reconnectTryNumber: Int {
+        let supervisor = ConnectionSupervisor.shared
+        if supervisor.isReconnecting { return supervisor.episodeAttempt + 1 }
+        return max(supervisor.episodeAttempt, 0)
+    }
+
+    /// Supervised backoff loop is parked between tries.
+    public var isSupervisedReconnectLooping: Bool {
+        LiveRuntime.shared.reconnectTask != nil
+    }
 
     /// Package-test projection of the reconnect breadcrumb log.
     var reconnectTraceForTesting: [String] {
@@ -784,7 +807,8 @@ extension AppModel {
 
         let registry = ConnectionRegistry.shared
         do {
-            supervisor.noteReconnect("connect.started")
+            let tryNumber = supervisor.episodeAttempt + 1
+            supervisor.noteReconnect("connect.started", "try \(tryNumber)")
             try await supervisor.dial(authority.client)
             supervisor.noteReconnect("gateway.ready")
         } catch AuthError.sessionExpired {
@@ -1315,14 +1339,20 @@ public struct ReauthBanner: View {
     /// Deliberately short: the roster already prints the full `copy.offline`
     /// sentence, and this card follows the user onto every other screen. What
     /// it adds is the manual retry.
+    private var reconnectButtonLabel: String {
+        let trying = model.isReconnecting || model.isSupervisedReconnectLooping
+        guard trying else { return copy.reconnectCTA(theme.id) }
+        let n = max(model.reconnectTryNumber, 1)
+        return "\(copy.reconnecting(theme.id)) · try \(n)"
+    }
+
     private var offlineContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 headline(copy.linkDownTitle(theme.id), tone: theme.warn)
                 Spacer(minLength: 8)
                 LinkBannerButton(theme: theme,
-                                 label: model.isReconnecting ? copy.reconnecting(theme.id)
-                                                             : copy.reconnectCTA(theme.id),
+                                 label: reconnectButtonLabel,
                                  role: .primary) {
                     model.reconnectNow()
                 }

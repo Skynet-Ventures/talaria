@@ -415,6 +415,16 @@ extension AppModel {
             for await event in stream { self?.handle(event: event) }
         }
 
+        // Last-known roster is first paint. A 15s ready wait on an
+        // unreachable Tailscale hop must not hold the home screen empty.
+        if let saved = registry.gateway(forURL: baseURL),
+           paintLastKnownRosterIfAvailable(gatewayID: saved.id) {
+            mode = .live
+            isOffline = true
+            registry.noteState(.offline, forURL: baseURL)
+            connections = registry.rows
+        }
+
         do {
             try await connectionOperation(client)
         } catch {
@@ -905,6 +915,31 @@ extension AppModel {
             ConnectionRegistry.shared.noteBotCount(bots.count, forURL: base)
             connections = ConnectionRegistry.shared.rows
         }
+        if let gatewayID = runtime.gatewayID {
+            ConnectionRegistry.shared.rememberLiveRoster(profiles, gatewayID: gatewayID)
+        }
+    }
+
+    /// Paint persisted last-known rows so first paint does not wait on
+    /// `gateway.ready`. In-memory chats/roster (background, not force-quit)
+    /// already exist and are left alone.
+    @discardableResult
+    func paintLastKnownRosterIfAvailable(gatewayID: String) -> Bool {
+        guard bots.isEmpty,
+              let cached = ConnectionRegistry.shared.secondaryRosters[gatewayID],
+              !cached.profiles.isEmpty else { return false }
+        bots = cached.profiles.map { profile in
+            Bot(id: profile.name,
+                job: profile.job,
+                shape: profile.shape ?? BotCosmetics.derivedShape(forName: profile.name),
+                hue: profile.hue ?? BotCosmetics.derivedHue(forName: profile.name),
+                preview: profile.preview.isEmpty ? "Ready when you are." : profile.preview,
+                previewTime: Self.shortTime(profile.lastActive),
+                description: profile.job,
+                title: profile.title,
+                rawDisplayName: profile.rawDisplayName)
+        }
+        return true
     }
 
     /// Deterministic across launches (String.hashValue is seeded per-process).

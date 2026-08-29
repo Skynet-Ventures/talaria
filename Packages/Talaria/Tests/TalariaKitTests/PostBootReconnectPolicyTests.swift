@@ -65,4 +65,9 @@ final class PostBootReconnectPolicyTests: XCTestCase {
         XCTAssertEqual(PostBootReconnectPolicy.resetEpisode(for: .cleanOpen), reset)
         XCTAssertEqual(PostBootReconnectPolicy.resetEpisode(for: .manualWake), reset)
     }
+
+    func testRedialReadyTimeoutIsShorterThanTheConnectBound() {
+        XCTAssertEqual(PostBootReconnectPolicy.redialReadyTimeout, 5)
+        XCTAssertLessThan(PostBootReconnectPolicy.redialReadyTimeout, 15)
+    }
 }
