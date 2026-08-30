@@ -41,6 +41,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
 
         let supervisor = ConnectionSupervisor.shared
         supervisor.resetTestingSeams()
+        // Production sleep retries forever. A failed-dial test that then
+        // awaits reconnectTask would sit in that loop until the 6h job cap.
+        supervisor.sleep = { _ in throw CancellationError() }
         supervisor.diagnostics.removeValue(forKey: gateway.id)
         return Fixture(model: model, registry: registry, gateway: gateway,
                        baseURL: base, credential: credential, client: client)
@@ -765,9 +768,12 @@ final class SupervisedReconnectParityTests: XCTestCase {
         let supervisor = ConnectionSupervisor.shared
         fixture.model.isOffline = true
         supervisor.randomUnit = { 0 }
-        supervisor.sleep = { _ in }
-
         var dialCount = 0
+        supervisor.sleep = { _ in
+            // Instant return without a throw is a MainActor busy-loop: the
+            // supervised retry never suspends, so cancel is never observed.
+            if dialCount >= 2 { throw CancellationError() }
+        }
         supervisor.dial = { _ in
             dialCount += 1
             // Force a post-dial adopt fence miss on the first attempt only by
@@ -780,6 +786,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
 
         fixture.model.reconnectNow()
         await waitUntil { dialCount >= 2 }
+        LiveRuntime.shared.reconnectTask?.cancel()
         await LiveRuntime.shared.reconnectTask?.value
 
         XCTAssertGreaterThanOrEqual(dialCount, 2)

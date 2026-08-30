@@ -7,10 +7,15 @@ import XCTest
 final class OpenChatHydrationTests: XCTestCase {
     @MainActor
     override func tearDown() {
+        CanonicalChatRuntime.shared.opens["hermes"]?.cancel()
         CanonicalChatRuntime.shared.opens.removeValue(forKey: "hermes")
+        LiveRuntime.shared.attachTasks["hermes"]?.cancel()
         LiveRuntime.shared.attachTasks.removeValue(forKey: "hermes")
         LiveRuntime.shared.lastSessionByBot.removeValue(forKey: "hermes")
         LiveRuntime.shared.canonicalSessionByBot.removeValue(forKey: "hermes")
+        LiveRuntime.shared.reconnectTask?.cancel()
+        LiveRuntime.shared.reconnectTask = nil
+        LiveRuntime.shared.gatewayID = nil
         super.tearDown()
     }
 
@@ -30,7 +35,8 @@ final class OpenChatHydrationTests: XCTestCase {
                 accepts: { true })
         }
 
-        await barrier.waitUntilEntered()
+        XCTAssertTrue(await barrier.waitUntilEnteredOrTimeout(),
+                      "latest-page fetch must start so first paint can be asserted")
         XCTAssertEqual(chat.messages.map(\.text), ["stub"],
                        "first paint must not wait for the REST page")
         XCTAssertFalse(chat.transcriptHasOlder)
@@ -65,7 +71,8 @@ final class OpenChatHydrationTests: XCTestCase {
                 accepts: { true })
         }
 
-        await barrier.waitUntilEntered()
+        XCTAssertTrue(await barrier.waitUntilEnteredOrTimeout(),
+                      "latest-page fetch must start so an optimistic send can race it")
         chat.messages.append(ChatMessage(author: .user, text: "new question"))
         let page: JSONValue = ["messages": [
             ["role": "assistant", "text": "old", "row_id": 2],
@@ -240,6 +247,8 @@ final class OpenChatHydrationTests: XCTestCase {
         for _ in 0..<50 where held == nil { await Task.yield() }
         held?.resume()
         hung.cancel()
+        CanonicalChatRuntime.shared.opens["hermes"]?.cancel()
+        LiveRuntime.shared.attachTasks["hermes"]?.cancel()
         CanonicalChatRuntime.shared.opens.removeValue(forKey: "hermes")
         LiveRuntime.shared.attachTasks.removeValue(forKey: "hermes")
     }
@@ -263,7 +272,27 @@ final class OpenChatHydrationTests: XCTestCase {
         // Open schedules background attach and returns; the slot is set
         // before return even when the attach later fails for no-route.
         XCTAssertNotNil(CanonicalChatRuntime.shared.opens["hermes"])
-        await CanonicalChatRuntime.shared.opens["hermes"]?.value
+        // no-route finishes immediately; a leaked network attach must not hang CI.
+        let open = CanonicalChatRuntime.shared.opens["hermes"]
+        let finished = await waitForTask(open, seconds: 2)
+        open?.cancel()
+        XCTAssertTrue(finished, "background attach must settle or be cancelled")
+    }
+}
+
+@MainActor
+private func waitForTask(_ task: Task<Void, Never>?, seconds: Double) async -> Bool {
+    guard let task else { return true }
+    let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
+    return await withTaskGroup(of: Bool.self) { group in
+        group.addTask { await task.value; return true }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            return false
+        }
+        let first = await group.next() ?? false
+        group.cancelAll()
+        return first
     }
 }
 
@@ -285,6 +314,22 @@ private actor OpenChatPageBarrier {
         if entered { return }
         await withCheckedContinuation { continuation in
             enteredWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilEnteredOrTimeout(seconds: Double = 2) async -> Bool {
+        if entered { return true }
+        let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await self.waitUntilEntered(); return true }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            if !first { failIfStillWaiting() }
+            return first
         }
     }
 
