@@ -35,7 +35,8 @@ final class OpenChatHydrationTests: XCTestCase {
                 accepts: { true })
         }
 
-        XCTAssertTrue(await barrier.waitUntilEnteredOrTimeout(),
+        let firstPaintStarted = await barrier.waitUntilEnteredOrTimeout()
+        XCTAssertTrue(firstPaintStarted,
                       "latest-page fetch must start so first paint can be asserted")
         XCTAssertEqual(chat.messages.map(\.text), ["stub"],
                        "first paint must not wait for the REST page")
@@ -71,7 +72,8 @@ final class OpenChatHydrationTests: XCTestCase {
                 accepts: { true })
         }
 
-        XCTAssertTrue(await barrier.waitUntilEnteredOrTimeout(),
+        let pageFetchStarted = await barrier.waitUntilEnteredOrTimeout()
+        XCTAssertTrue(pageFetchStarted,
                       "latest-page fetch must start so an optimistic send can race it")
         chat.messages.append(ChatMessage(author: .user, text: "new question"))
         let page: JSONValue = ["messages": [
