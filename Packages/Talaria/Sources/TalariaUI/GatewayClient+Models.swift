@@ -555,9 +555,11 @@ extension GatewayClient {
     /// switching to a self-hosted model while a subscription provider is
     /// active otherwise resolves against the wrong endpoint.
     ///
-    /// Persist flags follow desktop `use-model-controls.ts`: a Bot Mode
-    /// forever-chat writes `--global` so the profile default sticks across
-    /// roster polls; MoA presets stay `--session`.
+    /// `persistAsDefault` addresses the gateway process' config scope. A
+    /// profile default is a different operation (`profiles.configure` with
+    /// both provider and model), so Bot Mode callers keep this session-scoped
+    /// and perform that profile-addressed write separately. MoA presets are
+    /// always session-only.
     func applySessionModel(sessionID: String?, model: String, provider: String? = nil,
                            persistAsDefault: Bool = false,
                            confirmExpensive: Bool = false) async throws -> ModelSwitchOutcome {

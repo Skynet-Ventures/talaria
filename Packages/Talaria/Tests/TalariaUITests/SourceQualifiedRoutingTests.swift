@@ -2095,22 +2095,24 @@ final class SourceQualifiedRoutingTests: XCTestCase {
                 next: "in 1h", last: "", isOn: true)
     }
 
-    func testPrimaryForeverChatPersistsModelGloballyAndMoAStaysSession() {
-        let model = AppModel()
-        XCTAssertTrue(model.shouldPersistModelAsDefault(botID: "default", provider: "anthropic"))
-        XCTAssertTrue(model.shouldPersistModelAsDefault(botID: "seek", provider: "anthropic"))
-        XCTAssertTrue(model.shouldPersistModelAsDefault(botID: "homelab::default", provider: "anthropic"))
-        XCTAssertFalse(model.shouldPersistModelAsDefault(botID: "default", provider: "moa"))
+    func testForeverChatModelSwitchIsSessionScopedBeforeProfileConfigure() {
         XCTAssertEqual(
             GatewayClient.modelSwitchValue(model: "claude-sonnet-4.6", provider: "anthropic",
-                                           persistAsDefault: true),
-            "claude-sonnet-4.6 --provider anthropic --global"
+                                           persistAsDefault: false),
+            "claude-sonnet-4.6 --provider anthropic --session"
         )
         XCTAssertEqual(
             GatewayClient.modelSwitchValue(model: "ensemble", provider: "moa",
                                            persistAsDefault: false),
             "ensemble --provider moa --session"
         )
+        let profilePin = ProfileEdit(model: "claude-sonnet-4.6", provider: "anthropic")
+        XCTAssertEqual(profilePin.expectedAppliedSections, ["model"])
+        XCTAssertEqual(profilePin.params(name: "default")["name"]?.stringValue, "default")
+        XCTAssertEqual(profilePin.params(name: "default")["model"]?.stringValue,
+                       "claude-sonnet-4.6")
+        XCTAssertEqual(profilePin.params(name: "default")["provider"]?.stringValue,
+                       "anthropic")
     }
 
     func testRosterCompanionCopyMatchesBotModePlugin() {
