@@ -1207,6 +1207,7 @@ extension AppModel {
 
     func kickOpenChatLatestPageIfPossible(botID: String) {
         guard let stored = cachedOpenChatStoredID(botID: botID) else { return }
+        guard gatewayRoute(for: botID) ?? stateRoute(for: botID) != nil else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard let route = self.gatewayRoute(for: botID) ?? self.stateRoute(for: botID)

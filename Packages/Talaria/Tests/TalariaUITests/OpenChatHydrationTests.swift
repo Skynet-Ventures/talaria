@@ -6,6 +6,15 @@ import XCTest
 
 final class OpenChatHydrationTests: XCTestCase {
     @MainActor
+    override func tearDown() {
+        CanonicalChatRuntime.shared.opens.removeValue(forKey: "hermes")
+        LiveRuntime.shared.attachTasks.removeValue(forKey: "hermes")
+        LiveRuntime.shared.lastSessionByBot.removeValue(forKey: "hermes")
+        LiveRuntime.shared.canonicalSessionByBot.removeValue(forKey: "hermes")
+        super.tearDown()
+    }
+
+    @MainActor
     func testDeferredStubPaintsBeforeRESTPageArrives() async throws {
         let chat = ChatState()
         let barrier = OpenChatPageBarrier()
@@ -231,6 +240,8 @@ final class OpenChatHydrationTests: XCTestCase {
         for _ in 0..<50 where held == nil { await Task.yield() }
         held?.resume()
         hung.cancel()
+        CanonicalChatRuntime.shared.opens.removeValue(forKey: "hermes")
+        LiveRuntime.shared.attachTasks.removeValue(forKey: "hermes")
     }
 
     @MainActor
