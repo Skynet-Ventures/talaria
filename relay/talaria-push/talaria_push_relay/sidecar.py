@@ -27,9 +27,12 @@ sidecar POLLS read-only RPCs — coarser, but safe and side-effect free:
 * ``approval`` — polls ``session.active_list`` then ``approval.pending``
   per active session (~2 s). Full fidelity: entry data carries the real
   ``request_id``, command, description.
-* ``long_task`` — tracks idle→streaming→idle transitions per session_key
-  in ``session.active_list``; pushes when a streaming stretch exceeded
-  the threshold. (Resolution = poll interval; good enough for >10 min.)
+* ``long_task`` — tracks idle→streaming→idle transitions only when
+  ``session.active_list`` supplies an exact ``platform`` of ``talaria`` or
+  ``desktop``. Missing/unknown/messaging/cron origins fail closed before a
+  stopwatch exists; peers without that immutable provenance therefore disable
+  sidecar long-task pushes. (Resolution = poll interval; good enough for >10
+  min when provenance is available.)
 * ``routine`` — deliberately unavailable until Hermes exposes immutable
   creator/delivery provenance for completed jobs. Names and mutable delivery
   fields cannot safely distinguish Talaria work from Slack-owned cron jobs.
@@ -170,9 +173,10 @@ class Sidecar:
         self.settings = settings
         self.token: str = settings.token
         self.dispatcher = push_mod.get_dispatcher()
-        # long-task stopwatch: session_key -> wall-clock streaming start
-        self._streaming_since: Dict[str, float] = {}
-        self._session_titles: Dict[str, str] = {}
+        # Exact (bot, platform, session_key) -> wall-clock streaming start.
+        # Rows without a Talaria/Desktop origin never enter this map.
+        self._streaming_since: Dict[tuple[str, str, str], float] = {}
+        self._session_titles: Dict[tuple[str, str, str], str] = {}
         # approvals already pushed, by request_id
         self._seen_approvals: Dict[str, float] = {}
         self._offline = False
@@ -275,6 +279,7 @@ class Sidecar:
         now = time.time()
         seen_keys = set()
         settings = relay_settings()
+        bot = self._bot_name()
 
         for row in sessions:
             if not isinstance(row, dict):
@@ -283,28 +288,41 @@ class Sidecar:
             key = str(row.get("session_key") or sid)
             status = str(row.get("status") or "")
             title = str(row.get("title") or row.get("preview") or "")
-            seen_keys.add(key)
-            if title:
-                self._session_titles[key] = title
 
-            # long-task stopwatch on idle<->streaming transitions
-            if status == "streaming":
-                self._streaming_since.setdefault(key, now)
-            else:
-                started = self._streaming_since.pop(key, None)
-                if started is not None:
-                    duration = now - started
-                    if duration >= settings.long_task_min_s > 0:
-                        self.dispatcher.notify(push_mod.long_task_event(
-                            bot=self._bot_name(),
-                            session_id=key,
-                            duration_s=duration,
-                            ok=True,
-                            summary=(
-                                f"“{self._session_titles.get(key, 'task')}” "
-                                f"finished after {int(duration // 60)} min."
-                            ),
-                        ))
+            platform = push_mod.admit_turn_platform(row.get("platform"))
+            timer_key = (bot, platform, key) if platform is not None else None
+            if timer_key is not None:
+                seen_keys.add(timer_key)
+                # Admit before stopwatch creation, and do no duration work when
+                # response pushes supersede long-task completion notifications.
+                if settings.event_enabled("long_task") \
+                        and not settings.event_enabled("response"):
+                    if title:
+                        self._session_titles[timer_key] = title
+                    if status == "streaming":
+                        self._streaming_since.setdefault(timer_key, now)
+                    else:
+                        started = self._streaming_since.pop(timer_key, None)
+                        if started is not None:
+                            duration = now - started
+                            if duration >= settings.long_task_min_s > 0:
+                                presentation = push_mod.current_profile_presentation(bot)
+                                self.dispatcher.notify(push_mod.long_task_event(
+                                    bot=bot,
+                                    session_id=key,
+                                    duration_s=duration,
+                                    ok=True,
+                                    summary=(
+                                        f"“{self._session_titles.get(timer_key, 'task')}” "
+                                        f"finished after {int(duration // 60)} min."
+                                    ),
+                                    display_name=presentation.display_name,
+                                    avatar=presentation.avatar,
+                                ))
+                            self._session_titles.pop(timer_key, None)
+                else:
+                    self._streaming_since.pop(timer_key, None)
+                    self._session_titles.pop(timer_key, None)
 
             # pending approvals (full request_id fidelity)
             if sid:
@@ -312,8 +330,9 @@ class Sidecar:
 
         # sessions that vanished while streaming: closed/errored — treat the
         # stopwatch as ended without a push (we can't tell success apart).
-        for key in [k for k in self._streaming_since if k not in seen_keys]:
-            self._streaming_since.pop(key, None)
+        for timer_key in [k for k in self._streaming_since if k not in seen_keys]:
+            self._streaming_since.pop(timer_key, None)
+            self._session_titles.pop(timer_key, None)
 
     async def _poll_approvals(self, ws: GatewayWS, sid: str, key: str) -> None:
         try:
@@ -335,13 +354,17 @@ class Sidecar:
                 continue
             if request_id:
                 self._seen_approvals[request_id] = now
+            bot = self._bot_name()
+            presentation = push_mod.current_profile_presentation(bot)
             self.dispatcher.notify(push_mod.approval_event(
-                bot=self._bot_name(),
+                bot=bot,
                 session_id=key,
                 description=str(entry.get("description") or ""),
                 command=str(entry.get("command") or ""),
                 approval_request_id=request_id,
                 pattern_key=str(entry.get("pattern_key") or ""),
+                display_name=presentation.display_name,
+                avatar=presentation.avatar,
             ))
 
     # -- main loops ---------------------------------------------------------

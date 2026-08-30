@@ -24,8 +24,9 @@ pre_approval_request    ``approval`` pushes. Fires in whatever process runs
                         ``approval.respond`` supports).
 post_approval_response  clears the approval dedupe entry so a re-prompt
                         after deny/timeout can buzz again.
-pre_llm_call            records the turn start time per (session_id,
-                        turn_id) — the "long task" stopwatch.
+pre_llm_call            records the turn start time per exact (bot, platform,
+                        session_id, turn_id) — the "long task" stopwatch —
+                        only for Talaria/Desktop-owned turns.
 post_llm_call           fires once when Hermes has a final assistant response
                         ready (the pinned hook is non-interrupted and carries
                         no completed/failed flags). Used for ``response``
@@ -36,9 +37,9 @@ post_llm_call           fires once when Hermes has a final assistant response
 on_session_end          fires at the end of every turn with completed /
                         failed / interrupted / platform. Used only for
                         ``long_task`` pushes (elapsed >= threshold) when
-                        ``response`` pushes are disabled. Cron completion does
-                        not carry immutable creator/delivery provenance and is
-                        therefore never admitted to Talaria push.
+                        ``response`` pushes are disabled and the exact source
+                        is Talaria/Desktop. Messaging, cron and unknown sources
+                        never create or consume a Talaria stopwatch.
 pre_gateway_dispatch    ``mention`` pushes: observes every user-originated
                         inbound MessageEvent in the messaging gateway
                         (Telegram / Discord / A2A / ...) and scans for
@@ -64,8 +65,8 @@ from .config import current_bot, relay_settings
 
 logger = logging.getLogger("talaria_push")
 
-# (session_id, turn_id) -> monotonic start time
-_turn_starts: Dict[Tuple[str, str], float] = {}
+# (bot, originating_platform, session_id, turn_id) -> monotonic start time
+_turn_starts: Dict[Tuple[str, str, str, str], float] = {}
 _turn_lock = threading.Lock()
 _TURN_MAP_MAX = 512
 
@@ -74,13 +75,6 @@ _TURN_MAP_MAX = 512
 # human is already at the terminal; "smart" means an auxiliary LLM decides
 # without a human prompt (unless it escalates, which re-fires as "gateway").
 _DEFAULT_APPROVAL_SURFACES = {"gateway"}
-
-# Only these Hermes session platforms have a Talaria/Desktop conversation that
-# can truthfully receive a source-qualified response push. Standalone TUI,
-# messaging adapters, CLI/server/tool sessions, cron, and missing/future
-# platform values fail closed.
-_RESPONSE_PUSH_PLATFORMS = frozenset({"talaria", "desktop"})
-
 
 def _safe_text(value: Any) -> str:
     """Coerce hook values without allowing malformed objects to escape."""
@@ -143,6 +137,7 @@ def on_pre_approval_request(**kwargs: Any) -> None:
         )
         return None
     bot = current_bot()
+    presentation = push_mod.current_profile_presentation(bot)
     event = push_mod.approval_event(
         bot=bot,
         session_id=session_key,
@@ -151,6 +146,8 @@ def on_pre_approval_request(**kwargs: Any) -> None:
         # Not available on the hook surface (see module docstring / README).
         approval_request_id="",
         pattern_key=str(kwargs.get("pattern_key") or ""),
+        display_name=presentation.display_name,
+        avatar=presentation.avatar,
     )
     push_mod.get_dispatcher().notify(event)
     return None
@@ -197,8 +194,8 @@ def on_post_llm_call(**kwargs: Any) -> None:
     if not isinstance(response, str) or not response.strip():
         return None
 
-    platform = kwargs.get("platform")
-    if not isinstance(platform, str) or platform not in _RESPONSE_PUSH_PLATFORMS:
+    platform = push_mod.admit_turn_platform(kwargs.get("platform"))
+    if platform is None:
         return None
 
     bot = _strict_text(current_bot())
@@ -225,11 +222,17 @@ def on_post_llm_call(**kwargs: Any) -> None:
 
 @_never_raise
 def on_pre_llm_call(**kwargs: Any) -> None:
-    session_id = str(kwargs.get("session_id") or "")
-    turn_id = str(kwargs.get("turn_id") or "")
-    if not session_id:
+    platform = push_mod.admit_turn_platform(kwargs.get("platform"))
+    settings = relay_settings()
+    if platform is None or settings.event_enabled("response") \
+            or not settings.event_enabled("long_task"):
         return None
-    key = (session_id, turn_id)
+    bot = _strict_text(current_bot())
+    session_id = _strict_text(kwargs.get("session_id"))
+    turn_id = _strict_text(kwargs.get("turn_id"))
+    if not bot or not session_id or turn_id is None:
+        return None
+    key = (bot, platform, session_id, turn_id)
     with _turn_lock:
         # setdefault: pre_llm_call fires once per turn *before* the tool
         # loop, but be defensive against future multi-fire semantics.
@@ -243,25 +246,19 @@ def on_pre_llm_call(**kwargs: Any) -> None:
 
 @_never_raise
 def on_session_end(**kwargs: Any) -> None:
-    session_id = _safe_text(kwargs.get("session_id"))
-    turn_id = _safe_text(kwargs.get("turn_id"))
-    platform = _safe_text(kwargs.get("platform"))
+    platform = push_mod.admit_turn_platform(kwargs.get("platform"))
+    bot = _strict_text(current_bot())
+    session_id = _strict_text(kwargs.get("session_id"))
+    turn_id = _strict_text(kwargs.get("turn_id"))
+    if platform is None or not bot or not session_id or turn_id is None:
+        return None
     completed = bool(kwargs.get("completed"))
     failed = bool(kwargs.get("failed"))
     interrupted = bool(kwargs.get("interrupted"))
 
     with _turn_lock:
-        started = _turn_starts.pop((session_id, turn_id), None)
+        started = _turn_starts.pop((bot, platform, session_id, turn_id), None)
     duration = (time.monotonic() - started) if started is not None else 0.0
-
-    bot = current_bot()
-    dispatcher = push_mod.get_dispatcher()
-
-    if platform.strip().lower() == "cron":
-        # Fail closed. This hook omits job id/name, creator surface, origin and
-        # delivery target. A Slack-owned cron and a Talaria-created routine are
-        # identical here, so emitting would fan messaging work out to Talaria.
-        return None
 
     if interrupted:
         return None  # the user stopped it themselves; no point buzzing them
@@ -276,11 +273,15 @@ def on_session_end(**kwargs: Any) -> None:
         and started is not None
         and duration >= threshold > 0
     ):
+        presentation = push_mod.current_profile_presentation(bot)
+        dispatcher = push_mod.get_dispatcher()
         dispatcher.notify(push_mod.long_task_event(
             bot=bot,
             session_id=session_id,
             duration_s=duration,
             ok=completed and not failed,
+            display_name=presentation.display_name,
+            avatar=presentation.avatar,
         ))
     return None
 
