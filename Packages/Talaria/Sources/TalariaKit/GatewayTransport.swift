@@ -46,20 +46,38 @@ public actor GatewayTransport {
     }
     private let url: URL
     private let session: URLSession
+    private let ownsSession: Bool
     private var task: URLSessionWebSocketTask?
     private var nextID = 1
     private var pending: [String: CheckedContinuation<SequencedResponse, Error>] = [:]
     private var inboundSequence: UInt64 = 0
     private var eventContinuation: AsyncStream<GatewayEvent>.Continuation?
+    private var readyWaiter: CheckedContinuation<Void, Error>?
+    private var sawReady = false
     private(set) public var state: TransportState = .idle
 
     /// All server events, in arrival order. Single consumer.
     public nonisolated let events: AsyncStream<GatewayEvent>
     private nonisolated let eventsCont: AsyncStream<GatewayEvent>.Continuation
 
-    public init(url: URL, session: URLSession = .shared) {
+    public init(url: URL, session: URLSession? = nil) {
         self.url = url
-        self.session = session
+        if let session {
+            self.session = session
+            self.ownsSession = false
+        } else {
+            // A dedicated ephemeral session per socket. Writing onto a
+            // half-open `URLSession.shared` WebSocket after iOS parks the
+            // process wedges the shared session; the next dial never returns.
+            // Ephemeral session, Apple request/resource timeouts left at
+            // defaults. Those clocks are for finite HTTP transfers: a
+            // WebSocket never "finishes", and request=15s is shorter than
+            // Hermes' 20s protocol ping. Connect is bounded in `connect()`.
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.waitsForConnectivity = false
+            self.session = URLSession(configuration: configuration)
+            self.ownsSession = true
+        }
         var cont: AsyncStream<GatewayEvent>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .unbounded) { cont = $0 }
         self.eventsCont = cont
@@ -67,6 +85,11 @@ public actor GatewayTransport {
 
     /// Open the socket and wait for the `gateway.ready` event.
     /// The ready frame is the first thing the server sends after accept.
+    ///
+    /// Ready is signaled here, not by iterating `events`. That stream is
+    /// single-consumer: this waiter owning the iterator left the client's
+    /// event pump with nothing, so the supervised monitor treated a live
+    /// socket as already dead (15s ready bound, then a dead redial).
     public func connect(timeout: TimeInterval = 15) async throws {
         guard task == nil else { return }
         state = .connecting
@@ -76,28 +99,56 @@ public actor GatewayTransport {
         task.resume()
         Task { await self.receiveLoop(task) }
 
-        // The server sends gateway.ready immediately on accept; treat its
-        // arrival as connection success.
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for await event in self.events where event.type == "gateway.ready" {
-                    return
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await self.waitForReady()
                 }
-                throw GatewayError(code: -1, message: "socket closed before gateway.ready")
+                group.addTask {
+                    try await Task.sleep(for: .seconds(timeout))
+                    throw GatewayError(code: -2, message: "timed out waiting for gateway.ready")
+                }
+                try await group.next()
+                group.cancelAll()
             }
-            group.addTask {
-                try await Task.sleep(for: .seconds(timeout))
-                throw GatewayError(code: -2, message: "timed out waiting for gateway.ready")
-            }
-            try await group.next()
-            group.cancelAll()
+        } catch {
+            close()
+            throw error
         }
         state = .ready
     }
 
+    private func waitForReady() async throws {
+        if sawReady { return }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                if sawReady {
+                    cont.resume()
+                } else {
+                    readyWaiter = cont
+                }
+            }
+        } onCancel: {
+            Task { await self.failReadyWaiter(CancellationError()) }
+        }
+    }
+
+    private func failReadyWaiter(_ error: Error) {
+        readyWaiter?.resume(throwing: error)
+        readyWaiter = nil
+    }
+
     public func close() {
-        task?.cancel(with: .normalClosure, reason: nil)
+        task?.cancel(with: .goingAway, reason: nil)
         finish(reason: "closed")
+        if ownsSession {
+            // `finishTasksAndInvalidate` keeps the session alive until
+            // outstanding tasks end. A parked half-open WebSocket receive
+            // can delay that indefinitely and wedge the next wake dial that
+            // awaits close(). Cancel immediately so teardown cannot stall
+            // `redial.scheduled → connect.started`.
+            session.invalidateAndCancel()
+        }
     }
 
     /// Send a JSON-RPC request and await its response (correlated by id;
@@ -196,6 +247,11 @@ public actor GatewayTransport {
                                      sessionID: params["session_id"]?.stringValue ?? "",
                                      payload: params["payload"],
                                      inboundSequence: frameSequence)
+            if event.type == "gateway.ready" {
+                sawReady = true
+                readyWaiter?.resume()
+                readyWaiter = nil
+            }
             eventsCont.yield(event)
             return
         }
@@ -218,6 +274,7 @@ public actor GatewayTransport {
     private func finish(reason: String?) {
         state = .disconnected(reason: reason)
         task = nil
+        failReadyWaiter(GatewayError(code: -1, message: "socket closed before gateway.ready"))
         for (_, cont) in pending {
             cont.resume(throwing: GatewayError(code: -7, message: "connection lost"))
         }

@@ -243,9 +243,13 @@ enum TranscriptHydrationMerge {
                       current: [ChatMessage], clearWhenEmpty: Bool,
                       protectedIDs: Set<UUID> = []) -> [ChatMessage] {
         guard !history.isEmpty else {
-            // Clearing is safe only when nothing changed during the fallback.
-            // A user send, assistant delta, or error that landed while REST
-            // was suspended is newer than an empty/failed response.
+            // An empty resume/REST page must never replace a populated local
+            // transcript. Failed reconnects and flaky history fetches have
+            // blanked the open chat this way. `clearWhenEmpty` still applies
+            // to an already-empty (or system-only) local chat when rebinding.
+            if current.contains(where: { $0.author != .system }) {
+                return current
+            }
             if clearWhenEmpty, current == baseline,
                current.allSatisfy({ $0.author == .system }) {
                 return []
@@ -399,13 +403,25 @@ extension AppModel {
         let runtime = CanonicalChatRuntime.shared
 
         // Coalesce: a double tap, or a tap racing a deep link, must resolve
-        // once (plugin.js:2742).
-        if let inflight = runtime.opens[botID] {
-            await inflight.value
-            return
+        // once (plugin.js:2742). Never await that resolution — the Hermes
+        // default forever-chat is hundreds of messages; Mini stalled >10s
+        // writing the resume frame (`ws write slow`). First paint is local
+        // rows or the REST latest page, not that WS payload.
+        if runtime.opens[botID] != nil { return }
+        kickOpenChatLatestPageIfPossible(botID: botID)
+
+        let openingChat = chat(for: botID)
+        let showOpeningPlaceholder = openingChat.messages.isEmpty
+        if showOpeningPlaceholder {
+            openingChat.isOpeningCanonicalChat = true
         }
 
         let task = Task { @MainActor [weak self] in
+            defer {
+                if showOpeningPlaceholder {
+                    self?.chat(for: botID).isOpeningCanonicalChat = false
+                }
+            }
             guard let self else { return }
             // A send that beat the tap owns an attach. Let it settle before
             // touching the binding, so the rebind below cannot be undone by a
@@ -445,7 +461,11 @@ extension AppModel {
                 _ = try await self.attachCanonicalSession(
                     botID: botID, route: route, client: client,
                     hydrate: true, honorsExplicitBinding: false)
-                await self.refreshContext(botID: botID)
+                // Context meter is ancillary. Never hold first paint behind
+                // session.context_breakdown of a 360k-token default chat.
+                Task { @MainActor [weak self] in
+                    await self?.refreshContext(botID: botID)
+                }
             } catch is CancellationError {
                 // Superseded by another attach; that one owns the outcome.
             } catch {
@@ -453,12 +473,10 @@ extension AppModel {
             }
         }
         runtime.opens[botID] = task
-        // Released in a defer, and only if the slot is still ours: a tap that
-        // arrived between this task finishing and the slot being cleared would
-        // otherwise await an already-finished resolution and return having
-        // done nothing, leaving that tap on whatever chat was bound.
-        defer { if runtime.opens[botID] == task { runtime.opens[botID] = nil } }
-        await task.value
+        Task { @MainActor in
+            await task.value
+            if runtime.opens[botID] == task { runtime.opens[botID] = nil }
+        }
     }
 
     func ambiguousCanonicalKickoffOwning(botID: String,
@@ -881,46 +899,78 @@ extension AppModel {
                         gatewayGeneration: Int,
                         durableID: String? = nil) async -> CanonicalAttach {
         let chat = chat(for: botID)
-        let rebinding = chat.storedSessionID != target
+        let rebinding = !OpenChatHistoryPolicy.sameBinding(
+            chat.storedSessionID, target: target, durableID: durableID)
+        var pageTask: Task<JSONValue?, Error>?
         do {
             try Task.checkCancellation()
-            // Full projection in the ack: `defer_history` returns a bounded
-            // stub (methods_session.py:434-439) and leaves history to a REST
-            // shape that has proven flaky, so one round trip with
-            // authoritative rows is the better trade — the same one
-            // `openStoredSession` makes.
-            let live = try await client.resumeSession(target, profile: route.profile,
-                                                      deferHistory: false)
+            // Bind with a deferred resume so first paint is not the full
+            // forever-chat projection. The newest REST page is the open-chat
+            // history window; a flaky REST read keeps the stub/cache instead
+            // of failing the open. Mutation-proof paths still request a
+            // full projection.
+            let restTarget = OpenChatHistoryPolicy.attachRestTarget(
+                target, durableID: durableID, canonicalTitle: Self.canonicalChatTitle)
+            pageTask = hydrate && restTarget != nil
+                ? Task {
+                    try await client.latestSessionMessages(
+                        storedID: restTarget ?? target, profile: route.profile)
+                }
+                : nil
+            // REST latest page is first paint. Do not wait for session.resume
+            // of the 584-msg default chat (Mini `ws write slow >10s`).
+            if hydrate, let restTarget {
+                let expectedChatID = ObjectIdentifier(chat)
+                let expectedGeneration = gatewayGeneration
+                Task { @MainActor [weak self] in
+                    let page = try? await pageTask?.value
+                    self?.paintOpenChatLatestPage(
+                        page, botID: botID, expectedStoredID: restTarget,
+                        expectedGeneration: expectedGeneration,
+                        expectedChatID: expectedChatID)
+                }
+            }
+            let live = try await client.resumeSession(
+                target, profile: route.profile,
+                deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
             try Task.checkCancellation()
             guard profileLifecycleAcceptsGatewaySnapshot(
                 route: route, client: client, generation: gatewayGeneration) else {
+                pageTask?.cancel()
                 throw CancellationError()
             }
             guard !live.sessionID.isEmpty else {
+                pageTask?.cancel()
                 return .failed(GatewayError(code: -8, message: "session.resume returned no id"))
             }
             // `target` may have been the TITLE; the ack carries the real key.
             let stored = durableID ?? (live.storedSessionID.isEmpty ? target : live.storedSessionID)
             adopt(live, storedID: stored, botID: botID,
                   sourceGatewayID: route.gatewayID)
-            // Seed the resume snapshot before REST yields. Any message.delta
-            // that lands during fallback then extends this exact live row and
-            // hydration's merge preserves the newer value.
+            // Identity + inflight only. A gateway that ignored defer_history
+            // must not replace the REST/local window with the full dump.
             replayInflight(live, botID: botID, replacingTranscript: rebinding)
             if hydrate {
-                try await hydrateCanonical(live, botID: botID, profile: route.profile,
-                                           client: client, clearWhenEmpty: rebinding)
-                guard profileLifecycleAcceptsGatewaySnapshot(
-                    route: route, client: client, generation: gatewayGeneration) else {
-                    throw CancellationError()
+                Task { @MainActor [weak self] in
+                    try? await self?.hydrateOpenChat(
+                        live, botID: botID, profile: route.profile,
+                        client: client, storedID: stored, clearWhenEmpty: rebinding,
+                        prefetchedPage: {
+                            guard let pageTask else { return nil }
+                            return try await pageTask.value
+                        })
                 }
+            } else {
+                pageTask?.cancel()
             }
             replayPendingPrompts(live, sourceGatewayID: route.gatewayID)
             return .attached(sessionID: live.sessionID, storedID: stored)
         } catch let error as GatewayError where error.code == GatewayError.storedSessionGone {
+            pageTask?.cancel()
             forget(target, botID: botID)
             return .missing
         } catch {
+            pageTask?.cancel()
             return .failed(error)
         }
     }
@@ -1094,6 +1144,7 @@ extension AppModel {
         chat.usage = nil
         chat.contextSegments = []
         chat.messages = []
+        chat.resetTranscriptWindow()
     }
 
     /// A roster tap may discard a scratch binding only after two successful
@@ -1137,6 +1188,203 @@ extension AppModel {
     }
 
     // MARK: Hydration
+
+    /// Last-known durable key so open-chat can fetch the REST latest page
+    /// before `session.resume` returns — or without waiting for it at all.
+    func cachedOpenChatStoredID(botID: String) -> String? {
+        if let stored = chats[botID]?.storedSessionID, !stored.isEmpty { return stored }
+        if let identity = LiveRuntime.shared.canonicalSessionByBot[botID] {
+            let id = identity.resolvedID ?? identity.id
+            if !id.isEmpty { return id }
+        }
+        if let last = LiveRuntime.shared.lastSessionByBot[botID], !last.isEmpty {
+            return last
+        }
+        let profile = GatewayBotRoute(qualifiedID: botID)?.profile ?? botID
+        if let gatewayID = LiveRuntime.shared.gatewayID,
+           let row = ConnectionRegistry.shared.secondaryRosters[gatewayID]?.profiles
+            .first(where: { $0.name == profile }) {
+            let id = row.canonicalResolvedID ?? row.canonicalSessionID
+            if let id, !id.isEmpty { return id }
+        }
+        return nil
+    }
+
+    func kickOpenChatLatestPageIfPossible(botID: String) {
+        guard let stored = cachedOpenChatStoredID(botID: botID) else { return }
+        guard gatewayRoute(for: botID) ?? stateRoute(for: botID) != nil else { return }
+        let expectedChatID = ObjectIdentifier(chat(for: botID))
+        let expectedGeneration = LiveRuntime.shared.generation
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let route = self.gatewayRoute(for: botID) ?? self.stateRoute(for: botID)
+            else { return }
+            let client: GatewayClient
+            do {
+                client = try await self.routedClient(for: route)
+            } catch {
+                return
+            }
+            let page = try? await client.latestSessionMessages(
+                storedID: stored, profile: route.profile)
+            self.paintOpenChatLatestPage(
+                page, botID: botID, expectedStoredID: stored,
+                expectedGeneration: expectedGeneration,
+                expectedChatID: expectedChatID)
+        }
+    }
+
+    func paintOpenChatLatestPage(_ payload: JSONValue?, botID: String,
+                                 expectedStoredID: String? = nil,
+                                 expectedGeneration: Int? = nil,
+                                 expectedChatID: ObjectIdentifier? = nil) {
+        guard let payload else { return }
+        if let expectedGeneration, expectedGeneration != LiveRuntime.shared.generation {
+            return
+        }
+        let chat = chat(for: botID)
+        if let expectedChatID, ObjectIdentifier(chat) != expectedChatID { return }
+        guard OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: chat.storedSessionID, expectedStoredID: expectedStoredID)
+        else { return }
+        let page = Self.chatMessages(fromTranscript: payload)
+        guard !page.isEmpty else { return }
+        // Prefetch may land after the deferred stub is already on screen.
+        // Durable stub/cache rows are first-paint placeholders, not optimistic
+        // sends; only in-flight / unpersisted rows ride through the window.
+        let live = chat.messages.filter { message in
+            message.rowID == nil || message.isStreaming
+                || message.toolCalls.contains(where: { $0.state == .running })
+        }
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+        chat.messages = TranscriptHydrationMerge.merge(
+            history: page, baseline: live, current: live,
+            clearWhenEmpty: false, protectedIDs: protectedIDs)
+        if !protectedIDs.isEmpty {
+            let visible = Set(chat.messages.map(\.id))
+            ChatRuntime.shared.retainedFailureRows[chatID] =
+                protectedIDs.intersection(visible)
+        }
+        chat.transcriptHasOlder = OpenChatHistoryPolicy.hasOlderMessages(
+            pageCount: page.count, limit: OpenChatHistoryPolicy.firstPageLimit,
+            source: .latestPage)
+        chat.transcriptOlderOffset = page.count
+        chat.isLoadingOlderTranscript = false
+    }
+
+    /// Thin wrappers so package tests can keep calling AppModel without
+    /// hopping onto the main actor. Logic lives on `OpenChatHistoryPolicy`.
+    nonisolated static func attachRestTarget(_ target: String, durableID: String?) -> String? {
+        OpenChatHistoryPolicy.attachRestTarget(
+            target, durableID: durableID, canonicalTitle: canonicalBotChatTitle)
+    }
+
+    nonisolated static func sameOpenChatBinding(_ stored: String?, target: String,
+                                               durableID: String?) -> Bool {
+        OpenChatHistoryPolicy.sameBinding(stored, target: target, durableID: durableID)
+    }
+
+    /// Open-chat hydration: paint the deferred stub immediately, then merge
+    /// the newest REST page. A REST failure must not fail the bind.
+    private func hydrateOpenChat(_ live: LiveSession, botID: String, profile: String,
+                                 client: GatewayClient, storedID: String,
+                                 clearWhenEmpty: Bool,
+                                 prefetchedPage: (@MainActor () async throws -> JSONValue?)? = nil
+    ) async throws {
+        let chat = chat(for: botID)
+        let chatID = ObjectIdentifier(chat)
+        let hydrationGeneration = LiveRuntime.shared.generation
+        let sourceGatewayID = gatewayRoute(for: botID)?.gatewayID
+        let durableTarget = storedID.trimmingCharacters(in: .whitespacesAndNewlines)
+        var attempt = 0
+        while true {
+            do {
+                try await Self.hydrateOpenChatTranscript(
+                    chat: chat,
+                    resumeMessages: OpenChatHistoryPolicy.openChatResumeMessages(
+                        live.messages,
+                        historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory),
+                    historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory,
+                    clearWhenEmpty: clearWhenEmpty,
+                    latestPage: {
+                        if let prefetchedPage, attempt == 0 {
+                            do {
+                                if let page = try await prefetchedPage() { return page }
+                            } catch {
+                                if let timeout = CanonicalHydrationTimeout.wraps(
+                                    error, storedID: durableTarget) {
+                                    throw timeout
+                                }
+                            }
+                        }
+                        guard !durableTarget.isEmpty else { return nil }
+                        do {
+                            return try await client.latestSessionMessages(
+                                storedID: durableTarget, profile: profile)
+                        } catch {
+                            if let timeout = CanonicalHydrationTimeout.wraps(
+                                error, storedID: durableTarget) {
+                                throw timeout
+                            }
+                            throw error
+                        }
+                    },
+                    accepts: {
+                        guard LiveRuntime.shared.generation == hydrationGeneration,
+                              let owner = chats[botID], ObjectIdentifier(owner) == chatID,
+                              owner.sessionID == live.sessionID,
+                              owner.storedSessionID == storedID,
+                              let route = gatewayRoute(for: botID) else { return false }
+                        return route.gatewayID == sourceGatewayID && route.profile == profile
+                    })
+                break
+            } catch let timeout as CanonicalHydrationTimeout {
+                if attempt == 0 && timeout.storedID == durableTarget {
+                    attempt += 1
+                    continue
+                }
+                break
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Bind already succeeded. Keep stub/cache rather than
+                // reporting the chat as unopenable.
+                break
+            }
+        }
+        if let lease = CanonicalChatRuntime.shared.ambiguousKickoffs[botID],
+           CanonicalChatRuntime.shared.kickoffs[botID] == lease.id,
+           lease.sessionID == live.sessionID,
+           lease.storedID.isEmpty || chat.storedSessionID == lease.storedID,
+           canonicalKickoffHasEvidence(lease, live: live) {
+            finishCanonicalKickoff(lease)
+        }
+        if let fence = ChatRuntime.shared.transcriptFences[botID],
+           let sourceGatewayID,
+           let storedID = chat.storedSessionID,
+           fence.acceptsAuthoritativeHydration(
+               gatewayID: sourceGatewayID, profile: profile, storedID: storedID,
+               generation: hydrationGeneration,
+               currentGeneration: LiveRuntime.shared.generation),
+           (fence.chatID == nil || fence.chatID == ObjectIdentifier(chat)),
+           let proof = fence.effectProof,
+           proof.proves(chat.messages) || proof.proves(live) {
+            ChatRuntime.shared.transcriptFences[botID] = nil
+        }
+        let hydratedRows = chat.messages
+        for (_, fence) in ChatRuntime.shared.offlineComposeFences {
+            guard fence.botID == botID, fence.route.gatewayID == sourceGatewayID,
+                  fence.route.profile == profile,
+                  fence.storedID == (chat.storedSessionID ?? ""),
+                  fence.chatID == ObjectIdentifier(chat),
+                  Self.provesOfflineComposeDelivery(fence, rows: hydratedRows) else { continue }
+            retireProvenOfflineCompose(
+                fence, running: live.running,
+                retainedInflight: live.retainedInflight,
+                authoritativeRows: hydratedRows)
+        }
+    }
 
     /// Replace the transcript with the stored conversation. The resume ack's
     /// projection is primary (it is the shape every surface reads,
@@ -1224,6 +1472,91 @@ extension AppModel {
         }
         try Task.checkCancellation()
         guard accepts() else { throw CancellationError() }
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+        chat.messages = TranscriptHydrationMerge.merge(
+            history: history, baseline: baseline, current: chat.messages,
+            clearWhenEmpty: clearWhenEmpty, protectedIDs: protectedIDs)
+        if !protectedIDs.isEmpty {
+            let visible = Set(chat.messages.map(\.id))
+            ChatRuntime.shared.retainedFailureRows[chatID] =
+                protectedIDs.intersection(visible)
+        }
+    }
+
+    /// Open-chat hydration. The deferred resume stub is painted before the
+    /// REST page suspends, so first paint is not the full history. A larger
+    /// resume projection (old gateway ignored `defer_history`) is kept.
+    static func hydrateOpenChatTranscript(
+        chat: ChatState,
+        resumeMessages: [JSONValue],
+        historyDeferred: Bool,
+        clearWhenEmpty: Bool,
+        firstPageLimit: Int = OpenChatHistoryPolicy.firstPageLimit,
+        latestPage: @MainActor () async throws -> JSONValue?,
+        accepts: @MainActor () -> Bool
+    ) async throws {
+        let stub = Self.chatMessages(fromTranscript: .array(resumeMessages))
+        var stubSnapshot: [ChatMessage] = []
+        if !stub.isEmpty {
+            try Task.checkCancellation()
+            guard accepts() else { throw CancellationError() }
+            applyHydratedHistory(
+                stub, to: chat, baseline: chat.messages,
+                clearWhenEmpty: false)
+            stubSnapshot = chat.messages
+        }
+
+        guard OpenChatHistoryPolicy.needsLatestPage(
+            historyDeferred: historyDeferred, resumeMessageCount: stub.count)
+        else {
+            chat.resetTranscriptWindow()
+            return
+        }
+
+        let payload = try await latestPage()
+        try Task.checkCancellation()
+        guard accepts() else { throw CancellationError() }
+        guard let payload else {
+            if stub.isEmpty {
+                applyHydratedHistory(
+                    [], to: chat, baseline: chat.messages,
+                    clearWhenEmpty: clearWhenEmpty)
+            }
+            return
+        }
+
+        let page = Self.chatMessages(fromTranscript: payload)
+        let source = OpenChatHistoryPolicy.authoritativeSource(
+            resumeCount: stub.count, pageCount: page.count)
+        if source == .resumeProjection {
+            chat.resetTranscriptWindow()
+            return
+        }
+        // The stub is already on screen. Only rows that arrived or changed
+        // after that paint are newer than the REST window.
+        let live = OpenChatHistoryPolicy.rowsNewerThanStub(
+            current: chat.messages, stubSnapshot: stubSnapshot)
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+        chat.messages = TranscriptHydrationMerge.merge(
+            history: page, baseline: live, current: live,
+            clearWhenEmpty: clearWhenEmpty, protectedIDs: protectedIDs)
+        if !protectedIDs.isEmpty {
+            let visible = Set(chat.messages.map(\.id))
+            ChatRuntime.shared.retainedFailureRows[chatID] =
+                protectedIDs.intersection(visible)
+        }
+        chat.transcriptHasOlder = OpenChatHistoryPolicy.hasOlderMessages(
+            pageCount: page.count, limit: firstPageLimit, source: source)
+        chat.transcriptOlderOffset = page.count
+        chat.isLoadingOlderTranscript = false
+    }
+
+    private static func applyHydratedHistory(_ history: [ChatMessage],
+                                             to chat: ChatState,
+                                             baseline: [ChatMessage],
+                                             clearWhenEmpty: Bool) {
         let chatID = ObjectIdentifier(chat)
         let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
         chat.messages = TranscriptHydrationMerge.merge(
@@ -1329,14 +1662,12 @@ extension GatewayClient {
     ///   durable display history; without them the transcript silently ends at
     ///   the compaction boundary (hermes_state.py:10155-10161).
     func latestSessionMessages(storedID: String, profile: String?,
-                               limit: Int = 200) async throws -> JSONValue {
-        var query = [URLQueryItem(name: "limit", value: String(limit)),
-                     URLQueryItem(name: "order", value: "latest"),
-                     URLQueryItem(name: "include_compacted", value: "true")]
-        if let profile, !profile.isEmpty {
-            query.insert(URLQueryItem(name: "profile", value: profile), at: 0)
-        }
-        return try await restJSON(path: "api/sessions/\(storedID)/messages", query: query)
+                               limit: Int = OpenChatHistoryPolicy.firstPageLimit,
+                               offset: Int = 0) async throws -> JSONValue {
+        try await restJSON(
+            path: "api/sessions/\(storedID)/messages",
+            query: OpenChatHistoryPolicy.latestMessagesQuery(
+                profile: profile, limit: limit, offset: offset))
     }
 }
 
@@ -1374,6 +1705,43 @@ extension AppModel {
             } catch {
                 OwnedSessionHidingFailure.record(error, gatewayID: gatewayID)
             }
+        }
+    }
+
+    /// Prepend the next older REST page. Honest about remaining history:
+    /// a short page ends the window.
+    public func loadOlderTranscript(botID: String) async {
+        let botID = resolvedBotID(botID)
+        guard mode == .live else { return }
+        let chat = chat(for: botID)
+        guard chat.transcriptHasOlder, !chat.isLoadingOlderTranscript,
+              let stored = chat.storedSessionID, !stored.isEmpty,
+              let route = gatewayRoute(for: botID) else { return }
+        chat.isLoadingOlderTranscript = true
+        let offset = chat.transcriptOlderOffset
+        let storedID = stored
+        let chatID = ObjectIdentifier(chat)
+        defer {
+            if chats[botID].map({ ObjectIdentifier($0) == chatID }) == true {
+                chat.isLoadingOlderTranscript = false
+            }
+        }
+        do {
+            let client = try await routedClient(for: route)
+            let payload = try await client.latestSessionMessages(
+                storedID: storedID, profile: route.profile, offset: offset)
+            guard chats[botID].map({ ObjectIdentifier($0) == chatID }) == true,
+                  chat.storedSessionID == storedID else { return }
+            let older = Self.chatMessages(fromTranscript: payload)
+            chat.messages = OpenChatHistoryPolicy.prepend(
+                existing: chat.messages, older: older)
+            if older.count < OpenChatHistoryPolicy.firstPageLimit {
+                chat.transcriptHasOlder = false
+            } else {
+                chat.transcriptOlderOffset = offset + older.count
+            }
+        } catch {
+            // Keep the visible window; the user can retry.
         }
     }
 

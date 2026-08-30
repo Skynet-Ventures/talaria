@@ -320,11 +320,12 @@ extension AppModel {
 
     /// Deterministic focused seam preserving the production transition order.
     func connectGateway(
-        baseURL: URL,
+        baseURL rawBase: URL,
         credential: GatewayCredential,
         connectionOperation: (GatewayClient) async throws -> Void,
         adoptionOperations: ConnectedGatewayAdoptionOperations
     ) async throws {
+        let baseURL = ConnectionRegistry.shared.repairStoredBase(matching: rawBase)
         invalidateManagedCloudBootEpisodeUnlessOwnedByCurrentTask(sourceURL: baseURL)
         let runtime = LiveRuntime.shared
 
@@ -415,6 +416,16 @@ extension AppModel {
             for await event in stream { self?.handle(event: event) }
         }
 
+        // Last-known roster is first paint. A 15s ready wait on an
+        // unreachable Tailscale hop must not hold the home screen empty.
+        if let saved = registry.gateway(forURL: baseURL),
+           paintLastKnownRosterIfAvailable(gatewayID: saved.id) {
+            mode = .live
+            isOffline = true
+            registry.noteState(.offline, forURL: baseURL)
+            connections = registry.rows
+        }
+
         do {
             try await connectionOperation(client)
         } catch {
@@ -447,10 +458,10 @@ extension AppModel {
         }
     }
 
-    /// Publish an authenticated post-dial client, then perform ancillary world
-    /// refreshes. Exact-route recovery is signalled at the publication boundary:
-    /// a later profiles.list timeout must not strand a retained notification or
-    /// URL until some unrelated lifecycle event happens to nudge it again.
+    /// Publish an authenticated post-dial client and arm the disconnect watch.
+    /// Roster / routines / rooms run after return: a profiles.list timeout
+    /// (default RPC 120s, often ~20s with include_sessions) must not hold
+    /// launch, fail the live socket, or strand a retained notification.
     ///
     /// `rosterRefresh` is the real refresh in production and a focused failure
     /// injection in the ordering regression; source readiness itself is never
@@ -538,27 +549,49 @@ extension AppModel {
         PushCoordinator.shared.registerWithRelayIfConnected()
         #endif
 
-        try await performConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id,
-            operation: operations.refreshRoster)
-        try requireCurrentConnectionAttempt(authority)
-        await operations.refreshRoutines()
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        connections = registry.rows
-        try requireCurrentConnectionAttempt(authority)
-        await operations.hideOwnedSessions()
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        await operations.flushComposeQueue()
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        await operations.reseedRoomProjection(savedGateway.id)
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: savedGateway.id)
-        // Arm socket-loss recovery only after the initial adoption transaction
-        // can no longer resume and CAS-remove this same pooled client.
+        // Arm the disconnect watch as soon as the WS is live. Waiting for
+        // profiles.list (default RPC 120s, often ~20s with include_sessions)
+        // left launch and first-open sitting on a live socket with no
+        // monitor and no chats.
         startSupervisedMonitor(for: client, generation: authority.generation)
+        connections = registry.rows
+
+        Task { @MainActor [weak self] in
+            await self?.resyncSurfacesAfterConnect(
+                client: client, generation: authority.generation,
+                gatewayID: savedGateway.id, operations: operations)
+        }
+    }
+
+    private func resyncSurfacesAfterConnect(
+        client: GatewayClient,
+        generation: Int,
+        gatewayID: String,
+        operations: ConnectedGatewayAdoptionOperations
+    ) async {
+        func stillThisLink() -> Bool {
+            LiveRuntime.shared.generation == generation
+                && self.client.map(ObjectIdentifier.init) == ObjectIdentifier(client)
+                && LiveRuntime.shared.gatewayID == gatewayID
+        }
+        guard stillThisLink() else { return }
+        // Launch/first-paint no longer awaits connect. If the user already
+        // opened a chat while we were live+offline, bind it now — do not
+        // leave them on an empty transcript until a second tap.
+        if let openBotID {
+            await enterCanonicalChat(botID: openBotID)
+        }
+        guard stillThisLink() else { return }
+        try? await operations.refreshRoster()
+        guard stillThisLink() else { return }
+        await operations.refreshRoutines()
+        guard stillThisLink() else { return }
+        connections = ConnectionRegistry.shared.rows
+        await operations.hideOwnedSessions()
+        guard stillThisLink() else { return }
+        await operations.flushComposeQueue()
+        guard stillThisLink() else { return }
+        await operations.reseedRoomProjection(gatewayID)
     }
 
     private func isCurrentConnectionAttempt(_ authority: PrimaryConnectionAttemptAuthority) -> Bool {
@@ -592,39 +625,6 @@ extension AppModel {
         guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
             throw CancellationError()
         }
-    }
-
-    private func requireCurrentConnectionAttempt(
-        _ authority: PrimaryConnectionAttemptAuthority,
-        poolSnapshot: GatewayClientPool.ConnectionSnapshot,
-        gatewayID: String
-    ) async throws {
-        guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
-            _ = await ConnectionRegistry.shared.clientPool.disconnectIfCurrent(
-                poolSnapshot, for: gatewayID)
-            throw CancellationError()
-        }
-    }
-
-    private func performConnectionAttempt(
-        _ authority: PrimaryConnectionAttemptAuthority,
-        poolSnapshot: GatewayClientPool.ConnectionSnapshot,
-        gatewayID: String,
-        operation: () async throws -> Void
-    ) async throws {
-        try requireCurrentConnectionAttempt(authority)
-        do {
-            try await operation()
-        } catch {
-            guard !Task.isCancelled, isCurrentConnectionAttempt(authority) else {
-                _ = await ConnectionRegistry.shared.clientPool.disconnectIfCurrent(
-                    poolSnapshot, for: gatewayID)
-                throw CancellationError()
-            }
-            throw error
-        }
-        try await requireCurrentConnectionAttempt(
-            authority, poolSnapshot: poolSnapshot, gatewayID: gatewayID)
     }
 
     /// Deliberate disconnect (Settings → Connections). No reconnect follows.
@@ -923,6 +923,31 @@ extension AppModel {
             ConnectionRegistry.shared.noteBotCount(bots.count, forURL: base)
             connections = ConnectionRegistry.shared.rows
         }
+        if let gatewayID = runtime.gatewayID {
+            ConnectionRegistry.shared.rememberLiveRoster(profiles, gatewayID: gatewayID)
+        }
+    }
+
+    /// Paint persisted last-known rows so first paint does not wait on
+    /// `gateway.ready`. In-memory chats/roster (background, not force-quit)
+    /// already exist and are left alone.
+    @discardableResult
+    func paintLastKnownRosterIfAvailable(gatewayID: String) -> Bool {
+        guard bots.isEmpty,
+              let cached = ConnectionRegistry.shared.secondaryRosters[gatewayID],
+              !cached.profiles.isEmpty else { return false }
+        bots = cached.profiles.map { profile in
+            Bot(id: profile.name,
+                job: profile.job,
+                shape: profile.shape ?? BotCosmetics.derivedShape(forName: profile.name),
+                hue: profile.hue ?? BotCosmetics.derivedHue(forName: profile.name),
+                preview: profile.preview.isEmpty ? "Ready when you are." : profile.preview,
+                previewTime: Self.shortTime(profile.lastActive),
+                description: profile.job,
+                title: profile.title,
+                rawDisplayName: profile.rawDisplayName)
+        }
+        return true
     }
 
     /// Deterministic across launches (String.hashValue is seeded per-process).
@@ -965,9 +990,52 @@ extension AppModel {
         // raises the dot again on a chat the user is reading
         // (AppModelLive+Unread.swift).
         noteChatOpened(botID)
-        guard mode == .live,
-              !isOffline || GatewayBotRoute(qualifiedID: botID) != nil else { return }
+        guard mode == .live else { return }
+        if GatewayBotRoute(qualifiedID: botID) != nil {
+            Task { @MainActor in await self.enterCanonicalChat(botID: botID) }
+            return
+        }
+        if isOffline {
+            // During the wake-redial grace, open the thread the user asked for
+            // with loading chrome instead of treating the link as dead.
+            if isWakeRedialGraceActive || isReconnecting || isSupervisedReconnectLooping {
+                let chat = chat(for: botID)
+                if chat.messages.isEmpty {
+                    chat.isOpeningCanonicalChat = true
+                }
+                Task { @MainActor in
+                    await self.enterCanonicalChatWhenReachable(botID: botID)
+                }
+            }
+            return
+        }
         Task { @MainActor in await self.enterCanonicalChat(botID: botID) }
+    }
+
+    /// Wait out a brief wake redial, then hydrate the open chat. Cold opens
+    /// keep the full loading placeholder; warm transcripts stay on screen
+    /// with a subtle reconnect indicator.
+    func enterCanonicalChatWhenReachable(botID: String) async {
+        let chat = chat(for: botID)
+        let coldOpen = chat.messages.isEmpty
+        if coldOpen { chat.isOpeningCanonicalChat = true }
+        for _ in 0..<240 {
+            if Task.isCancelled {
+                if coldOpen { chat.isOpeningCanonicalChat = false }
+                return
+            }
+            if !isOffline { break }
+            if !isWakeRedialGraceActive && !isReconnecting && !isSupervisedReconnectLooping {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        guard mode == .live, !isOffline, openBotID == botID else {
+            if coldOpen { chat.isOpeningCanonicalChat = false }
+            return
+        }
+        // `enterCanonicalChat` owns the opening flag from here.
+        await enterCanonicalChat(botID: botID)
     }
 
     /// Create-or-resume the bot's session and bind it to the chat. Coalesces

@@ -106,17 +106,60 @@ public enum GatewayCredential: Codable, Sendable, Equatable {
 // MARK: - Base URL normalization
 
 public enum GatewayURL {
+    /// `hermes serve` default bind. A pasted tailnet/LAN IP without a port
+    /// used to become `http://100.x.x.x` → TCP :80, so Mini's :9119 log never
+    /// saw the phone while the journal still printed the host.
+    public static let hermesDefaultPort = 9119
+
     /// Normalize a user-pasted base URL like desktop's connection-config.ts:
     /// prefix scheme-less input with http://, strip trailing slash, keep any
-    /// reverse-proxy path prefix.
+    /// reverse-proxy path prefix. Private / Tailscale / loopback IPs with no
+    /// port get :9119.
     public static func normalize(_ input: String) -> URL? {
         var s = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
         if !s.contains("://") { s = "http://" + s }
         while s.hasSuffix("/") { s.removeLast() }
-        guard let url = URL(string: s), url.host() != nil,
+        guard let url = URL(string: s), let host = url.host(), !host.isEmpty,
               url.scheme == "http" || url.scheme == "https" else { return nil }
-        return url
+        guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        // Scheme-less / plain HTTP private IPs used to hit :80. Explicit
+        // https keeps :443 so a TLS reverse proxy on the LAN is not rewritten
+        // to Hermes :9119 and then persisted by registry repair.
+        if comps.port == nil, comps.scheme == "http", usesHermesDefaultPort(host: host) {
+            comps.port = hermesDefaultPort
+        }
+        return comps.url
+    }
+
+    /// Scheme + host + port for banners and the activity journal.
+    /// `URL.host()` alone hid a missing :9119 behind `100.87.108.5`.
+    public static func originForDisplay(_ url: URL) -> String {
+        let repaired = normalize(url.absoluteString) ?? url
+        var comps = URLComponents()
+        comps.scheme = repaired.scheme
+        comps.host = repaired.host()
+        comps.port = repaired.port
+        return comps.string ?? repaired.absoluteString
+    }
+
+    /// RFC1918, CGNAT/Tailscale `100.64/10`, loopback, Tailscale ULA.
+    public static func usesHermesDefaultPort(host: String) -> Bool {
+        let h = host.lowercased()
+        if h == "localhost" { return true }
+        if h.hasPrefix("fd7a:115c:a1e0") { return true }
+        let parts = h.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else {
+            return false
+        }
+        let a = parts[0], b = parts[1]
+        if a == 10 || a == 127 { return true }
+        if a == 192 && b == 168 { return true }
+        if a == 172 && (16...31).contains(b) { return true }
+        if a == 100 && (64...127).contains(b) { return true }
+        return false
     }
 
     /// ws(s):// URL for /api/ws with the given query item.
@@ -140,9 +183,10 @@ public struct GatewayAuthClient: Sendable {
         self.session = session
     }
 
-    public func status() async throws -> GatewayStatus {
-        let (data, response) = try await session.data(
-            from: baseURL.appending(path: "api/status"))
+    public func status(timeout: TimeInterval = 15) async throws -> GatewayStatus {
+        var req = URLRequest(url: baseURL.appending(path: "api/status"))
+        req.timeoutInterval = timeout
+        let (data, response) = try await session.data(for: req)
         try Self.admitHTTPResponse(response, data: data, endpoint: "status")
         let value: JSONValue
         do {
@@ -168,9 +212,12 @@ public struct GatewayAuthClient: Sendable {
 
     /// Mint a single-use WS ticket (30 s TTL). Call immediately before every
     /// (re)connect; in gated mode legacy ?token= is rejected.
+    /// Bounded at 8s: URLSession's default 60s request clock is a first-launch
+    /// / redial stall that looks like a dead gateway.ready wait.
     public func mintWSTicket(credential: GatewayCredential) async throws -> String {
         var req = URLRequest(url: baseURL.appending(path: "api/auth/ws-ticket"))
         req.httpMethod = "POST"
+        req.timeoutInterval = 8
         apply(credential: credential, to: &req)
         let (data, response) = try await session.data(for: req)
         try Self.admitHTTPResponse(response, data: data, endpoint: "ws-ticket")
@@ -190,9 +237,11 @@ public struct GatewayAuthClient: Sendable {
 
     /// Refresh native tokens. 401 session_expired ⇒ drop tokens and re-login;
     /// 503 (provider unreachable) ⇒ keep tokens and retry later.
+    /// Same 8s HTTP bound as ws-ticket — this sits on the connect() path.
     public func refresh(_ tokens: TokenSet) async throws -> TokenSet {
         var req = URLRequest(url: baseURL.appending(path: "auth/native/refresh"))
         req.httpMethod = "POST"
+        req.timeoutInterval = 8
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(JSONValue.object([
             "refresh_token": .string(tokens.refreshToken),

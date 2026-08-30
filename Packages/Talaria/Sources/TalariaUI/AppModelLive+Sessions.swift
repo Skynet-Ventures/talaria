@@ -415,14 +415,16 @@ extension AppModel {
                     resumed = (try await resumeForTesting(), 0)
                 } else {
                     let result = try await client.resumeSessionSequenced(
-                        id, profile: route.profile, deferHistory: false)
+                        id, profile: route.profile,
+                        deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
                     resumed = (result.session, result.inboundSequence)
                 }
             } else if let resumeForTesting {
                 resumed = (try await resumeForTesting(), 0)
             } else {
                 resumed = (try await client.resumeSession(
-                    id, profile: route.profile, deferHistory: false), 0)
+                    id, profile: route.profile,
+                    deferHistory: OpenChatHistoryPolicy.resumeDefersHistory), 0)
             }
             let live = resumed.session
             func requireExactResume(_ resumed: LiveSession) throws {
@@ -691,7 +693,13 @@ extension AppModel {
         chat.isTyping = false
         chat.usage = nil
         chat.contextSegments = []
-        chat.messages = []
+        // Same durable row: keep cached messages on screen while the
+        // deferred resume + REST page catch up. A different row must not
+        // flash the conversation being left.
+        if oldStoredID != id {
+            chat.messages = []
+            chat.resetTranscriptWindow()
+        }
         ChatRuntime.shared.submitWatchdogs[botID]?.cancel()
         ChatRuntime.shared.submitWatchdogs[botID] = nil
         ChatRuntime.shared.turnFloor[botID] = nil
@@ -742,11 +750,12 @@ extension AppModel {
                 await self.attachRoutedEventsIfNeeded(client: client,
                                                       gatewayID: route.gatewayID)
                 try requireCurrentOpen()
-                // Full projection in the ack (deferHistory returns a bounded
-                // stub) — one round trip, authoritative rows, same tradeoff
-                // ensureSession makes.
-                live = try await client.resumeSession(id, profile: route.profile,
-                                                      deferHistory: false)
+                // Deferred bind + REST latest page, same contract
+                // enterCanonicalChat uses. The full projection is a mutation
+                // proof, not a first-paint payload.
+                live = try await client.resumeSession(
+                    id, profile: route.profile,
+                    deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
             }
             try requireCurrentOpen()
             guard !live.sessionID.isEmpty else {
@@ -773,11 +782,14 @@ extension AppModel {
             runtime.lastSessionByBot[botID] = stored
             self.replayInflight(live, botID: botID)
 
-            try await Self.hydrateTranscript(
+            try await Self.hydrateOpenChatTranscript(
                 chat: chat,
-                resumeMessages: live.messages,
+                resumeMessages: OpenChatHistoryPolicy.openChatResumeMessages(
+                    live.messages,
+                    historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory),
+                historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory,
                 clearWhenEmpty: true,
-                fallback: {
+                latestPage: {
                     try? await client.latestSessionMessages(storedID: stored,
                                                             profile: route.profile)
                 },

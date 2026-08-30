@@ -59,8 +59,12 @@ final class LaunchRestoreSelectionTests: XCTestCase {
     private func tearDownFixture(_ fixture: Fixture) {
         fixture.model.launchConnectOverrideForTesting = nil
         fixture.model.launchSavedGatewaysOverrideForTesting = nil
+        fixture.model.launchDialTask?.cancel()
+        fixture.model.launchDialTask = nil
         fixture.registry.setCredentialForTesting(nil, for: fixture.first)
         fixture.registry.setCredentialForTesting(nil, for: fixture.second)
+        fixture.registry.setSecondaryRosterForTesting(nil, gatewayID: fixture.first.id)
+        fixture.registry.setSecondaryRosterForTesting(nil, gatewayID: fixture.second.id)
         fixture.registry.remove(id: fixture.first.id)
         fixture.registry.remove(id: fixture.second.id)
         if let previous = fixture.previousDemoChoice {
@@ -244,5 +248,95 @@ final class LaunchRestoreSelectionTests: XCTestCase {
         XCTAssertNil(fixture.model.managedCloudBootOutage)
 
         await fixture.model.disconnectGateway()
+    }
+
+    @MainActor
+    func testCachedRosterPaintsBeforeConnectReady() async throws {
+        let fixture = try fixture()
+        defer { tearDownFixture(fixture) }
+        fixture.registry.setSecondaryRosterForTesting(
+            SecondaryRoster(
+                profiles: [SecondaryProfile(name: "hermes", job: "home",
+                                           preview: "cached line")],
+                fetchedAt: Date(), freshness: .stale),
+            gatewayID: fixture.first.id)
+        let operations = connectionOperations()
+        let gate = LaunchGate()
+        fixture.model.launchConnectOverrideForTesting = { base, credential in
+            try await fixture.model.connectGateway(
+                baseURL: base, credential: credential,
+                connectionOperation: { _ in await gate.wait() },
+                adoptionOperations: operations)
+        }
+
+        let restore = Task { @MainActor in await fixture.model.restoreWorldAtLaunch() }
+        await restore.value
+        XCTAssertTrue(fixture.model.launchWorldRestoreCompleted,
+                      "cached first paint must not sit on connect()/ready")
+        XCTAssertEqual(fixture.model.mode, .live)
+        XCTAssertTrue(fixture.model.isOffline)
+        XCTAssertEqual(fixture.model.bots.map(\.id), ["hermes"])
+        XCTAssertEqual(fixture.model.bots.first?.preview, "cached line")
+
+        let entered = await eventually { await gate.hasEntered() }
+        XCTAssertTrue(entered, "the launch dial still starts after paint")
+        XCTAssertTrue(fixture.model.isOffline)
+
+        await gate.release()
+        await fixture.model.launchDialTask?.value
+        await fixture.model.disconnectGateway()
+    }
+
+    @MainActor
+    func testLocalHistoryPaintsBeforeConnectReady() async throws {
+        let fixture = try fixture()
+        defer { tearDownFixture(fixture) }
+        let chat = fixture.model.chat(for: "hermes")
+        chat.messages = [ChatMessage(author: .user, text: "cached turn")]
+        let operations = connectionOperations()
+        let gate = LaunchGate()
+        fixture.model.launchConnectOverrideForTesting = { base, credential in
+            try await fixture.model.connectGateway(
+                baseURL: base, credential: credential,
+                connectionOperation: { _ in await gate.wait() },
+                adoptionOperations: operations)
+        }
+
+        await fixture.model.restoreWorldAtLaunch()
+        XCTAssertTrue(fixture.model.launchWorldRestoreCompleted)
+        XCTAssertEqual(fixture.model.mode, .live)
+        XCTAssertTrue(fixture.model.isOffline)
+        XCTAssertEqual(fixture.model.chat(for: "hermes").messages.map(\.text),
+                       ["cached turn"])
+
+        let entered = await eventually { await gate.hasEntered() }
+        XCTAssertTrue(entered)
+        await gate.release()
+        await fixture.model.launchDialTask?.value
+        await fixture.model.disconnectGateway()
+    }
+
+    @MainActor
+    func testRepairStoredBaseAddsHermesPortAndKeepsCredential() throws {
+        let fixture = try fixture()
+        defer { tearDownFixture(fixture) }
+        let legacy = try XCTUnwrap(URL(string: "http://100.87.108.5"))
+        fixture.registry.replaceStoredURLStringForTesting(
+            legacy.absoluteString, gatewayID: fixture.first.id)
+        fixture.registry.setCredentialForTesting(
+            .sessionToken("legacy-token"),
+            for: SavedGateway(id: fixture.first.id, name: "First",
+                              kind: fixture.first.kind,
+                              urlString: legacy.absoluteString))
+
+        let repaired = fixture.registry.repairStoredBase(matching: legacy)
+        XCTAssertEqual(repaired.absoluteString, "http://100.87.108.5:9119")
+        XCTAssertEqual(fixture.registry.gateway(forURL: repaired)?.id, fixture.first.id)
+        XCTAssertEqual(
+            fixture.registry.credential(for: try XCTUnwrap(
+                fixture.registry.gateway(forURL: repaired))),
+            .sessionToken("legacy-token"))
+        XCTAssertEqual(GatewayURL.originForDisplay(repaired),
+                       "http://100.87.108.5:9119")
     }
 }

@@ -346,6 +346,41 @@ public final class ConnectionRegistry {
         persist()
     }
 
+    /// Persist a missing Hermes port so the next dial is :9119, not :80/:443.
+    @discardableResult
+    func repairStoredBase(matching url: URL) -> URL {
+        guard let repaired = GatewayURL.normalize(url.absoluteString) else { return url }
+        guard repaired.absoluteString != url.absoluteString else { return repaired }
+        let oldKey = url.absoluteString
+        if let idx = saved.firstIndex(where: {
+            $0.urlString == oldKey || $0.urlString == repaired.absoluteString
+        }) {
+            if let previous = saved[idx].baseURL,
+               previous.absoluteString != repaired.absoluteString,
+               let credential = credential(for: saved[idx]) {
+                try? keychain.save(credential, for: repaired)
+                keychain.delete(for: previous)
+            }
+            saved[idx].urlString = repaired.absoluteString
+            persist()
+            if liveGatewayURL?.absoluteString == oldKey {
+                liveGatewayURL = repaired
+            }
+            if let override = credentialOverridesForTesting.removeValue(forKey: oldKey) {
+                credentialOverridesForTesting[repaired.absoluteString] = override
+            }
+        }
+        return repaired
+    }
+
+    /// Install a pre-normalize urlString so tests can exercise repair of
+    /// rows saved before tailnet IPs gained an implicit :9119.
+    func replaceStoredURLStringForTesting(_ urlString: String, gatewayID: String) {
+        guard let idx = saved.firstIndex(where: { $0.id == gatewayID }) else { return }
+        saved[idx].urlString = urlString
+        persist()
+    }
+
     public func gateway(forURL url: URL) -> SavedGateway? {
         saved.first { $0.urlString == url.absoluteString }
     }
@@ -404,8 +439,26 @@ public final class ConnectionRegistry {
     /// Record a status-probe answer without changing the live-source beacon.
     /// Only the primary WebSocket calls `noteState(.connected)` or
     /// `noteBotCount`; a healthy secondary must remain diagnostic state only.
+    ///
+    /// HTTP `GET /api/status` must not overwrite the live socket's state:
+    /// a reachable host after lock can look connected while the WebSocket is
+    /// half-open, and a brief status blip must not mark a live socket offline.
     internal func noteProbeHealth(_ value: Health, forURL url: URL) {
         guard let row = gateway(forURL: url) else { return }
+        if liveGatewayURL?.absoluteString == url.absoluteString,
+           let current = health[row.id] {
+            let liveOwnsState = current.state == .connected
+                || current.state == .offline
+                || current.state == .asleep
+            if liveOwnsState, value.state != current.state {
+                var merged = current
+                if let pingMS = value.pingMS { merged.pingMS = pingMS }
+                if let version = value.version { merged.version = version }
+                merged.authRequired = value.authRequired
+                health[row.id] = merged
+                return
+            }
+        }
         health[row.id] = value
     }
 
@@ -450,6 +503,18 @@ public final class ConnectionRegistry {
         secondaryRosters[gatewayID] = roster
     }
 
+    /// Snapshot the live `profiles.list` into the persisted roster cache so
+    /// the next launch can paint last-known rows before `gateway.ready`.
+    func rememberLiveRoster(_ profiles: [HermesProfile], gatewayID: String) {
+        let projection = Self.secondaryRosterProjection(from: profiles)
+        secondaryRosters[gatewayID] = SecondaryRoster(
+            profiles: projection.profiles,
+            fetchedAt: Date(),
+            freshness: projection.freshness)
+        noteBotCountForSecondary(projection.profiles.count, gatewayID: gatewayID)
+        persistRosters()
+    }
+
     /// Probe every saved gateway in parallel.
     public func probeAll() async {
         let rows = saved
@@ -468,10 +533,13 @@ public final class ConnectionRegistry {
     /// Timeout reads as `asleep` (host not answering — likely a sleeping
     /// machine); any other failure reads as `offline`.
     public func probe(_ gateway: SavedGateway) async {
-        guard let base = gateway.baseURL else {
+        guard let incoming = gateway.baseURL else {
             health[gateway.id] = Health(state: .offline)
             return
         }
+        // Legacy rows stored `http://100.x` without a port. That GET hits
+        // :80, so Mini :9119 never logs the phone. Repair before the probe.
+        let base = repairStoredBase(matching: incoming)
         noteProbeHealth(Health(state: .connecting,
                                pingMS: health[gateway.id]?.pingMS,
                                version: health[gateway.id]?.version,
@@ -481,7 +549,7 @@ public final class ConnectionRegistry {
         let clock = ContinuousClock()
         let start = clock.now
         do {
-            let status = try await auth.status()
+            let status = try await auth.status(timeout: 5)
             let elapsed = start.duration(to: clock.now)
             let ms = max(1, Int((elapsed / .milliseconds(1)).rounded()))
             noteProbeHealth(Health(state: .connected, pingMS: ms,

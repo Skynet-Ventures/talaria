@@ -65,4 +65,38 @@ final class PostBootReconnectPolicyTests: XCTestCase {
         XCTAssertEqual(PostBootReconnectPolicy.resetEpisode(for: .cleanOpen), reset)
         XCTAssertEqual(PostBootReconnectPolicy.resetEpisode(for: .manualWake), reset)
     }
+
+    func testRedialReadyTimeoutIsShorterThanTheConnectBound() {
+        XCTAssertEqual(PostBootReconnectPolicy.redialReadyTimeout, 5)
+        XCTAssertLessThan(PostBootReconnectPolicy.redialReadyTimeout, 15)
+        XCTAssertEqual(PostBootReconnectPolicy.backgroundInvalidateTimeout, 0.4)
+        XCTAssertLessThan(
+            PostBootReconnectPolicy.backgroundInvalidateTimeout,
+            PostBootReconnectPolicy.redialReadyTimeout)
+        XCTAssertEqual(PostBootReconnectPolicy.offlineChromeGrace, 8)
+        XCTAssertFalse(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: false, graceActive: false, needsReauth: false,
+            hasPostBootRecovery: false))
+        XCTAssertFalse(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: true, needsReauth: false,
+            hasPostBootRecovery: false))
+        XCTAssertTrue(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: false, needsReauth: false,
+            hasPostBootRecovery: false))
+        XCTAssertTrue(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: true, needsReauth: true,
+            hasPostBootRecovery: false))
+        XCTAssertTrue(PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: true, graceActive: true, needsReauth: false,
+            hasPostBootRecovery: true))
+
+    }
+
+    func testGatewayClientStoresRepairedHermesOrigin() async {
+        let client = GatewayClient(
+            baseURL: URL(string: "http://100.87.108.5")!,
+            credential: .sessionToken("x"))
+        let origin = await client.baseURL
+        XCTAssertEqual(origin.absoluteString, "http://100.87.108.5:9119")
+    }
 }

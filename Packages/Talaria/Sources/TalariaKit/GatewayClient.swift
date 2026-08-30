@@ -600,7 +600,15 @@ public actor GatewayClient {
     private let keychain: KeychainStore
     private var trafficAdmission: TrafficAdmission?
     typealias RESTExecutor = @Sendable (URLRequest, Int?) async throws -> (Data, URLResponse)
+    typealias RPCExecutor = @Sendable (String, JSONValue?, TimeInterval) async throws -> JSONValue
     private let restExecutor: RESTExecutor
+    /// Package-test readiness seam. Production always reads the exact current
+    /// transport state; this only makes half-open/closed wake policy
+    /// deterministic without opening a real WebSocket.
+    private var foregroundReadinessForTesting: Bool?
+    /// Package-test RPC seam used by foreground liveness and other
+    /// transport-free lifecycle tests.
+    private var rpcExecutorForTesting: RPCExecutor?
 
     /// Re-published stream of all events from the current transport.
     public private(set) var eventsTask: Task<Void, Never>?
@@ -608,8 +616,9 @@ public actor GatewayClient {
 
     public init(baseURL: URL, credential: GatewayCredential,
                 keychain: KeychainStore = KeychainStore()) {
-        self.baseURL = baseURL
-        self.auth = GatewayAuthClient(baseURL: baseURL)
+        let wire = GatewayURL.normalize(baseURL.absoluteString) ?? baseURL
+        self.baseURL = wire
+        self.auth = GatewayAuthClient(baseURL: wire)
         self.credential = credential
         self.keychain = keychain
         self.restExecutor = { request, limit in
@@ -626,8 +635,9 @@ public actor GatewayClient {
     init(baseURL: URL, credential: GatewayCredential,
          keychain: KeychainStore = KeychainStore(),
          restExecutor: @escaping RESTExecutor) {
-        self.baseURL = baseURL
-        self.auth = GatewayAuthClient(baseURL: baseURL)
+        let wire = GatewayURL.normalize(baseURL.absoluteString) ?? baseURL
+        self.baseURL = wire
+        self.auth = GatewayAuthClient(baseURL: wire)
         self.credential = credential
         self.keychain = keychain
         self.restExecutor = restExecutor
@@ -675,6 +685,9 @@ public actor GatewayClient {
 
     public var isConnected: Bool {
         get async {
+            if let foregroundReadinessForTesting {
+                return foregroundReadinessForTesting
+            }
             guard let transport else { return false }
             return await transport.state == .ready
         }
@@ -688,21 +701,120 @@ public actor GatewayClient {
         credential == candidate
     }
 
+    /// Adopt the registry/Keychain credential before a wake redial.
+    /// Port repair and OAuth refresh can leave the in-memory client holding
+    /// a different token set than the saved row; without this, the reconnect
+    /// fence returns `reconnect.stale authority` and never dials.
+    public func adoptCredential(_ replacement: GatewayCredential) {
+        credential = replacement
+    }
+
     /// Deterministic seam for credential-rotation lifecycle tests.
     func replaceCredentialForTesting(_ replacement: GatewayCredential) {
-        credential = replacement
+        adoptCredential(replacement)
+    }
+
+    func setForegroundReadinessForTesting(_ ready: Bool?) {
+        foregroundReadinessForTesting = ready
+    }
+
+    func setRPCExecutorForTesting(_ executor: RPCExecutor?) {
+        rpcExecutorForTesting = executor
+    }
+
+    /// Validate a socket immediately after iOS foregrounds the app. This is a
+    /// short, bounded application RPC rather than a belief based on
+    /// URLSessionWebSocketTask state: suspended half-open links often still
+    /// report ready until their first write/response boundary.
+    ///
+    /// Current Hermes answers `{ "ok": true }`. A JSON-RPC method-not-found
+    /// reply still proves the link is alive (older gateways). Timeouts,
+    /// malformed replies, and transport errors enter supervised reconnect.
+    /// Local lifecycle traffic rejection is not a link failure.
+    public func validateForegroundLiveness() async -> ForegroundSocketLiveness {
+        let ready: Bool
+        if let foregroundReadinessForTesting {
+            ready = foregroundReadinessForTesting
+        } else if let transport {
+            ready = await transport.state == .ready
+        } else {
+            ready = false
+        }
+        guard ready else { return .reconnectRequired }
+
+        do {
+            let result = try await rpc(
+                "gateway.ping", .object([:]), timeout: ForegroundSocketPolicy.pingTimeout)
+            return ForegroundSocketPolicy.outcome(transportReady: true, result: .success(result))
+        } catch {
+            return ForegroundSocketPolicy.outcome(transportReady: true, result: .failure(error))
+        }
+    }
+
+    /// Drop the parked transport without sending. Used when iOS is about to
+    /// suspend the process — any write onto that socket can wedge URLSession.
+    ///
+    /// Clears the live reference first so a concurrent wake dial does not
+    /// wait on the same half-open socket. Close is bounded: a hung actor hop
+    /// on a parked WebSocket must not block `reconnectNow()` forever.
+    public func invalidateTransportForBackground() async {
+        let previous = transport
+        transport = nil
+        eventsTask?.cancel()
+        eventsTask = nil
+        guard let previous else { return }
+        await Self.closeTransportBounded(
+            previous, seconds: PostBootReconnectPolicy.backgroundInvalidateTimeout)
+    }
+
+    /// Retire a transport without letting teardown stall the caller.
+    private static func closeTransportBounded(
+        _ transport: GatewayTransport, seconds: TimeInterval
+    ) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await transport.close() }
+            group.addTask {
+                let ns = UInt64(max(seconds, 0) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: ns)
+            }
+            await group.next()
+            group.cancelAll()
+        }
     }
 
     /// Connect (or reconnect). Refreshes OAuth tokens when near expiry and
     /// mints a fresh single-use WS ticket per attempt.
-    public func connect() async throws {
+    ///
+    /// `readyTimeout` is the `gateway.ready` bound (default 15s). Redials
+    /// pass `PostBootReconnectPolicy.redialReadyTimeout` so an unreachable
+    /// host fails into the next visible try instead of one frozen 15s wait.
+    public func connect(readyTimeout: TimeInterval = 15) async throws {
+        try Task.checkCancellation()
+        // Session-token connects used to go straight to WebSocket and wait
+        // 15s for gateway.ready. Mini never logged the phone: no HTTP, and a
+        // missing :9119 hit :80. Probe /api/status first (unauthenticated,
+        // finite) so the journal names the exact origin and serve.log sees
+        // the client before any ready wait.
+        let wire = GatewayURL.normalize(baseURL.absoluteString) ?? baseURL
+        let wireAuth = GatewayAuthClient(baseURL: wire)
+        let probeTimeout = min(3, readyTimeout)
+        do {
+            _ = try await wireAuth.status(timeout: probeTimeout)
+        } catch let http as GatewayHTTPError {
+            // Managed-cloud boot retries 502/503/504. Do not erase the type.
+            throw http
+        } catch {
+            throw GatewayError(
+                code: -2,
+                message: "status \(GatewayURL.originForDisplay(wire)): \(error.localizedDescription)")
+        }
         if case .oauth(let tokens) = credential, tokens.needsRefresh {
             do {
-                let refreshed = try await auth.refresh(tokens)
+                let refreshed = try await wireAuth.refresh(tokens)
                 credential = .oauth(refreshed)
-                try? keychain.save(credential, for: baseURL)
+                try? keychain.save(credential, for: wire)
             } catch AuthError.sessionExpired {
-                keychain.delete(for: baseURL)
+                keychain.delete(for: wire)
                 throw AuthError.sessionExpired
             } catch AuthError.providerUnreachable {
                 // Keep tokens; the access token may still be valid.
@@ -711,23 +823,46 @@ public actor GatewayClient {
 
         let ticket: String?
         if case .oauth = credential {
-            ticket = try await auth.mintWSTicket(credential: credential)
+            ticket = try await wireAuth.mintWSTicket(credential: credential)
         } else {
             ticket = nil
         }
 
-        let url = try auth.webSocketURL(credential: credential, ticket: ticket)
+        try Task.checkCancellation()
+        let url = try wireAuth.webSocketURL(credential: credential, ticket: ticket)
+        // A reconnect must retire the previous receive loop and event stream
+        // before a replacement transport is published. Leaving them running
+        // makes the old pump finish later and look like a fresh drop.
+        // Bound the close: an unbounded await here is the same stall as a
+        // hung background invalidate (banner stuck before gateway.ready).
+        if let previous = transport {
+            self.transport = nil
+            await Self.closeTransportBounded(
+                previous, seconds: PostBootReconnectPolicy.backgroundInvalidateTimeout)
+        }
+        eventsTask?.cancel()
+        eventsTask = nil
+
+        try Task.checkCancellation()
         let transport = GatewayTransport(url: url)
         self.transport = transport
-        try await transport.connect()
-
-        eventsTask?.cancel()
+        // Single consumer of `events`. Start the pump BEFORE waiting for
+        // ready so connect() does not own the iterator (that left RPCs
+        // unanswered after gateway.ready — a ~15s dead link).
         eventsTask = Task {
             for await event in transport.events {
                 for handler in self.handlerSnapshot() {
                     handler(event)
                 }
             }
+        }
+        do {
+            try await transport.connect(timeout: readyTimeout)
+            try Task.checkCancellation()
+        } catch {
+            eventsTask?.cancel()
+            eventsTask = nil
+            throw error
         }
     }
 
@@ -746,8 +881,13 @@ public actor GatewayClient {
                     timeout: TimeInterval = 120) async throws -> JSONValue {
         let lease = try await acquireTrafficLease()
         do {
-            guard let transport else { throw GatewayError(code: -3, message: "not connected") }
-            let result = try await transport.request(method, params: params, timeout: timeout)
+            let result: JSONValue
+            if let rpcExecutorForTesting {
+                result = try await rpcExecutorForTesting(method, params, timeout)
+            } else {
+                guard let transport else { throw GatewayError(code: -3, message: "not connected") }
+                result = try await transport.request(method, params: params, timeout: timeout)
+            }
             await lease?.release()
             return result
         } catch {
@@ -966,12 +1106,20 @@ public actor GatewayClient {
 
     /// Resume a stored session by durable key. Within ~20 s of a disconnect
     /// this reattaches the live in-memory session with in-flight state.
+    /// Open-chat callers pass `deferHistory: true` so the ack is not the
+    /// full transcript; mutation-proof callers keep the default.
     public func resumeSession(_ storedID: String, profile: String? = nil,
                               deferHistory: Bool = false) async throws -> LiveSession {
-        var params: [String: JSONValue] = ["session_id": .string(storedID), "source": "talaria"]
-        if let profile { params["profile"] = .string(profile) }
-        if deferHistory { params["defer_history"] = .bool(true) }
-        return LiveSession(try await rpc("session.resume", .object(params), timeout: 180))
+        LiveSession(try await rpc(
+            "session.resume",
+            Self.resumeSessionParams(storedID, profile: profile, deferHistory: deferHistory),
+            timeout: 180))
+    }
+
+    public static func resumeSessionParams(_ storedID: String, profile: String? = nil,
+                                           deferHistory: Bool = false) -> JSONValue {
+        OpenChatHistoryPolicy.resumeSessionParams(
+            storedID, profile: profile, deferHistory: deferHistory)
     }
 
     /// Exact resume plus the transport frame boundary of the authoritative
@@ -985,13 +1133,11 @@ public actor GatewayClient {
             guard let transport else {
                 throw GatewayError(code: -3, message: "not connected")
             }
-            var params: [String: JSONValue] = [
-                "session_id": .string(storedID), "source": "talaria",
-            ]
-            if let profile { params["profile"] = .string(profile) }
-            if deferHistory { params["defer_history"] = .bool(true) }
             let response = try await transport.requestSequenced(
-                "session.resume", params: .object(params), timeout: 180)
+                "session.resume",
+                params: Self.resumeSessionParams(
+                    storedID, profile: profile, deferHistory: deferHistory),
+                timeout: 180)
             await lease?.release()
             return (LiveSession(response.value), response.inboundSequence)
         } catch {

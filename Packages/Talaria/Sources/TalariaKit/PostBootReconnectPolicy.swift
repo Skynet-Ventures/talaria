@@ -38,6 +38,34 @@ public enum PostBootReconnectPolicy {
     public static let baseDelay: TimeInterval = 0.3
     public static let maximumDelay: TimeInterval = 15
     public static let recoveryEscalationThreshold: TimeInterval = 45
+    /// Ready bound for a redial, not the first user-tapped connect.
+    /// Device journal (`Gateway unreachable`) plus a 15s `connect()` looks
+    /// like a 20s freeze when the phone cannot complete TCP to Mini.
+    /// A shorter ready wait makes each try visible and the next try start.
+    public static let redialReadyTimeout: TimeInterval = 5
+    /// Resign closes the parked socket off the wake path. Device 8cea17a
+    /// stuck the banner on `redial.scheduled after-background` because the
+    /// next dial awaited that teardown forever and never reached
+    /// `connect.started`. Cap the wait so redial fails fast into try N.
+    public static let backgroundInvalidateTimeout: TimeInterval = 0.4
+    /// Hide "Gateway unreachable" chrome during a healthy after-background
+    /// redial (~2–3s on device). Long enough for one ready wait + margin;
+    /// real `connect.failed` / re-auth / recovery escalation end grace early.
+    public static let offlineChromeGrace: TimeInterval = 8
+
+    /// Whether the global unreachable banner/roster strip should render.
+    /// Presentation only — does not change dial ownership.
+    public static func showsUnreachableChrome(
+        isOffline: Bool,
+        graceActive: Bool,
+        needsReauth: Bool,
+        hasPostBootRecovery: Bool
+    ) -> Bool {
+        guard isOffline else { return false }
+        if needsReauth || hasPostBootRecovery { return true }
+        if graceActive { return false }
+        return true
+    }
 
     /// Full-jitter delay for an indefinitely available reconnect attempt.
     /// Negative attempts safely normalize to the first retry; very large

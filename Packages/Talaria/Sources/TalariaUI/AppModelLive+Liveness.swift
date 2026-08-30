@@ -179,6 +179,8 @@ final class LivenessRuntime {
     var reconcileTask: Task<Void, Never>?
     var reaperTask: Task<Void, Never>?
     var lifecycleObserver: NSObjectProtocol?
+    var resignObserver: NSObjectProtocol?
+    var backgroundObserver: NSObjectProtocol?
 
     /// bot id → first snapshot that reported its turn finished while we still
     /// showed it working. A second agreeing snapshot settles it.
@@ -239,8 +241,8 @@ extension AppModel {
         liveness.rescope(to: LiveRuntime.shared.baseURL)
         startLivenessReaper()
 
-        // The nudge itself is `reconnectNow()`, which already guards against a
-        // concurrent dial and parks in the same slot as the backoff ladder.
+        // The nudge is a hard redial. `reconnectNow()` supersedes a hung
+        // attempt (generation fence) and parks in the same slot as backoff.
         NetworkMonitor.shared.start { [weak self] in
             self?.networkPathBecameUsable()
         }
@@ -253,14 +255,32 @@ extension AppModel {
         // on screen, and this way it survives any view being rebuilt.
         #if canImport(UIKit)
         let activation = UIApplication.didBecomeActiveNotification
+        let resign = UIApplication.willResignActiveNotification
         #elseif canImport(AppKit)
         let activation = NSApplication.didBecomeActiveNotification
+        let resign = NSApplication.willResignActiveNotification
         #endif
         #if canImport(UIKit) || canImport(AppKit)
         liveness.lifecycleObserver = NotificationCenter.default.addObserver(
             forName: activation, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.foregroundReseed() }
+            Task { @MainActor in self?.applicationDidBecomeActive() }
+        }
+        liveness.resignObserver = NotificationCenter.default.addObserver(
+            forName: resign, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.applicationWillResignActive() }
+        }
+        #endif
+        #if canImport(UIKit)
+        // Home-button background is `didEnterBackground`. Resign already
+        // ran, and the handler is idempotent, but this covers a lock-screen
+        // path that can skip the resign notification the view layer sees.
+        liveness.backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.applicationWillResignActive() }
         }
         #endif
     }
@@ -277,6 +297,14 @@ extension AppModel {
         if let observer = liveness.lifecycleObserver {
             NotificationCenter.default.removeObserver(observer)
             liveness.lifecycleObserver = nil
+        }
+        if let observer = liveness.resignObserver {
+            NotificationCenter.default.removeObserver(observer)
+            liveness.resignObserver = nil
+        }
+        if let observer = liveness.backgroundObserver {
+            NotificationCenter.default.removeObserver(observer)
+            liveness.backgroundObserver = nil
         }
         liveness.armed = false
         NetworkMonitor.shared.stop()
@@ -296,20 +324,13 @@ extension AppModel {
 
     /// The OS reports a usable route again (dead zone left, Wi-Fi↔cellular
     /// handoff). Skip the backoff sleep instead of waiting it out
-    /// (PARITY.md:1120).
+    /// (PARITY.md:1120). Never ping a possibly dead socket — a write onto
+    /// a half-open `URLSession` WebSocket wedges the session.
     private func networkPathBecameUsable() {
         retryExactStoredSessionNavigation()
         guard mode == .live, LiveRuntime.shared.baseURL != nil else { return }
-        Task { @MainActor in
-            // A handoff kills the socket without the transport noticing
-            // immediately, so trust the transport's own state rather than the
-            // offline flag alone: `.ready` means the link genuinely survived.
-            if !self.isOffline, let client = self.client, await client.isConnected {
-                await self.reconcileLiveness(trigger: .networkRestored)
-                return
-            }
-            self.reconnectNow()
-        }
+        guard !ConnectionSupervisor.shared.suspendedForBackground else { return }
+        reconnectNow()
     }
 
     /// The reaper's clock. It only asks the gateway anything while a bot is

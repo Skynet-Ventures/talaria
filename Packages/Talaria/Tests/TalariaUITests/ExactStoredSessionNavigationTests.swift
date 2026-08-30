@@ -1,7 +1,37 @@
 #if canImport(XCTest)
+import Foundation
 import XCTest
 @testable import TalariaKit
 @testable import TalariaUI
+
+/// `openStoredSession` paints REST `order=latest`, not the deferred WS dump.
+/// Exact-open tests must stub that page or hydrate sees a failed URLSession.
+private func exactOpenClient(
+    host: String,
+    token: String,
+    latestTexts: [String]
+) throws -> GatewayClient {
+    let url = try XCTUnwrap(URL(string: "https://\(host)"))
+    return GatewayClient(
+        baseURL: url,
+        credential: .sessionToken(token),
+        restExecutor: { request, _ in
+            let path = request.url?.path ?? ""
+            guard path.contains("/messages") else {
+                throw URLError(.fileDoesNotExist)
+            }
+            let messages: [[String: Any]] = latestTexts.enumerated().map { index, text in
+                ["role": "assistant", "text": text, "row_id": index + 10]
+            }
+            let data = try JSONSerialization.data(
+                withJSONObject: ["messages": messages])
+            let response = HTTPURLResponse(
+                url: request.url ?? url, statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"])!
+            return (data, response)
+        })
+}
 
 private actor RoutedEventProbe {
     private(set) var events: [GatewayEvent] = []
@@ -227,24 +257,22 @@ final class ExactStoredSessionNavigationTests: XCTestCase {
         model.mode = .live
         runtime.baseURL = baseURL
 
-        do {
-            try await model.finishConnectedGatewayAdoption(
-                client, baseURL: baseURL, credential: credential,
-                rosterRefresh: {
-                    let adopted = await registry.clientPool.client(for: saved.id)
-                    refreshObservedExactAdoption = model.activeGatewayID == saved.id
-                        && adopted.map(ObjectIdentifier.init) == ObjectIdentifier(client)
-                    throw GatewayError(code: -5, message: "RPC timed out")
-                })
-            XCTFail("the injected ancillary roster timeout must propagate")
-        } catch let error as GatewayError {
-            XCTAssertEqual(error.code, -5)
-        }
+        try await model.finishConnectedGatewayAdoption(
+            client, baseURL: baseURL, credential: credential,
+            rosterRefresh: {
+                let adopted = await registry.clientPool.client(for: saved.id)
+                refreshObservedExactAdoption = model.activeGatewayID == saved.id
+                    && adopted.map(ObjectIdentifier.init) == ObjectIdentifier(client)
+                throw GatewayError(code: -5, message: "RPC timed out")
+            })
 
-        // The adoption-boundary nudge survives the thrown ancillary refresh.
-        // It proves production readiness from the saved live source and opens
-        // through the exact route seam once; no alternate saved source is used.
+        // Roster is detached from the live link. Adoption must succeed even
+        // when profiles.list later times out; the publication-boundary nudge
+        // still runs, and the thrown refresh must not fail the socket.
         await model.exactStoredSessionRouteQueue.awaitCurrentAttempt()
+        for _ in 0..<1_000 where !refreshObservedExactAdoption {
+            await Task.yield()
+        }
         XCTAssertTrue(refreshObservedExactAdoption)
         XCTAssertEqual(model.activeGatewayID, saved.id)
         XCTAssertEqual(authoritativeOpens, [exact])
@@ -1061,10 +1089,10 @@ final class ExactStoredSessionNavigationTests: XCTestCase {
         let target = route.qualifiedID
         let otherRoute = GatewayBotRoute(gatewayID: gatewayID, profile: "other")
         let other = otherRoute.qualifiedID
-        let client = GatewayClient(
-            baseURL: try XCTUnwrap(URL(
-                string: "https://existing-events-\(UUID().uuidString).example")),
-            credential: .sessionToken("existing-events-token"))
+        let client = try exactOpenClient(
+            host: "existing-events-\(UUID().uuidString).example",
+            token: "existing-events-token",
+            latestTexts: ["already in resume"])
         let pool = ConnectionRegistry.shared.clientPool
         await pool.adopt(client, for: gatewayID)
 
@@ -1690,9 +1718,10 @@ final class ExactStoredSessionNavigationTests: XCTestCase {
         let profile = "researcher"
         let route = GatewayBotRoute(gatewayID: gatewayID, profile: profile)
         let target = route.qualifiedID
-        let client = GatewayClient(
-            baseURL: try XCTUnwrap(URL(string: "https://exact-positive.example")),
-            credential: .sessionToken("unused-test-token"))
+        let client = try exactOpenClient(
+            host: "exact-positive-\(UUID().uuidString).example",
+            token: "unused-test-token",
+            latestTexts: ["snapshot response"])
         let previous = ChatState(messages: [
             ChatMessage(author: .bot, text: "old visible transcript"),
         ])

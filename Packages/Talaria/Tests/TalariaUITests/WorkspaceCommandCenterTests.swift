@@ -1041,6 +1041,34 @@ final class WorkspaceCommandCenterTests: XCTestCase {
     }
 
     @MainActor
+    func testHTTPProbeCannotOverwriteLiveSocketState() {
+        let defaults = UserDefaults(suiteName: "talaria-live-probe-\(UUID().uuidString)")!
+        let registry = ConnectionRegistry(defaults: defaults)
+        let primary = try! XCTUnwrap(registry.upsert(
+            urlString: "https://live-probe-\(UUID().uuidString).example",
+            name: "Live probe", credential: nil))
+        let primaryURL = try! XCTUnwrap(primary.baseURL)
+
+        registry.noteState(.connected, pingMS: 4, forURL: primaryURL)
+        registry.noteState(.offline, forURL: primaryURL)
+        XCTAssertEqual(registry.liveGatewayURL, primaryURL)
+        registry.noteProbeHealth(.init(state: .connected, pingMS: 12,
+                                       version: "host-up", authRequired: false),
+                                 forURL: primaryURL)
+
+        XCTAssertEqual(registry.health[primary.id]?.state, .offline,
+                       "HTTP reachability must not invent a live socket")
+        XCTAssertEqual(registry.health[primary.id]?.pingMS, 12)
+        XCTAssertEqual(registry.health[primary.id]?.version, "host-up")
+
+        registry.noteState(.connected, pingMS: 4, forURL: primaryURL)
+        registry.noteProbeHealth(.init(state: .offline), forURL: primaryURL)
+        XCTAssertEqual(registry.health[primary.id]?.state, .connected,
+                       "a status blip must not drop a live socket")
+        XCTAssertEqual(registry.health[primary.id]?.pingMS, 4)
+    }
+
+    @MainActor
     func testRefreshConnectionHealthKeepsHealthySecondaryDiagnosticOnly() async throws {
         let model = AppModel()
         let registry = ConnectionRegistry.shared

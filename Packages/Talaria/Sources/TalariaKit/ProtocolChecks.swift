@@ -33,6 +33,62 @@ public enum ProtocolChecks {
         try botModeNotices()
         try transcriptActing()
         try messageBranching()
+        try openChatHistoryPolicy()
+    }
+
+    static func openChatHistoryPolicy() throws {
+        try expect(OpenChatHistoryPolicy.resumeDefersHistory,
+                   "open-chat resume defers the full transcript")
+        let deferred = GatewayClient.resumeSessionParams(
+            "stored-1", profile: "research",
+            deferHistory: OpenChatHistoryPolicy.resumeDefersHistory)
+        try expect(deferred["defer_history"]?.boolValue == true,
+                   "session.resume carries defer_history for open-chat")
+        try expect(deferred["session_id"]?.stringValue == "stored-1",
+                   "session.resume names the durable key")
+        let full = GatewayClient.resumeSessionParams("stored-1", deferHistory: false)
+        try expect(full["defer_history"] == nil,
+                   "mutation-proof resume omits defer_history")
+        let dumped = (1...8).map { JSONValue.object(["row_id": .number(Double($0))]) }
+        try expect(OpenChatHistoryPolicy.openChatResumeMessages(
+            dumped, historyDeferred: true).isEmpty,
+                   "a deferred resume must not keep a forever-chat WS dump")
+        try expect(OpenChatHistoryPolicy.openChatResumeMessages(
+            dumped, historyDeferred: false).count == 8,
+                   "a full resume still carries its projection")
+        try expect(OpenChatHistoryPolicy.needsLatestPage(
+            historyDeferred: true, resumeMessageCount: 6),
+                   "a deferred stub still loads the REST latest page")
+        try expect(!OpenChatHistoryPolicy.needsLatestPage(
+            historyDeferred: false, resumeMessageCount: 6),
+                   "a full resume projection is already complete")
+        let query = OpenChatHistoryPolicy.latestMessagesQuery(
+            profile: "research", limit: 200, offset: 0)
+        try expect(query.contains(where: { $0.name == "order" && $0.value == "latest" }),
+                   "REST hydration pages from the newest messages")
+        try expect(query.contains(where: { $0.name == "include_compacted" && $0.value == "true" }),
+                   "REST hydration keeps compacted display rows")
+        try expect(OpenChatHistoryPolicy.hasOlderMessages(
+            pageCount: 200, limit: 200, source: .latestPage),
+                   "a full latest page is a window, not the whole store")
+        try expect(OpenChatHistoryPolicy.sameBinding(
+            "root", target: "tip", durableID: "root"),
+                   "root id and resume tip are one conversation")
+        try expect(OpenChatHistoryPolicy.attachRestTarget(
+            "Bot Chat", durableID: nil, canonicalTitle: "Bot Chat") == nil,
+                   "a title-only resume does not prefetch REST")
+        let stubUser = ChatMessage(author: .user, text: "stub", rowID: 1)
+        let optimistic = ChatMessage(author: .user, text: "typed during fetch")
+        let newer = OpenChatHistoryPolicy.rowsNewerThanStub(
+            current: [stubUser, optimistic], stubSnapshot: [stubUser])
+        try expect(newer.map(\.id) == [optimistic.id],
+                   "an unchanged deferred stub is not an optimistic send")
+        try expect(OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: "root", expectedStoredID: "root"),
+                   "prefetch for the same durable key may paint")
+        try expect(!OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: "other", expectedStoredID: "root"),
+                   "a late prefetch must not paint a rebound chat")
     }
 
     static func eventEnvelopeDecoding() throws {
@@ -71,8 +127,29 @@ public enum ProtocolChecks {
     static func gatewayURLNormalization() throws {
         try expect(GatewayURL.normalize("100.84.12.9:9119")?.absoluteString == "http://100.84.12.9:9119",
                    "scheme-less input gets http:// prefix")
+        try expect(GatewayURL.normalize("100.87.108.5")?.absoluteString == "http://100.87.108.5:9119",
+                   "tailnet IP without a port is hermes :9119, not implicit :80")
+        try expect(GatewayURL.normalize("192.168.1.24")?.absoluteString == "http://192.168.1.24:9119",
+                   "LAN IP without a port is hermes :9119")
         try expect(GatewayURL.normalize("https://gw.example.com/hermes/")?.absoluteString == "https://gw.example.com/hermes",
                    "trailing slash stripped, path prefix kept")
+        try expect(GatewayURL.normalize("https://192.168.1.20")?.absoluteString
+                    == "https://192.168.1.20",
+                   "explicit https on a LAN IP keeps :443, not hermes :9119")
+        try expect(GatewayURL.normalize("https://localhost")?.absoluteString
+                    == "https://localhost",
+                   "explicit https localhost keeps :443")
+        try expect(GatewayURL.originForDisplay(GatewayURL.normalize("100.87.108.5")!)
+                    == "http://100.87.108.5:9119",
+                   "journal/banner origin includes scheme and port")
+        try expect(GatewayURL.normalize("mini.tailnet.ts.net")?.absoluteString
+                    == "http://mini.tailnet.ts.net",
+                   "named MagicDNS hosts keep their implicit port")
+        try expect(GatewayURL.normalize("http://100.87.108.5:8443")?.absoluteString
+                    == "http://100.87.108.5:8443",
+                   "an explicit non-default port is kept")
+        try expect(GatewayURL.normalize("http://[fd7a:115c:a1e0::2]")?.port == 9119,
+                   "Tailscale ULA without a port is hermes :9119")
         try expect(GatewayURL.normalize("") == nil, "empty input rejected")
         try expect(GatewayURL.normalize("ftp://x") == nil, "non-http scheme rejected")
     }

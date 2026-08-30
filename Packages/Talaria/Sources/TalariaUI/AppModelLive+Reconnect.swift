@@ -1,8 +1,23 @@
 import Foundation
 import Observation
+#if canImport(os)
+import os
+#endif
 import SwiftUI
 import TalariaKit
 import TalariaTheme
+
+/// UIKit's resign/active callbacks are the reliable iOS lifecycle edges.
+/// SwiftUI's `scenePhase` remains useful, but production devices have shown
+/// it can miss a lock-screen return while the mounted root view survives.
+/// The app target posts these from `UIApplicationDelegate` and the root
+/// funnels both sources through the same coalesced handlers.
+public extension Notification.Name {
+    static let talariaApplicationDidBecomeActive = Notification.Name(
+        "bot.talaria.applicationDidBecomeActive")
+    static let talariaApplicationWillResignActive = Notification.Name(
+        "bot.talaria.applicationWillResignActive")
+}
 
 // Connection supervision for every post-boot socket-loss path.
 //
@@ -17,10 +32,43 @@ import TalariaTheme
 //      #10). A missing credential for the connected base URL is therefore an
 //      exact, side-effect-free signal that reconnect gave up on auth — the
 //      supervisor polls for it and raises ReauthBanner.
-//   2. Foreground recovery. iOS suspends the process; a socket that died in the
-//      background is only discovered when the app returns, and any surviving
-//      backoff timer may be mid-30 s sleep. applicationDidBecomeActive()
-//      re-probes health and retries immediately instead of waiting it out.
+//   2. Foreground recovery. Device evidence, in order:
+//      f3ad5b6 — ping-first on a parked URLSession.shared socket wedged
+//      the session; hung `isReconnecting` made `reconnectNow()` a no-op.
+//      5923674 — hard-redial + ephemeral session still looked dead because
+//      adopt waited on a full `session.resume` of every parked forever-chat
+//      (hydrate: false still downloaded history). Same 20s stall as first
+//      open.
+//      12594f3 — defer_history + roster-off-reconnect-adopt + wake trace.
+//      Device still saw ~20s first load and a dead redial. History stayed.
+//      The waits that exist on that build: connect() owned the single-consumer
+//      `events` stream for the 15s gateway.ready bound (so the event pump
+//      never ran and the supervised monitor treated the socket as already
+//      dead); launch adoption awaited profiles.list (~20s) before arming
+//      the monitor; open-chat attach awaited the 30s REST latest page after
+//      defer_history was already on the wire.
+//      Device journal (2026-08-29): repeated `Gateway unreachable` /
+//      `100.87.108.5`, last recovered 2026-08-28. Port repair to :9119
+//      worked (Mini saw the phone; Connections shows :9119 · 570ms). Wake
+//      still skipped redial with banner `didBecomeActive already-active`
+//      while HTTP was healthy and the live socket stayed offline. Opening
+//      the Hermes default chat still stalled: Mini `ws write slow >10s`
+//      dumping a 584-msg / ~360k-token resume frame. Already-active must
+//      redial when offline; canonical open must not await that fat frame.
+//      8cea17a — already-active skip fixed (`redial.scheduled
+//      after-background`), but dial never reached `connect.started`:
+//      unbounded await on hung background invalidate + dual wake clearing
+//      suspendedForBackground inside the Task. Cap invalidate, cancel it
+//      on reconnectNow, capture the after-background edge synchronously.
+//      a9e387c — dial path advanced; banner dead-ended on
+//      `reconnect.stale authority`. Pre-dial fence required the live client
+//      to already own the registry credential; OAuth/port-repair drift
+//      failed ownsCredential and reconnectNow did not retry `.stale`.
+//      Rebind registry → client on the same live row, then dial.
+//      d85ec3c — DEVICE SUCCESS on after-background reconnect. Follow-up is
+//      presentation only: suppress unreachable chrome during the brief wake
+//      redial grace; cold chat open keeps Loading chat…; warm transcripts
+//      keep messages with a subtle reconnect bar.
 //   3. Manual control — "Reconnect now" on the banner, and switching the live
 //      gateway from Connections.
 //
@@ -93,19 +141,50 @@ final class ConnectionSupervisor {
     /// while exercising AppModel.refreshConnectionHealth end to end.
     @ObservationIgnored var healthProbe:
         @Sendable (SavedGateway) async -> (ConnectionState, GatewayDiagnostics) =
+            ConnectionSupervisor.productionHealthProbe
+
+    private static let productionHealthProbe:
+        @Sendable (SavedGateway) async -> (ConnectionState, GatewayDiagnostics) =
             { gateway in await GatewayDiagnostics.probe(gateway) }
 
     @ObservationIgnored let keychain = KeychainStore()
     /// App-lifetime watch loop; nil until the first start request.
     @ObservationIgnored var watchTask: Task<Void, Never>?
     @ObservationIgnored var reconnectTaskToken: UUID?
+    /// Incremented by every user-visible wake/manual reconnect so a hung
+    /// background dial cannot keep `isReconnecting` or publish after it
+    /// is superseded.
+    @ObservationIgnored var reconnectGeneration = 0
+    /// True after the process left the foreground. The next active edge
+    /// always hard-redials; it must not write to the parked socket.
+    @ObservationIgnored var suspendedForBackground = false
+    /// Resign closes the transport off the wake path. The next dial waits
+    /// for this so connect() does not race the teardown.
+    @ObservationIgnored var backgroundInvalidateTask: Task<Void, Never>?
+    /// Client-side breadcrumbs for the next device fail: resign, wake,
+    /// connect, ready, resume, adopt. Shown on the offline banner after a
+    /// real failure — not during the wake-redial grace window.
+    var reconnectTrace: [ReconnectTraceEvent] = []
+    var lastReconnectStep = ""
+    /// Uptime deadline while "Gateway unreachable" chrome stays hidden for
+    /// an expected after-background redial. Observable so roster/banner
+    /// update when grace begins or ends.
+    var offlineChromeGraceUntil: TimeInterval?
+    @ObservationIgnored var offlineChromeGraceTask: Task<Void, Never>?
+    /// Single-flight foreground wake. UIKit and SwiftUI publish the same
+    /// edge a few milliseconds apart.
+    @ObservationIgnored var foregroundValidationTask: Task<Void, Never>?
+    @ObservationIgnored var foregroundValidationToken: UUID?
     @ObservationIgnored var episodeSource: EpisodeSource?
     @ObservationIgnored var episodeStartedAt: TimeInterval?
     @ObservationIgnored var episodeAttempt = 0
     @ObservationIgnored var sleep: Sleep = ConnectionSupervisor.productionSleep
     @ObservationIgnored var randomUnit: RandomUnit = { Double.random(in: 0..<1) }
     @ObservationIgnored var now: Now = { ProcessInfo.processInfo.systemUptime }
-    @ObservationIgnored var dial: Dial = { client in try await client.connect() }
+    @ObservationIgnored var dial: Dial = { client in
+        try await client.connect(
+            readyTimeout: PostBootReconnectPolicy.redialReadyTimeout)
+    }
     @ObservationIgnored var switchConnect: SwitchConnect?
 
     private static let productionSleep: Sleep = { delay in
@@ -128,14 +207,59 @@ final class ConnectionSupervisor {
 
     func resetTestingSeams() {
         sleep = Self.productionSleep
+        healthProbe = Self.productionHealthProbe
         randomUnit = { Double.random(in: 0..<1) }
         now = { ProcessInfo.processInfo.systemUptime }
-        dial = { client in try await client.connect() }
+        dial = { client in
+            try await client.connect(
+                readyTimeout: PostBootReconnectPolicy.redialReadyTimeout)
+        }
         switchConnect = nil
         reconnectTaskToken = nil
+        reconnectGeneration = 0
+        suspendedForBackground = false
+        backgroundInvalidateTask = nil
+        reconnectTrace = []
+        lastReconnectStep = ""
+        endOfflineChromeGrace()
+        foregroundValidationTask?.cancel()
+        foregroundValidationTask = nil
+        foregroundValidationToken = nil
         resetEpisode(for: .cleanOpen)
         isReconnecting = false
         reauthGateway = nil
+    }
+
+    /// True while the brief wake-redial grace window is still open.
+    var isOfflineChromeGraceActive: Bool {
+        guard let until = offlineChromeGraceUntil else { return false }
+        return now() < until
+    }
+
+    /// Start/refresh the presentation grace that hides unreachable chrome
+    /// during an expected foreground redial.
+    func beginOfflineChromeGrace(
+        seconds: TimeInterval = PostBootReconnectPolicy.offlineChromeGrace
+    ) {
+        let deadline = now() + max(0, seconds)
+        offlineChromeGraceUntil = deadline
+        offlineChromeGraceTask?.cancel()
+        offlineChromeGraceTask = Task { @MainActor in
+            let remaining = max(0, deadline - ConnectionSupervisor.shared.now())
+            let ns = UInt64(remaining * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: ns)
+            guard !Task.isCancelled else { return }
+            let supervisor = ConnectionSupervisor.shared
+            if supervisor.offlineChromeGraceUntil == deadline {
+                supervisor.offlineChromeGraceUntil = nil
+            }
+        }
+    }
+
+    func endOfflineChromeGrace() {
+        offlineChromeGraceTask?.cancel()
+        offlineChromeGraceTask = nil
+        offlineChromeGraceUntil = nil
     }
 
     func note(error: Error, forGatewayID id: String?) {
@@ -145,7 +269,63 @@ final class ConnectionSupervisor {
         entry.checkedAt = Date()
         diagnostics[id] = entry
     }
+
+    func noteReconnect(_ step: String, _ detail: String = "") {
+        let label = detail.isEmpty ? step : "\(step) \(detail)"
+        lastReconnectStep = label
+        reconnectTrace.append(ReconnectTraceEvent(step: step, detail: detail))
+        if reconnectTrace.count > 32 {
+            reconnectTrace.removeFirst(reconnectTrace.count - 32)
+        }
+        #if canImport(os)
+        ReconnectTraceLog.logger.info("\(label, privacy: .public)")
+        #endif
+        switch step {
+        case "redial.scheduled":
+            beginOfflineChromeGrace()
+        case "adopted":
+            // Clear after isOffline is already false inside adopt.
+            endOfflineChromeGrace()
+        case "connect.failed", "resume.failed":
+            // Real dial/resume failure — show unreachable chrome again.
+            endOfflineChromeGrace()
+        default:
+            break
+        }
+    }
+
+    /// Device-facing reason. A dead wake must say whether connect timed out,
+    /// resume failed, or UIKit never delivered `didBecomeActive`. Prefer the
+    /// newest actionable dial step so a stuck `redial.scheduled` is not
+    /// hidden behind a later no-op breadcrumb.
+    var bannerReason: String {
+        guard let last = reconnectTrace.last else { return lastReconnectStep }
+        switch last.step {
+        case "connect.failed", "connect.started", "gateway.ready",
+             "redial.scheduled", "invalidate.timeout", "reconnect.stale":
+            return last.detail.isEmpty ? last.step : "\(last.step) \(last.detail)"
+        case "resume.failed":
+            return last.detail.isEmpty ? "resume.failed" : "resume.failed \(last.detail)"
+        case "resign", "transport.dropped":
+            return "never got didBecomeActive (\(last.step))"
+        default:
+            return lastReconnectStep
+        }
+    }
 }
+
+/// One breadcrumb on the reconnect path. Device verify of 5923674 had no
+/// client-side reason; the next fail must say which step ran last.
+struct ReconnectTraceEvent: Equatable, Sendable {
+    var step: String
+    var detail: String
+}
+
+#if canImport(os)
+private enum ReconnectTraceLog {
+    static let logger = Logger(subsystem: "bot.talaria", category: "reconnect")
+}
+#endif
 
 /// What the Connections health row shows for one saved gateway: the public
 /// `GET /api/status` answer plus the measured round trip and the last failure.
@@ -268,6 +448,47 @@ extension AppModel {
     /// A supervised (manual / foreground) reconnect is dialing right now.
     public var isReconnecting: Bool { ConnectionSupervisor.shared.isReconnecting }
 
+    /// Last reconnect breadcrumb (resign / wake / connect / resume / adopt).
+    /// Classified for the offline banner: `connect.failed`, `resume.failed`,
+    /// or `never got didBecomeActive` when resign ran and the wake never did.
+    public var lastReconnectStep: String { ConnectionSupervisor.shared.bannerReason }
+
+    /// 1-based try shown on the banner while a redial episode is alive.
+    public var reconnectTryNumber: Int {
+        let supervisor = ConnectionSupervisor.shared
+        if supervisor.isReconnecting { return supervisor.episodeAttempt + 1 }
+        return max(supervisor.episodeAttempt, 0)
+    }
+
+    /// Supervised backoff loop is parked between tries.
+    public var isSupervisedReconnectLooping: Bool {
+        LiveRuntime.shared.reconnectTask != nil
+    }
+
+    /// Brief after-background redial window where unreachable chrome is noise.
+    public var isWakeRedialGraceActive: Bool {
+        ConnectionSupervisor.shared.isOfflineChromeGraceActive
+    }
+
+    /// Global "Gateway unreachable" banner + roster strip. Hidden during the
+    /// healthy wake-redial grace; shown on real failure, recovery escalation,
+    /// or when grace expires while still offline.
+    public var showsOfflineUnreachableChrome: Bool {
+        let supervisor = ConnectionSupervisor.shared
+        // Touch observable grace field so views refresh when it clears.
+        _ = supervisor.offlineChromeGraceUntil
+        return PostBootReconnectPolicy.showsUnreachableChrome(
+            isOffline: isOffline,
+            graceActive: supervisor.isOfflineChromeGraceActive,
+            needsReauth: supervisor.reauthGateway != nil,
+            hasPostBootRecovery: supervisor.postBootRecovery != nil)
+    }
+
+    /// Package-test projection of the reconnect breadcrumb log.
+    var reconnectTraceForTesting: [String] {
+        ConnectionSupervisor.shared.reconnectTrace.map(\.step)
+    }
+
     /// Exact saved source whose host-agnostic post-boot reconnect episode has
     /// crossed the recovery escalation threshold.
     public var postBootReconnectRecovery: PostBootReconnectRecovery? {
@@ -310,6 +531,8 @@ extension AppModel {
         let runtime = LiveRuntime.shared
         guard mode == .live, client != nil, let base = runtime.baseURL else { return }
 
+        if supervisor.suspendedForBackground { return }
+
         if !isOffline {
             supervisor.resetEpisode(for: .cleanOpen)
             // Only the live gateway's own banner is cleared here: a re-auth
@@ -337,37 +560,141 @@ extension AppModel {
 
     // MARK: Foreground / manual entry points
 
-    /// Scene-phase hook (`scenePhase == .active`). Re-probes every saved
-    /// gateway, then either reconnects a dead link immediately or refreshes the
-    /// roster of a healthy one.
+    /// UIKit / scene-phase resign. Drop the live socket without writing to it.
+    /// A ping or RPC on a parked URLSessionWebSocket wedges the session and
+    /// the next dial never returns — that is the device-verified failure of
+    /// the ping-first wake path.
+    public func applicationWillResignActive() {
+        let supervisor = ConnectionSupervisor.shared
+        guard mode == .live, client != nil else { return }
+        supervisor.suspendedForBackground = true
+        // Mark offline synchronously. Teardown is async and may be cancelled
+        // by the wake dial; the banner and link watch must not believe the
+        // parked socket is still live in that window.
+        isOffline = true
+        if let base = LiveRuntime.shared.baseURL {
+            ConnectionRegistry.shared.noteState(.offline, forURL: base)
+            connections = ConnectionRegistry.shared.rows
+        }
+        // A mid-background dial is what made the first wake a no-op
+        // (`isReconnecting` stayed true, `reconnectNow` returned). Cancel it
+        // and bump generation so a hung attempt cannot publish after we
+        // drop the socket. Do not start a replacement dial here — iOS is
+        // about to park the process.
+        let runtime = LiveRuntime.shared
+        runtime.reconnectTask?.cancel()
+        runtime.reconnectTask = nil
+        supervisor.reconnectTaskToken = nil
+        supervisor.reconnectGeneration &+= 1
+        supervisor.isReconnecting = false
+        supervisor.foregroundValidationTask?.cancel()
+        supervisor.foregroundValidationTask = nil
+        supervisor.foregroundValidationToken = nil
+        supervisor.noteReconnect("resign")
+        // scenePhase + UIKit + didEnterBackground can fire resign thrice.
+        // Cancel the prior teardown so we do not pile hung close() awaits.
+        supervisor.backgroundInvalidateTask?.cancel()
+        supervisor.backgroundInvalidateTask = Task { @MainActor [weak self] in
+            await self?.invalidateLiveTransportForBackground()
+            guard !Task.isCancelled else { return }
+            ConnectionSupervisor.shared.noteReconnect("transport.dropped")
+        }
+    }
+
+    /// Close the parked transport. Offline was already published on resign —
+    /// this only retires the socket. Session bindings and transcripts stay
+    /// put; a resign must not hydrate, rebind, or empty the open chat.
+    func invalidateLiveTransportForBackground() async {
+        guard mode == .live, let client else { return }
+        await client.invalidateTransportForBackground()
+        isOffline = true
+        if let base = LiveRuntime.shared.baseURL {
+            ConnectionRegistry.shared.noteState(.offline, forURL: base)
+            connections = ConnectionRegistry.shared.rows
+        }
+    }
+
+    /// Scene-phase / UIKit wake hook. After the process was parked, always
+    /// hard-redial. Never probe the old socket, and never wait on HTTP
+    /// diagnostics or roster refresh before the replacement link is adopted.
+    ///
+    /// Device (5497344): banner `didBecomeActive already-active` while the
+    /// Connections HTTP probe was healthy (`:9119`, 570ms) and the live
+    /// socket stayed offline. "Already-active" must not skip redial when
+    /// unreachable — HTTP health is not a live WebSocket.
+    ///
+    /// Device (8cea17a): wake noted `redial.scheduled after-background` but
+    /// never `connect.started`. Concurrent scenePhase + UIKit + liveness
+    /// wakes cleared `suspendedForBackground` inside the first Task, then
+    /// cancelled that Task before `reconnectNow()` while a later wake took
+    /// the already-active path. Capture the after-background edge
+    /// synchronously so every coalesced wake still hard-redials.
     public func applicationDidBecomeActive() {
         startLinkSupervision()
-        // The socket that was supposed to deliver `message.complete` died when
-        // the process was parked, so the roster's "working" flags are beliefs
-        // and not facts until `session.active_list` says otherwise. Asked
-        // before the roster refresh below and independently of it: this runs
-        // even when the link is down (it records the debt and the reaper pays
-        // it once the link is back), and it is the only thing that clears a
-        // bot left spinning on a turn that finished while we were away.
-        foregroundReseed()
-        Task { @MainActor in
-            await refreshConnectionHealth()
-            guard mode == .live, let client else { return }
-            guard await client.isConnected else {
+        let supervisor = ConnectionSupervisor.shared
+        // Synchronous edge capture — before any Task hop — so dual wake
+        // notifications cannot turn after-background into already-active.
+        let wasBackgrounded = supervisor.suspendedForBackground
+        if wasBackgrounded {
+            supervisor.suspendedForBackground = false
+        }
+        let forceRedial = wasBackgrounded || isOffline
+        // Presentation only: hide unreachable chrome before the first post-wake
+        // frame paints. Dial ownership is unchanged.
+        if forceRedial {
+            supervisor.beginOfflineChromeGrace()
+        }
+        // A prior already-active refresh must not hold a lease that blocks
+        // redial when we are offline or were backgrounded.
+        if supervisor.foregroundValidationTask != nil {
+            if forceRedial {
+                supervisor.foregroundValidationTask?.cancel()
+                supervisor.foregroundValidationTask = nil
+                supervisor.foregroundValidationToken = nil
+            } else {
+                return
+            }
+        }
+        let token = UUID()
+        supervisor.foregroundValidationToken = token
+        supervisor.foregroundValidationTask = Task { @MainActor [weak self] in
+            defer { self?.clearForegroundValidation(ifOwned: token) }
+            guard !Task.isCancelled, let self else { return }
+
+            supervisor.noteReconnect(
+                "didBecomeActive", wasBackgrounded ? "after-background" : "already-active")
+
+            guard mode == .live, client != nil,
+                  currentReconnectAuthority() != nil else {
+                supervisor.noteReconnect("wake.skipped", "no-authority")
+                await refreshConnectionHealth()
+                return
+            }
+
+            if wasBackgrounded {
+                // Resign already dropped the socket. Hard-redial; do not
+                // write onto whatever transport is still installed.
+                supervisor.noteReconnect("redial.scheduled", "after-background")
                 reconnectNow()
                 return
             }
+
+            // Already-active + offline/unreachable: always redial. Clearing
+            // isOffline here (pre-5497344) left the banner dark while HTTP
+            // still painted LIVE · 570ms on Connections.
             if isOffline {
-                // The socket outlived the flag (a send failed, then the link
-                // recovered): the transport is the authority.
-                isOffline = false
-                if let base = LiveRuntime.shared.baseURL {
-                    ConnectionRegistry.shared.noteState(.connected, forURL: base)
-                    connections = ConnectionRegistry.shared.rows
-                }
-                await flushComposeQueue()
+                supervisor.noteReconnect("redial.scheduled", "already-active-offline")
+                reconnectNow()
+                return
             }
-            // The socket survived the suspension; the roster may not have.
+
+            guard let client, await client.isConnected else {
+                supervisor.noteReconnect("redial.scheduled", "already-active-not-ready")
+                reconnectNow()
+                return
+            }
+            foregroundReseed()
+            await refreshConnectionHealth()
             try? await refreshRoster()
             if let gatewayID = LiveRuntime.shared.gatewayID {
                 await pullAndReseedRoomProjection(gatewayID: gatewayID)
@@ -375,27 +702,58 @@ extension AppModel {
         }
     }
 
-    /// "Reconnect now" — abandons any backoff sleep and dials at once.
+    private func clearForegroundValidation(ifOwned token: UUID) {
+        let supervisor = ConnectionSupervisor.shared
+        guard supervisor.foregroundValidationToken == token else { return }
+        supervisor.foregroundValidationTask = nil
+        supervisor.foregroundValidationToken = nil
+    }
+
+    /// "Reconnect now" — abandons any backoff sleep or hung dial and starts
+    /// a fresh attempt. A wake must be able to supersede a background dial
+    /// that is still sitting in `isReconnecting`.
     public func reconnectNow() {
         let supervisor = ConnectionSupervisor.shared
-        guard !supervisor.isReconnecting else { return }
         let source = currentReconnectAuthority()?.episodeSource
         let runtime = LiveRuntime.shared
         runtime.reconnectTask?.cancel()
         runtime.reconnectTask = nil
         supervisor.reconnectTaskToken = nil
+        supervisor.reconnectGeneration &+= 1
+        supervisor.isReconnecting = false
+        // Device 8cea17a: banner stuck on `redial.scheduled after-background`
+        // with no `connect.started`. The dial was awaiting a hung resign
+        // teardown. Drop that wait — `connect()` retires any leftover
+        // transport — so the replacement attempt can actually dial.
+        supervisor.backgroundInvalidateTask?.cancel()
+        supervisor.backgroundInvalidateTask = nil
         supervisor.resetEpisode(for: .manualWake, source: source)
 
+        let generation = supervisor.reconnectGeneration
         let token = UUID()
         supervisor.reconnectTaskToken = token
         runtime.reconnectTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let outcome = await self.attemptReconnectOutcome(expected: source)
+            let outcome = await self.attemptReconnectOutcome(
+                expected: source, generation: generation)
             guard supervisor.reconnectTaskToken == token else { return }
             supervisor.reconnectTaskToken = nil
             runtime.reconnectTask = nil
-            if outcome == .retryable, let source {
-                self.scheduleSupervisedReconnect(continuing: source)
+            switch outcome {
+            case .retryable:
+                if let continuing = self.currentReconnectAuthority()?.episodeSource ?? source {
+                    self.scheduleSupervisedReconnect(continuing: continuing)
+                }
+            case .stale:
+                // Device a9e387c: wake dead-ended on `reconnect.stale
+                // authority` with no further try. A foreground return that
+                // still owns an offline live row must keep dialing.
+                if self.isOffline,
+                   let fresh = self.currentReconnectAuthority()?.episodeSource {
+                    self.scheduleSupervisedReconnect(continuing: fresh)
+                }
+            case .success, .reauth:
+                break
             }
         }
     }
@@ -498,28 +856,112 @@ extension AppModel {
     private func reconnectAuthorityIsCurrent(
         _ authority: SupervisedReconnectAuthority
     ) async -> Bool {
+        await reconnectAuthorityFailureReason(authority) == nil
+    }
+
+    /// Why the pre-dial fence rejected this authority, for banner diagnosis.
+    private func reconnectAuthorityFailureReason(
+        _ authority: SupervisedReconnectAuthority
+    ) async -> String? {
+        guard reconnectSourceIdentityIsCurrent(authority) else {
+            return reconnectSourceIdentityFailureReason(authority)
+        }
         let registry = ConnectionRegistry.shared
-        guard reconnectSourceIdentityIsCurrent(authority),
-              let saved = registry.gateway(forURL: authority.baseURL),
-              let credential = registry.credential(for: saved),
-              await authority.client.ownsCredential(credential),
-              reconnectSourceIdentityIsCurrent(authority),
-              registry.credential(for: saved) == credential else { return false }
-        return true
+        guard let saved = registry.gateway(forURL: authority.baseURL) else {
+            return "authority saved-row"
+        }
+        guard let credential = registry.credential(for: saved) else {
+            return "authority credential-missing"
+        }
+        guard await authority.client.ownsCredential(credential) else {
+            return "authority credential"
+        }
+        guard reconnectSourceIdentityIsCurrent(authority) else {
+            return reconnectSourceIdentityFailureReason(authority)
+        }
+        guard registry.credential(for: saved) == credential else {
+            return "authority credential-race"
+        }
+        return nil
     }
 
     private func reconnectSourceIdentityIsCurrent(
         _ authority: SupervisedReconnectAuthority
     ) -> Bool {
+        reconnectSourceIdentityFailureReason(authority) == nil
+    }
+
+    private func reconnectSourceIdentityFailureReason(
+        _ authority: SupervisedReconnectAuthority
+    ) -> String? {
         let runtime = LiveRuntime.shared
         let registry = ConnectionRegistry.shared
-        guard mode == .live, runtime.generation == authority.generation,
-              runtime.baseURL?.absoluteString == authority.baseURL.absoluteString,
-              runtime.gatewayID == authority.gatewayID,
-              client === authority.client,
-              let saved = registry.gateway(forURL: authority.baseURL),
-              saved.id == authority.gatewayID else { return false }
-        return true
+        guard mode == .live else { return "authority mode" }
+        guard runtime.generation == authority.generation else {
+            return "authority generation"
+        }
+        guard runtime.baseURL?.absoluteString == authority.baseURL.absoluteString else {
+            return "authority base"
+        }
+        guard runtime.gatewayID == authority.gatewayID else {
+            return "authority gateway"
+        }
+        guard client === authority.client else { return "authority client" }
+        guard let saved = registry.gateway(forURL: authority.baseURL),
+              saved.id == authority.gatewayID else {
+            return "authority saved-row"
+        }
+        return nil
+    }
+
+    /// Same live gateway row as the wake/manual episode. Allow :9119 repair
+    /// (baseURL string) and credential/client rebind on that row — those are
+    /// how a foreground return recovers. A different gatewayID or live
+    /// generation is a real source switch and must stay stale.
+    private func reconnectSourceCompatible(
+        _ expected: ConnectionSupervisor.EpisodeSource,
+        with authority: SupervisedReconnectAuthority
+    ) -> Bool {
+        expected.gatewayID == authority.gatewayID
+            && expected.generation == authority.generation
+    }
+
+    /// Registry/Keychain is source of truth after background. Port repair and
+    /// OAuth refresh can desync the in-memory client; adopt before dial so
+    /// the fence does not dead-end on `reconnect.stale authority`.
+    private func rebindReconnectAuthorityIfNeeded(
+        _ authority: SupervisedReconnectAuthority
+    ) async -> SupervisedReconnectAuthority? {
+        if await reconnectAuthorityIsCurrent(authority) { return authority }
+
+        // Live row may already point at a replacement client for the same
+        // gateway (wake vs pool). Prefer that over the captured pointer.
+        if let live = currentReconnectAuthority(),
+           live.gatewayID == authority.gatewayID,
+           live.generation == authority.generation,
+           await reconnectAuthorityIsCurrent(live) {
+            if live.client !== authority.client {
+                ConnectionSupervisor.shared.noteReconnect("client.rebound")
+            }
+            return live
+        }
+
+        guard reconnectSourceIdentityIsCurrent(authority) else { return nil }
+        let registry = ConnectionRegistry.shared
+        guard let saved = registry.gateway(forURL: authority.baseURL),
+              let credential = registry.credential(for: saved) else { return nil }
+        if await authority.client.ownsCredential(credential) {
+            return await reconnectAuthorityIsCurrent(authority) ? authority : nil
+        }
+        await authority.client.adoptCredential(credential)
+        ConnectionSupervisor.shared.noteReconnect("credential.rebound")
+        let rebound = SupervisedReconnectAuthority(
+            generation: authority.generation,
+            baseURL: authority.baseURL,
+            gatewayID: authority.gatewayID,
+            client: authority.client,
+            credential: credential)
+        return await reconnectAuthorityIsCurrent(rebound) ? rebound : nil
     }
 
     private func reconnectSessionExpiryIsCurrent(
@@ -558,12 +1000,51 @@ extension AppModel {
     }
 
     func attemptReconnectOutcome(
-        expected source: ConnectionSupervisor.EpisodeSource? = nil
+        expected source: ConnectionSupervisor.EpisodeSource? = nil,
+        generation claimedGeneration: Int? = nil
     ) async -> SupervisedReconnectOutcome {
         let runtime = LiveRuntime.shared
         let supervisor = ConnectionSupervisor.shared
+        // Capture the caller's generation BEFORE any await. A wake that
+        // increments `reconnectGeneration` while this attempt is already
+        // past the first guard used to steal the new generation, set
+        // `isReconnecting`, and make the replacement dial return `.stale`.
+        let attemptGeneration = claimedGeneration ?? supervisor.reconnectGeneration
+        func stale(_ reason: String) -> SupervisedReconnectOutcome {
+            // Do not overwrite a newer wake's breadcrumb with a superseded
+            // attempt's stale note — the banner must show the live dial.
+            if supervisor.reconnectGeneration == attemptGeneration {
+                supervisor.noteReconnect("reconnect.stale", reason)
+            }
+            return .stale
+        }
+        guard supervisor.reconnectGeneration == attemptGeneration else {
+            return stale("generation")
+        }
+        // Another dial already holds the fence for this generation. Stay
+        // silent — noting `reconnect.stale busy` would overwrite the live
+        // attempt's `connect.started` on the banner.
         guard !supervisor.isReconnecting else { return .stale }
-        guard let authority = currentReconnectAuthority() else {
+        supervisor.isReconnecting = true
+        defer {
+            if supervisor.reconnectGeneration == attemptGeneration {
+                supervisor.isReconnecting = false
+            }
+        }
+
+        let registry = ConnectionRegistry.shared
+        // Repair :9119 before capturing authority so the wake episode source
+        // and the live row agree on one baseURL. Doing this after the fence
+        // made a repaired runtime look like a different authority.
+        if let base = runtime.baseURL {
+            let wire = registry.repairStoredBase(matching: base)
+            if wire.absoluteString != base.absoluteString {
+                runtime.baseURL = wire
+                supervisor.noteReconnect("url.repaired", GatewayURL.originForDisplay(wire))
+            }
+        }
+
+        guard let captured = currentReconnectAuthority() else {
             // Missing credential is re-auth only when the remaining source
             // coordinates still describe the exact live row.
             if mode == .live, let base = runtime.baseURL,
@@ -574,53 +1055,137 @@ extension AppModel {
                 supervisor.reauthGateway = base
                 return .reauth
             }
-            return .stale
+            return stale("no-authority")
         }
-        if let source, source != authority.episodeSource { return .stale }
-        guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
+        if let source, !reconnectSourceCompatible(source, with: captured) {
+            return stale("source-mismatch")
+        }
+        guard supervisor.reconnectGeneration == attemptGeneration else {
+            return stale("generation")
+        }
+        guard let authority = await rebindReconnectAuthorityIfNeeded(captured) else {
+            let reason = await reconnectAuthorityFailureReason(captured) ?? "authority"
+            return stale(reason)
+        }
+        guard supervisor.reconnectGeneration == attemptGeneration else {
+            return stale("generation")
+        }
 
         // Fence Operator status before the first await below. This generation
         // remains in force on every exact-source failure path.
         OperatorSettingsRuntime.shared.beginReconnectAttempt()
 
-        supervisor.isReconnecting = true
-        defer { supervisor.isReconnecting = false }
-
-        // Every cached runtime sid dies with the old socket; drop them before
-        // dialing so nothing can submit into a session that no longer exists.
-        let primaryChats = chats.filter { GatewayBotRoute(qualifiedID: $0.key) == nil }
-        let parked = primaryChats.filter { $0.value.storedSessionID != nil }.map(\.key)
-        for (botID, chat) in primaryChats {
-            if let sessionID = chat.sessionID, !sessionID.isEmpty {
-                runtime.reconnectParkedSessionIDs[botID] = sessionID
+        if let pending = supervisor.backgroundInvalidateTask {
+            supervisor.noteReconnect("invalidate.await")
+            let finished = await Self.awaitBackgroundInvalidate(
+                pending,
+                seconds: PostBootReconnectPolicy.backgroundInvalidateTimeout)
+            if supervisor.backgroundInvalidateTask != nil {
+                supervisor.backgroundInvalidateTask = nil
             }
-            chat.sessionID = nil
-            chat.isTyping = false
+            if !finished {
+                supervisor.noteReconnect("invalidate.timeout")
+                pending.cancel()
+            }
+        }
+        guard supervisor.reconnectGeneration == attemptGeneration else {
+            return stale("generation")
+        }
+        if Task.isCancelled { return stale("cancelled") }
+
+        // Re-check after invalidate await — a dual wake may have rebound the
+        // live row. Prefer a fresh same-gateway authority over dead-ending.
+        guard let liveAuthority = await rebindReconnectAuthorityIfNeeded(
+            currentReconnectAuthority() ?? authority
+        ) else {
+            let reason = await reconnectAuthorityFailureReason(authority) ?? "authority"
+            return stale(reason)
+        }
+        if let source, !reconnectSourceCompatible(source, with: liveAuthority) {
+            return stale("source-mismatch")
         }
 
-        let registry = ConnectionRegistry.shared
         do {
-            try await supervisor.dial(authority.client)
+            let tryNumber = supervisor.episodeAttempt + 1
+            supervisor.noteReconnect(
+                "connect.started",
+                "try \(tryNumber) \(GatewayURL.originForDisplay(liveAuthority.baseURL))")
+            try await supervisor.dial(liveAuthority.client)
+            supervisor.noteReconnect("gateway.ready")
         } catch AuthError.sessionExpired {
-            guard reconnectSessionExpiryIsCurrent(authority) else { return .stale }
-            supervisor.reauthGateway = authority.baseURL
+            guard supervisor.reconnectGeneration == attemptGeneration,
+                  reconnectSessionExpiryIsCurrent(liveAuthority) else {
+                return stale("session-fence")
+            }
+            supervisor.noteReconnect("connect.failed", "session-expired")
+            supervisor.reauthGateway = liveAuthority.baseURL
             supervisor.note(error: AuthError.sessionExpired,
-                            forGatewayID: authority.gatewayID)
+                            forGatewayID: liveAuthority.gatewayID)
             isOffline = true
             return .reauth
         } catch {
-            guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
+            guard supervisor.reconnectGeneration == attemptGeneration,
+                  await reconnectAuthorityIsCurrent(liveAuthority) else {
+                return stale("fail-fence")
+            }
+            supervisor.noteReconnect("connect.failed", GatewayDiagnostics.shortMessage(for: error))
             isOffline = true
-            registry.noteState(.offline, forURL: authority.baseURL)
-            supervisor.note(error: error, forGatewayID: authority.gatewayID)
+            registry.noteState(.offline, forURL: liveAuthority.baseURL)
+            supervisor.note(error: error, forGatewayID: liveAuthority.gatewayID)
             connections = registry.rows
             return .retryable
         }
 
-        guard await reconnectAuthorityIsCurrent(authority) else { return .stale }
+        guard supervisor.reconnectGeneration == attemptGeneration,
+              await reconnectAuthorityIsCurrent(liveAuthority) else {
+            return stale("adopt-fence")
+        }
+        // Park runtime sids only after the replacement socket is up. Doing
+        // this before a dial that then fails left the open chat unbound and
+        // invited a hydrate to replace its transcript with an empty page.
+        let parked = parkPrimarySessionsForReconnect()
         supervisor.reauthGateway = nil
-        let adopted = await adoptReconnectedLink(authority: authority, parked: parked)
-        return adopted ? .success : .stale
+        let adopted = await adoptReconnectedLink(authority: liveAuthority, parked: parked)
+        return adopted ? .success : stale("adopt")
+    }
+
+    /// Wait for resign teardown, but never longer than `seconds`. A hung
+    /// `close()` left device 8cea17a on `redial.scheduled` with no dial.
+    ///
+    /// Do not use `withTaskGroup` here: after `cancelAll()` the group still
+    /// joins remaining children, and `await task.value` does not abort when
+    /// the waiter is cancelled. A parked resign continuation then hangs the
+    /// wake dial past `backgroundInvalidateTimeout` and parks `swift test`.
+    private static func awaitBackgroundInvalidate(
+        _ pending: Task<Void, Never>, seconds: TimeInterval
+    ) async -> Bool {
+        let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
+        return await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            Task {
+                await pending.value
+                once.resume(true)
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                once.resume(false)
+            }
+        }
+    }
+
+    /// Remember durable chats and drop only the dead runtime sid. Transcripts
+    /// stay in memory — `ensureSession(hydrate: false)` rebinds them.
+    func parkPrimarySessionsForReconnect() -> [String] {
+        let primaryChats = chats.filter { GatewayBotRoute(qualifiedID: $0.key) == nil }
+        let parked = primaryChats.filter { $0.value.storedSessionID != nil }.map(\.key)
+        for (botID, chat) in primaryChats {
+            if let sessionID = chat.sessionID, !sessionID.isEmpty {
+                LiveRuntime.shared.reconnectParkedSessionIDs[botID] = sessionID
+            }
+            chat.sessionID = nil
+            chat.isTyping = false
+        }
+        return parked
     }
 
     /// Post-dial housekeeping, mirroring AppModelLive's own reattach (that one
@@ -644,38 +1209,58 @@ extension AppModel {
 
         startSupervisedMonitor(for: authority.client, generation: adoptedGeneration)
 
-        // ensureSession does the whole reattach: resume by durable key, bind the
-        // new sid, replay the inflight snapshot and any pending approval. The
-        // transcript is already in memory, so history is never re-hydrated.
-        for botID in parked {
+        // Bind with defer_history (open-chat policy). The 5923674 device fail
+        // waited here on a full session.resume of every parked forever-chat
+        // (hydrate: false still downloaded history, then threw it away). That
+        // is the same 20s MainActor stall as first-open. Do not hydrate.
+        let bindOrder = parked.sorted { left, right in
+            left == openBotID && right != openBotID
+        }
+        for botID in bindOrder {
             guard await adoptedReconnectAuthorityIsCurrent(
                 authority, generation: adoptedGeneration) else { return false }
+            ConnectionSupervisor.shared.noteReconnect("resume.sent", botID)
             _ = try? await ensureSession(botID: botID, hydrate: false)
+            let bound = chats[botID]?.sessionID?.isEmpty == false
+            ConnectionSupervisor.shared.noteReconnect(
+                bound ? "resume.ack" : "resume.failed", botID)
             guard await adoptedReconnectAuthorityIsCurrent(
                 authority, generation: adoptedGeneration) else { return false }
         }
 
-        try? await refreshRoster()
-        guard await adoptedReconnectAuthorityIsCurrent(
-            authority, generation: adoptedGeneration) else { return false }
-        await refreshRoutinesLive(force: true)
-        guard await adoptedReconnectAuthorityIsCurrent(
-            authority, generation: adoptedGeneration) else { return false }
-        await hideOwnedBotSessions()
-        guard await adoptedReconnectAuthorityIsCurrent(
-            authority, generation: adoptedGeneration) else { return false }
         connections = ConnectionRegistry.shared.rows
         await flushComposeQueue()
         guard await adoptedReconnectAuthorityIsCurrent(
             authority, generation: adoptedGeneration) else { return false }
         exactStoredSessionSourceDidReconnect()
-        if let gatewayID = runtime.gatewayID {
-            await pullAndReseedRoomProjection(gatewayID: gatewayID)
-            guard await adoptedReconnectAuthorityIsCurrent(
-                authority, generation: adoptedGeneration) else { return false }
-        }
         ConnectionSupervisor.shared.resetEpisode(for: .cleanOpen)
+        ConnectionSupervisor.shared.noteReconnect("adopted")
+        // Roster / routines / hide / rooms must not hold the live link.
+        Task { @MainActor [weak self] in
+            await self?.resyncSurfacesAfterReconnect(
+                authority: authority, generation: adoptedGeneration)
+        }
         return true
+    }
+
+    private func resyncSurfacesAfterReconnect(
+        authority: SupervisedReconnectAuthority, generation: Int
+    ) async {
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        try? await refreshRoster()
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        await refreshRoutinesLive(force: true)
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        await hideOwnedBotSessions()
+        guard await adoptedReconnectAuthorityIsCurrent(
+            authority, generation: generation) else { return }
+        connections = ConnectionRegistry.shared.rows
+        if let gatewayID = LiveRuntime.shared.gatewayID {
+            await pullAndReseedRoomProjection(gatewayID: gatewayID)
+        }
     }
 
     /// Supervised reconnect finishes after the foreground/network callbacks
@@ -687,6 +1272,9 @@ extension AppModel {
 
     /// The client's event pump finishes exactly when the socket dies; awaiting
     /// it is the disconnect signal (ws-protocol §3 — liveness is socket-level).
+    /// The pump must be the only `events` consumer — if `connect()` already
+    /// iterated that stream for `gateway.ready`, this wait returns immediately
+    /// and the banner looks like a failed reconnect.
     func startSupervisedMonitor(for client: GatewayClient, generation: Int) {
         let runtime = LiveRuntime.shared
         runtime.monitorTask?.cancel()
@@ -701,6 +1289,9 @@ extension AppModel {
                 ConnectionRegistry.shared.noteState(.offline, forURL: base)
                 self.connections = ConnectionRegistry.shared.rows
             }
+            // Resign already owns the next redial. Starting one here is
+            // how a hung `isReconnecting` dial survived into the next wake.
+            guard !ConnectionSupervisor.shared.suspendedForBackground else { return }
             self.scheduleSupervisedReconnect()
         }
     }
@@ -713,7 +1304,8 @@ extension AppModel {
     ) {
         let runtime = LiveRuntime.shared
         let supervisor = ConnectionSupervisor.shared
-        guard runtime.reconnectTask == nil, !supervisor.isReconnecting,
+        guard !supervisor.suspendedForBackground,
+              runtime.reconnectTask == nil, !supervisor.isReconnecting,
               let currentSource = currentReconnectAuthority()?.episodeSource else { return }
         if let expectedSource, expectedSource != currentSource { return }
         if supervisor.episodeSource != currentSource {
@@ -741,7 +1333,9 @@ extension AppModel {
                     return
                 }
                 self.publishRecoveryEscalationIfNeeded(source: currentSource)
-                let outcome = await self.attemptReconnectOutcome(expected: currentSource)
+                let outcome = await self.attemptReconnectOutcome(
+                    expected: currentSource,
+                    generation: supervisor.reconnectGeneration)
                 guard supervisor.reconnectTaskToken == token else { return }
                 switch outcome {
                 case .success:
@@ -769,6 +1363,8 @@ extension AppModel {
         guard PostBootReconnectPolicy.shouldEscalateRecovery(elapsed: elapsed) else { return }
         supervisor.postBootRecovery = PostBootReconnectRecovery(
             gatewayID: source.gatewayID, baseURL: source.baseURL, elapsed: elapsed)
+        // Escalation is a real problem — stop suppressing unreachable chrome.
+        supervisor.endOfflineChromeGrace()
     }
 
     private func clearSupervisedReconnectTask(ifOwned token: UUID) {
@@ -790,9 +1386,12 @@ extension AppModel {
         runtime.reconnectTask?.cancel()
         runtime.reconnectTask = nil
         ConnectionSupervisor.shared.reconnectTaskToken = nil
+        ConnectionSupervisor.shared.reconnectGeneration &+= 1
+        ConnectionSupervisor.shared.isReconnecting = false
 
         if runtime.baseURL?.absoluteString == baseURL.absoluteString, client != nil {
-            let outcome = await attemptReconnectOutcome()
+            let outcome = await attemptReconnectOutcome(
+                generation: ConnectionSupervisor.shared.reconnectGeneration)
             if outcome == .retryable {
                 scheduleSupervisedReconnect()
             }
@@ -1036,7 +1635,7 @@ public struct ReauthBanner: View {
                 card(tone: theme.danger) {
                     reauthContent(gateway)
                 }
-            } else if model.mode == .live, model.isOffline {
+            } else if model.mode == .live, model.showsOfflineUnreachableChrome {
                 card(tone: theme.warn) {
                     offlineContent
                 }
@@ -1073,18 +1672,33 @@ public struct ReauthBanner: View {
     /// Deliberately short: the roster already prints the full `copy.offline`
     /// sentence, and this card follows the user onto every other screen. What
     /// it adds is the manual retry.
+    private var reconnectButtonLabel: String {
+        let trying = model.isReconnecting || model.isSupervisedReconnectLooping
+        guard trying else { return copy.reconnectCTA(theme.id) }
+        let n = max(model.reconnectTryNumber, 1)
+        return "\(copy.reconnecting(theme.id)) · try \(n)"
+    }
+
     private var offlineContent: some View {
-        HStack(spacing: 10) {
-            headline(copy.linkDownTitle(theme.id), tone: theme.warn)
-            Spacer(minLength: 8)
-            LinkBannerButton(theme: theme,
-                             label: model.isReconnecting ? copy.reconnecting(theme.id)
-                                                         : copy.reconnectCTA(theme.id),
-                             role: .primary) {
-                model.reconnectNow()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                headline(copy.linkDownTitle(theme.id), tone: theme.warn)
+                Spacer(minLength: 8)
+                LinkBannerButton(theme: theme,
+                                 label: reconnectButtonLabel,
+                                 role: .primary) {
+                    model.reconnectNow()
+                }
+                .disabled(model.isReconnecting)
+                .opacity(model.isReconnecting ? 0.6 : 1)
             }
-            .disabled(model.isReconnecting)
-            .opacity(model.isReconnecting ? 0.6 : 1)
+            if !model.lastReconnectStep.isEmpty {
+                Text(model.lastReconnectStep)
+                    .font(bodyFont)
+                    .foregroundStyle(theme.sub)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(Text(model.lastReconnectStep))
+            }
         }
     }
 
@@ -1340,5 +1954,24 @@ extension CopyPack {
         case .control: "RELINKING…"
         case .ink: "mending…"
         }
+    }
+}
+
+/// First resume wins. Used so a timeout race can return without joining a
+/// parked `Task.value` waiter (TaskGroup would wait for that child forever).
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: Bool) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }

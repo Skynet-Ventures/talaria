@@ -150,11 +150,38 @@ public struct ChatView: View {
         model.mode == .demo ? (DemoData.quickReplies[botID] ?? []) : []
     }
 
+    /// Cold open: empty transcript while canonical hydrate (or wake-redial
+    /// wait) is in flight — fuller “Loading chat…” treatment.
+    private var isColdOpeningChat: Bool {
+        model.mode == .live
+            && messages.isEmpty
+            && (chat?.isOpeningCanonicalChat == true)
+    }
+
+    /// Warm reopen during after-background redial: cached messages stay
+    /// visible; only a subtle indicator shows. Never blank the thread.
+    private var showsWarmReconnectIndicator: Bool {
+        model.mode == .live
+            && !messages.isEmpty
+            && model.isOffline
+            && (model.isWakeRedialGraceActive
+                || model.isReconnecting
+                || model.isSupervisedReconnectLooping
+                || (chat?.isOpeningCanonicalChat == true))
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             header
+            if showsWarmReconnectIndicator {
+                warmReconnectIndicator
+            }
             ZStack(alignment: .bottomTrailing) {
-                messageList
+                if isColdOpeningChat {
+                    chatOpeningPlaceholder
+                } else {
+                    messageList
+                }
                 if showsJumpToLatest {
                     jumpToLatestButton
                         .padding(.trailing, 16)
@@ -357,6 +384,53 @@ public struct ChatView: View {
 
     // MARK: - Message list
 
+    /// Inline placeholder while `enterCanonicalChat` hydrates an empty chat.
+    /// Not a modal — composer and header stay usable; only the blank
+    /// transcript is filled. Warm transcripts use `warmReconnectIndicator`.
+    private var chatOpeningPlaceholder: some View {
+        VStack(spacing: 12) {
+            Spacer(minLength: 0)
+            ProgressView()
+                .tint(theme.accent)
+            Text(chatOpeningLabel)
+                .font(theme.body(13, weight: .medium))
+                .foregroundStyle(theme.sub)
+                .accessibilityLabel(Text(chatOpeningLabel))
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+    }
+
+    private var chatOpeningLabel: String {
+        switch theme.id {
+        case .soft: "Loading chat…"
+        case .control: "LOADING CHAT"
+        case .ink: "Loading chat"
+        }
+    }
+
+    /// Thin indeterminate bar under the header while a warm transcript waits
+    /// on after-background redial. Keeps messages on screen.
+    private var warmReconnectIndicator: some View {
+        ProgressView()
+            .progressViewStyle(.linear)
+            .tint(theme.accent)
+            .frame(maxWidth: .infinity)
+            .frame(height: 2)
+            .padding(.horizontal, theme.id == .ink ? 0 : 16)
+            .padding(.bottom, 4)
+            .accessibilityLabel(Text(warmReconnectLabel))
+    }
+
+    private var warmReconnectLabel: String {
+        switch theme.id {
+        case .soft: "Reconnecting…"
+        case .control: "RECONNECTING"
+        case .ink: "Reconnecting"
+        }
+    }
+
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -496,6 +570,21 @@ public struct ChatView: View {
     }
 
     @ViewBuilder private var transcriptRows: some View {
+        if chat?.transcriptHasOlder == true {
+            Button {
+                Task { await model.loadOlderTranscript(botID: botID) }
+            } label: {
+                Text(copy.earlierMessages)
+                    .font(theme.id == .soft ? theme.body(12, weight: .semibold) : theme.mono(10))
+                    .foregroundStyle(theme.sub)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .disabled(chat?.isLoadingOlderTranscript == true)
+            .opacity(chat?.isLoadingOlderTranscript == true ? 0.55 : 1)
+            .accessibilityLabel(Text(copy.earlierMessages))
+        }
         ForEach(messages) { message in
             messageRow(message)
                 .id(message.id.uuidString)
