@@ -15,6 +15,16 @@ import TalariaKit
 // Discovery, dependency setup, and the default selection are gateway-owned.
 // Declared config is profile-aware: Hermes evaluates it inside `_profile_scope`
 // so a profile's provider credentials/config never leak into another profile.
+//
+// Checkpoint-v2 authority (Hermes 1bbb6e5):
+//   agent/memory_provider.py                  — API v2 is an opt-in provider attribute
+//   agent/conversation_compression.py         — false/missing proof blocks before rewrite
+//   hermes_cli/web_server.py:/api/config      — existing raw config read/write route
+//   hermes_cli/web_server.py:/api/memory      — existing authoritative provider inventory
+// The audited source adds no checkpoint-specific RPC or capability endpoint.
+// Consequently this client accepts only an explicit capability field carried
+// by the existing inventory response and otherwise leaves the control guarded
+// off; it never guesses a provider's version or calls an invented method.
 
 struct MemoryProviderSetup: Equatable, Sendable {
     var pipDependencies: [String]
@@ -44,6 +54,13 @@ struct MemoryProviderInventoryRow: Identifiable, Equatable, Sendable {
     var configured: Bool
     var status: String
     var setup: MemoryProviderSetup
+    /// The provider's explicit `pre_compress_checkpoint_api_version` claim,
+    /// when the authoritative inventory carries one. A missing or malformed
+    /// value is deliberately not treated as the historical v1 default: that
+    /// default is a provider implementation detail, not proof that this
+    /// gateway can safely arm the fail-closed v2 gate.
+    var checkpointAPIVersionRaw: JSONValue?
+    var checkpointAPIVersion: Int?
 
     init?(_ value: JSONValue) {
         guard let name = value["name"]?.stringValue, !name.isEmpty else { return nil }
@@ -53,6 +70,20 @@ struct MemoryProviderInventoryRow: Identifiable, Equatable, Sendable {
         configured = value["configured"]?.boolValue ?? false
         status = value["status"]?.stringValue ?? "unavailable"
         setup = MemoryProviderSetup(value["setup"])
+        checkpointAPIVersionRaw = value["pre_compress_checkpoint_api_version"]
+        checkpointAPIVersion = Self.exactInteger(checkpointAPIVersionRaw)
+    }
+
+    var isReady: Bool { available && configured && status == "ready" }
+
+    /// Hermes' checkpoint manager accepts providers advertising v2 or a later
+    /// compatible version (`provider_version >= required_version`).
+    var advertisesCheckpointAPIV2: Bool { (checkpointAPIVersion ?? 0) >= 2 }
+
+    private static func exactInteger(_ raw: JSONValue?) -> Int? {
+        guard let number = raw?.doubleValue, number.isFinite,
+              number.rounded(.towardZero) == number else { return nil }
+        return Int(exactly: number)
     }
 }
 
@@ -67,6 +98,152 @@ struct MemoryProviderInventory: Equatable, Sendable {
         providers = value["providers"]?.arrayValue?.compactMap(MemoryProviderInventoryRow.init) ?? []
         memoryBytes = value["builtin_files"]?["memory"]?.intValue ?? 0
         userBytes = value["builtin_files"]?["user"]?.intValue ?? 0
+    }
+}
+
+/// Lossless projection of the raw `compression.checkpoint_required` config
+/// leaf. Hermes' agent initializer is permissive about config truthiness, but
+/// a mobile management control must never silently reinterpret or overwrite a
+/// non-boolean value. It can offer a switch only for an explicit boolean.
+struct CompressionCheckpointRequirement: Equatable, Sendable {
+    enum RawState: Equatable, Sendable {
+        case absent
+        case boolean(Bool)
+        case unrecognized(JSONValue)
+    }
+
+    var rawValue: JSONValue?
+
+    init(config: JSONValue) {
+        rawValue = config["compression"]?["checkpoint_required"]
+    }
+
+    init(rawValue: JSONValue?) {
+        self.rawValue = rawValue
+    }
+
+    var rawState: RawState {
+        guard let rawValue else { return .absent }
+        if let bool = rawValue.boolValue { return .boolean(bool) }
+        return .unrecognized(rawValue)
+    }
+
+    var enabled: Bool? { rawValue?.boolValue }
+}
+
+/// The single profile-scoped config read used by the memory settings page.
+/// Keeping both values in this envelope prevents a provider selection and the
+/// checkpoint switch from being read from different config snapshots.
+struct MemoryProviderScopeConfiguration: Equatable, Sendable {
+    var activeProvider: String
+    var checkpointRequirement: CompressionCheckpointRequirement
+
+    init(_ config: JSONValue) {
+        activeProvider = config["memory"]?["provider"]?.stringValue ?? ""
+        checkpointRequirement = CompressionCheckpointRequirement(config: config)
+    }
+}
+
+/// The client-visible state of Hermes' fail-closed pre-compress gate. A
+/// `blocked` value is a configuration/remediation state, not a transport
+/// failure: Hermes preserves the transcript and the user can fix the provider
+/// then retry compaction without reconnecting the gateway.
+enum CompressionCheckpointGateState: Equatable, Sendable {
+    enum Blocker: Error, Equatable, Sendable {
+        case checkpointValueNotReported
+        case checkpointValueUnrecognized(JSONValue)
+        case noActiveExternalProvider
+        case activeProviderNotReported(String)
+        case activeProviderNotReady(String)
+        case checkpointAPINotAdvertised(String)
+        case checkpointAPIVersionTooOld(provider: String, version: Int)
+        case scopedProviderReadinessUnavailable(String)
+    }
+
+    case controllable(enabled: Bool, provider: String, apiVersion: Int)
+    case unavailable(Blocker)
+    case blocked(Blocker)
+
+    static func resolve(requirement: CompressionCheckpointRequirement,
+                        activeProvider: String,
+                        inventory: MemoryProviderInventory,
+                        readinessIsAuthoritative: Bool = true) -> Self {
+        if !readinessIsAuthoritative {
+            return .unavailable(.scopedProviderReadinessUnavailable(activeProvider))
+        }
+        let prerequisite = providerPrerequisite(activeProvider: activeProvider, inventory: inventory)
+        switch requirement.rawState {
+        case .absent:
+            return .unavailable(.checkpointValueNotReported)
+        case .unrecognized(let raw):
+            return .unavailable(.checkpointValueUnrecognized(raw))
+        case .boolean(let enabled):
+            switch prerequisite {
+            case .success(let row):
+                // `advertisesCheckpointAPIV2` above already proves this is a
+                // literal API v2-or-newer declaration, never an inferred v1.
+                return .controllable(enabled: enabled, provider: row.name,
+                                     apiVersion: row.checkpointAPIVersion ?? 2)
+            case .failure(let blocker):
+                return enabled ? .blocked(blocker) : .unavailable(blocker)
+            }
+        }
+    }
+
+    var toggleIsVisible: Bool {
+        if case .controllable = self { return true }
+        return false
+    }
+
+    var isRecoverableConfigurationState: Bool {
+        if case .blocked = self { return true }
+        return false
+    }
+
+    var enabled: Bool? {
+        if case .controllable(let enabled, _, _) = self { return enabled }
+        return nil
+    }
+
+    var blocker: Blocker? {
+        switch self {
+        case .controllable: nil
+        case .unavailable(let blocker), .blocked(let blocker): blocker
+        }
+    }
+
+    private static func providerPrerequisite(activeProvider: String,
+                                             inventory: MemoryProviderInventory)
+        -> Result<MemoryProviderInventoryRow, Blocker> {
+        guard !activeProvider.isEmpty else { return .failure(.noActiveExternalProvider) }
+        guard let row = inventory.providers.first(where: { $0.name == activeProvider }) else {
+            return .failure(.activeProviderNotReported(activeProvider))
+        }
+        guard row.isReady else { return .failure(.activeProviderNotReady(activeProvider)) }
+        guard let version = row.checkpointAPIVersion else {
+            return .failure(.checkpointAPINotAdvertised(activeProvider))
+        }
+        guard version >= 2 else {
+            return .failure(.checkpointAPIVersionTooOld(provider: activeProvider, version: version))
+        }
+        return .success(row)
+    }
+}
+
+/// Hermes uses this stable fail-closed outcome marker when it preserves the
+/// uncompressed transcript because a durable checkpoint cannot be confirmed.
+/// It is an application-level configuration outcome, never evidence that the
+/// WebSocket or gateway session disconnected.
+enum CompressionCheckpointFailurePolicy {
+    static let blockedPrerequisiteMarker = "BLOCKED_MISSING_PREREQUISITE"
+
+    static func isBlockedPrerequisite(_ value: String?) -> Bool {
+        value?.uppercased().contains(blockedPrerequisiteMarker) ?? false
+    }
+
+    static func isBlockedPrerequisite(_ error: Error) -> Bool {
+        guard let gateway = error as? GatewayError else { return false }
+        return isBlockedPrerequisite(gateway.message)
     }
 }
 
@@ -242,10 +419,28 @@ extension GatewayClient {
         MemoryProviderInventory(try await restJSON(path: "api/memory", timeout: 30))
     }
 
+    /// Existing profile-scoped config route, projected without coercing the
+    /// raw checkpoint flag. Hermes 1bbb6e5's checkpoint-v2 change adds no
+    /// dedicated client RPC, so this is intentionally the ordinary
+    /// `/api/config` read rather than a guessed capability method.
+    func memoryProviderScopeConfiguration(profile: String?) async throws
+        -> MemoryProviderScopeConfiguration {
+        MemoryProviderScopeConfiguration(
+            try await restJSON(path: "api/config", query: Self.memoryProfileQuery(profile),
+                               timeout: 30))
+    }
+
     func memoryProviderSelection(profile: String?) async throws -> String {
-        let config = try await restJSON(path: "api/config", query: Self.memoryProfileQuery(profile),
-                                        timeout: 30)
-        return config["memory"]?["provider"]?.stringValue ?? ""
+        let configuration = try await memoryProviderScopeConfiguration(profile: profile)
+        return configuration.activeProvider
+    }
+
+    /// Persist only the supported boolean leaf through Hermes' existing
+    /// deep-merge `PUT /api/config` route. Callers are responsible for the
+    /// API-v2 provider proof; this method deliberately has no fallback RPC.
+    func setCompressionCheckpointRequired(_ enabled: Bool, profile: String?) async throws {
+        try await setGatewayConfigValue(path: ["compression", "checkpoint_required"],
+                                        value: .bool(enabled), profile: profile)
     }
 
     /// Profile-scoped discovery options from Hermes' dynamic config schema.

@@ -27,6 +27,7 @@ public struct MemoryProviderSettingsSection: View {
     @State private var providerNames: [String] = []
     @State private var profileProviderNames: Set<String> = []
     @State private var scopedActive = ""
+    @State private var checkpointRequirement = CompressionCheckpointRequirement(rawValue: nil)
     @State private var providerConfig: MemoryProviderDeclaredConfig?
     @State private var drafts: [String: String] = [:]
     @State private var isLoadingScope = false
@@ -47,6 +48,7 @@ public struct MemoryProviderSettingsSection: View {
             if gatewayChoices.count > 1 { gatewayPicker }
             if !profileChoices.isEmpty { profilePicker }
             providerSection
+            if model.mode == .live { checkpointSection }
             if let notice {
                 Text(notice)
                     .font(theme.mono(10.5))
@@ -344,6 +346,75 @@ public struct MemoryProviderSettingsSection: View {
         }
     }
 
+    // MARK: Durable checkpoint gate
+
+    private var checkpointGateState: CompressionCheckpointGateState {
+        CompressionCheckpointGateState.resolve(requirement: checkpointRequirement,
+                                                activeProvider: scopedActive,
+                                                inventory: inventory,
+                                                readinessIsAuthoritative: targetProfile == nil)
+    }
+
+    private var checkpointSection: some View {
+        let state = checkpointGateState
+        return SettingsSection(theme: theme, title: copy.settingsMemoryCheckpoint(theme.id),
+                               footnote: copy.settingsMemoryCheckpointNote(theme.id)) {
+            SettingsGroup(theme: theme) {
+                switch state {
+                case .controllable(let enabled, let provider, let apiVersion):
+                    SettingsToggleRow(theme: theme,
+                                      title: copy.settingsMemoryCheckpointToggle(theme.id),
+                                      subtitle: copy.settingsMemoryCheckpointToggleNote(
+                                        theme.id, provider: provider, apiVersion: apiVersion),
+                                      isOn: enabled, isLast: true) {
+                        Task { await setCheckpointRequirement(!enabled) }
+                    }
+                case .blocked(let blocker):
+                    SettingsRow(theme: theme,
+                                title: copy.settingsMemoryCheckpointToggle(theme.id),
+                                subtitle: checkpointBlockerDetail(blocker, blocked: true),
+                                value: copy.settingsMemoryCheckpointBlocked(theme.id),
+                                valueTone: theme.warn, isLast: true)
+                case .unavailable(let blocker):
+                    SettingsRow(theme: theme,
+                                title: copy.settingsMemoryCheckpointToggle(theme.id),
+                                subtitle: checkpointBlockerDetail(blocker, blocked: false),
+                                value: copy.settingsMemoryCheckpointUnavailable(theme.id),
+                                valueTone: theme.faint, isLast: true)
+                }
+            }
+            .disabled(isLoadingScope || busyAction != nil)
+            .opacity(isLoadingScope ? 0.55 : 1)
+        }
+    }
+
+    private func checkpointBlockerDetail(_ blocker: CompressionCheckpointGateState.Blocker,
+                                         blocked: Bool) -> String {
+        let prefix = blocked ? copy.settingsMemoryCheckpointRecoverablePrefix(theme.id) : ""
+        let reason: String
+        switch blocker {
+        case .checkpointValueNotReported:
+            reason = copy.settingsMemoryCheckpointValueNotReported(theme.id)
+        case .checkpointValueUnrecognized:
+            reason = copy.settingsMemoryCheckpointValueUnrecognized(theme.id)
+        case .noActiveExternalProvider:
+            reason = copy.settingsMemoryCheckpointNoActiveProvider(theme.id)
+        case .activeProviderNotReported(let provider):
+            reason = copy.settingsMemoryCheckpointProviderNotReported(theme.id, provider: provider)
+        case .activeProviderNotReady(let provider):
+            reason = copy.settingsMemoryCheckpointProviderNotReady(theme.id, provider: provider)
+        case .checkpointAPINotAdvertised(let provider):
+            reason = copy.settingsMemoryCheckpointAPINotAdvertised(theme.id, provider: provider)
+        case .checkpointAPIVersionTooOld(let provider, let version):
+            reason = copy.settingsMemoryCheckpointAPIVersionTooOld(theme.id, provider: provider,
+                                                                      version: version)
+        case .scopedProviderReadinessUnavailable(let provider):
+            reason = copy.settingsMemoryCheckpointScopedReadinessUnavailable(
+                theme.id, provider: provider)
+        }
+        return prefix + reason
+    }
+
     private var oauthSection: some View {
         SettingsGroup(theme: theme) {
             SettingsRow(theme: theme,
@@ -408,6 +479,7 @@ public struct MemoryProviderSettingsSection: View {
         providerNames = []
         profileProviderNames = []
         scopedActive = ""
+        checkpointRequirement = CompressionCheckpointRequirement(rawValue: nil)
         selectedProvider = ""
         providerConfig = nil
         drafts = [:]
@@ -434,17 +506,19 @@ public struct MemoryProviderSettingsSection: View {
             let client = try await targetClient(gatewayID: gatewayID)
             guard isCurrent(key, captured) else { return }
             async let inventoryRequest = client.memoryProviderInventory()
-            async let activeRequest = client.memoryProviderSelection(profile: profile)
-            let (loadedInventory, active) = try await (inventoryRequest, activeRequest)
+            async let configurationRequest = client.memoryProviderScopeConfiguration(profile: profile)
+            let (loadedInventory, configuration) = try await (inventoryRequest, configurationRequest)
             guard isCurrent(key, captured) else { return }
             let profileCatalog = (try? await client.memoryProviderCatalog(profile: profile)) ?? []
             guard isCurrent(key, captured) else { return }
+            let active = configuration.activeProvider
             inventory = loadedInventory
             profileProviderNames = Set(profileCatalog.filter { !$0.isEmpty })
             providerNames = MemoryProviderCatalog.merge(profileSchema: profileCatalog,
                                                         gatewayInventory: loadedInventory.providers,
                                                         active: active)
             scopedActive = active
+            checkpointRequirement = configuration.checkpointRequirement
             selectedProvider = active
             if !active.isEmpty && !profileProviderNames.contains(active)
                 && !loadedInventory.providers.contains(where: { $0.name == active }) {
@@ -452,6 +526,33 @@ public struct MemoryProviderSettingsSection: View {
             }
         } catch {
             guard isCurrent(key, captured) else { return }
+            setNotice(error.localizedDescription, warning: true)
+        }
+    }
+
+    private func setCheckpointRequirement(_ enabled: Bool) async {
+        guard busyAction == nil, checkpointGateState.toggleIsVisible else { return }
+        let key = scopeKey
+        let captured = generation
+        let gatewayID = targetGatewayID
+        let profile = targetProfile
+        let activeProvider = scopedActive
+        busyAction = "checkpoint"
+        setNotice(nil, warning: false)
+        defer { if isCurrent(key, captured) { busyAction = nil } }
+        do {
+            let client = try await targetClient(gatewayID: gatewayID)
+            guard isCurrent(key, captured), scopedActive == activeProvider,
+                  checkpointGateState.toggleIsVisible else { return }
+            try await client.setCompressionCheckpointRequired(enabled, profile: profile)
+            guard isCurrent(key, captured), scopedActive == activeProvider else { return }
+            checkpointRequirement = CompressionCheckpointRequirement(rawValue: .bool(enabled))
+            setNotice(copy.settingsMemoryCheckpointSaved(theme.id, enabled: enabled), warning: false)
+        } catch {
+            guard isCurrent(key, captured), scopedActive == activeProvider else { return }
+            // This is a configuration mutation failure. Keep the live gateway
+            // session intact and leave the pre-write raw value in place so the
+            // operator can remedy the provider/configuration and retry.
             setNotice(error.localizedDescription, warning: true)
         }
     }
@@ -818,6 +919,82 @@ public extension CopyPack {
         MemoryProviderCopySemantics.savedNotice(control: t == .control, provider: provider)
     }
     func settingsMemoryProviderActivated(_ t: ThemeID, provider: String) -> String { t == .control ? "ACTIVE: \(provider.uppercased())" : "Now using \(provider)." }
+    func settingsMemoryCheckpoint(_ t: ThemeID) -> String {
+        t == .control ? "DURABLE CHECKPOINT" : "Durable checkpoint"
+    }
+    func settingsMemoryCheckpointNote(_ t: ThemeID) -> String {
+        t == .control
+            ? "FAIL-CLOSED PRE-COMPRESSION PROTECTION. V2 PROVIDER PROOF REQUIRED."
+            : "Fail-closed protection before lossy compression. Talaria only exposes the control after this gateway proves the active provider supports checkpoint API v2."
+    }
+    func settingsMemoryCheckpointToggle(_ t: ThemeID) -> String {
+        t == .control ? "REQUIRE PRE-COMPRESS CHECKPOINT" : "Require durable checkpoint"
+    }
+    func settingsMemoryCheckpointToggleNote(_ t: ThemeID, provider: String, apiVersion: Int) -> String {
+        t == .control
+            ? "\(provider.uppercased()) ADVERTISES CHECKPOINT API V\(apiVersion). NATIVE + MICRO COMPACTION ARE SUPPRESSED; CODEX APP-SERVER MODE IS REJECTED."
+            : "\(provider) advertises checkpoint API v\(apiVersion). Hermes suppresses native and micro-compaction while this is on, and rejects Codex app-server mode."
+    }
+    func settingsMemoryCheckpointBlocked(_ t: ThemeID) -> String {
+        t == .control ? "BLOCKED" : "Blocked"
+    }
+    func settingsMemoryCheckpointUnavailable(_ t: ThemeID) -> String {
+        t == .control ? "NOT AVAILABLE" : "Unavailable"
+    }
+    func settingsMemoryCheckpointRecoverablePrefix(_ t: ThemeID) -> String {
+        t == .control
+            ? "TRANSCRIPT PRESERVED. FIX THE GATEWAY CONFIGURATION, THEN RETRY COMPACTION. "
+            : "The transcript is preserved. Fix the gateway configuration, then retry compression. "
+    }
+    func settingsMemoryCheckpointValueNotReported(_ t: ThemeID) -> String {
+        t == .control
+            ? "THIS GATEWAY DOES NOT REPORT compression.checkpoint_required; TALARIA LEAVES IT UNCHANGED."
+            : "This gateway does not report compression.checkpoint_required, so Talaria leaves it unchanged."
+    }
+    func settingsMemoryCheckpointValueUnrecognized(_ t: ThemeID) -> String {
+        t == .control
+            ? "THE GATEWAY REPORTED A NON-BOOLEAN checkpoint_required VALUE; TALARIA LEAVES THE RAW VALUE UNCHANGED."
+            : "The gateway reported a non-boolean checkpoint_required value, so Talaria leaves the raw value unchanged."
+    }
+    func settingsMemoryCheckpointNoActiveProvider(_ t: ThemeID) -> String {
+        t == .control
+            ? "SELECT A READY EXTERNAL MEMORY PROVIDER THAT ADVERTISES CHECKPOINT API V2."
+            : "Select and configure a ready external memory provider that advertises checkpoint API v2."
+    }
+    func settingsMemoryCheckpointProviderNotReported(_ t: ThemeID, provider: String) -> String {
+        t == .control
+            ? "ACTIVE PROVIDER \(provider.uppercased()) IS NOT IN THE AUTHORITATIVE GATEWAY INVENTORY."
+            : "The active provider \(provider) is not in the gateway inventory."
+    }
+    func settingsMemoryCheckpointProviderNotReady(_ t: ThemeID, provider: String) -> String {
+        t == .control
+            ? "FINISH CONFIGURING \(provider.uppercased()) ON THIS GATEWAY, THEN REFRESH."
+            : "Finish configuring \(provider) on this gateway, then refresh this screen."
+    }
+    func settingsMemoryCheckpointAPINotAdvertised(_ t: ThemeID, provider: String) -> String {
+        t == .control
+            ? "\(provider.uppercased()) DOES NOT ADVERTISE CHECKPOINT API V2. UPDATE OR CONFIGURE THE PROVIDER; TALARIA WILL NOT INFER CAPABILITY."
+            : "\(provider) does not advertise checkpoint API v2. Update or configure the provider; Talaria will not infer capability."
+    }
+    func settingsMemoryCheckpointAPIVersionTooOld(_ t: ThemeID, provider: String, version: Int) -> String {
+        t == .control
+            ? "\(provider.uppercased()) REPORTS CHECKPOINT API V\(version); V2 OR LATER IS REQUIRED."
+            : "\(provider) reports checkpoint API v\(version); API v2 or later is required."
+    }
+    func settingsMemoryCheckpointScopedReadinessUnavailable(_ t: ThemeID,
+                                                             provider: String) -> String {
+        let name = provider.isEmpty ? "the selected provider" : provider
+        return t == .control
+            ? "PROFILE-SCOPED READINESS FOR \(name.uppercased()) IS NOT EXPOSED BY THIS GATEWAY. TALARIA LEAVES THE CHECKPOINT SETTING UNCHANGED."
+            : "This gateway does not expose profile-scoped readiness for \(name), so Talaria leaves the checkpoint setting unchanged."
+    }
+    func settingsMemoryCheckpointSaved(_ t: ThemeID, enabled: Bool) -> String {
+        if t == .control {
+            return enabled ? "DURABLE CHECKPOINT REQUIRED" : "DURABLE CHECKPOINT NOT REQUIRED"
+        }
+        return enabled ? "Durable checkpoint required before compression."
+            : "Durable checkpoint requirement disabled."
+    }
     func settingsMemoryProviderSetupDone(_ t: ThemeID, provider: String) -> String { t == .control ? "SETUP COMPLETE: \(provider.uppercased())" : "Installed \(provider)'s gateway requirements." }
     func settingsMemoryOAuth(_ t: ThemeID) -> String { t == .control ? "PROVIDER CONNECTION" : "Provider account" }
     func settingsMemoryOAuthNote(_ t: ThemeID) -> String { t == .control ? "PROFILE-SCOPED OAUTH CREDENTIAL" : "Connect this provider for the selected profile." }

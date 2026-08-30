@@ -99,6 +99,124 @@ final class MemoryProviderManagementTests: XCTestCase {
         XCTAssertEqual(names, ["profile-provider", "gateway-provider", "configured-but-missing"])
     }
 
+    func testCheckpointRequirementPreservesRawNonBooleanValue() {
+        let configuration: JSONValue = [
+            "memory": ["provider": "durable"],
+            "compression": ["checkpoint_required": "yes"],
+        ]
+
+        let scoped = MemoryProviderScopeConfiguration(configuration)
+
+        XCTAssertEqual(scoped.activeProvider, "durable")
+        XCTAssertEqual(scoped.checkpointRequirement.rawValue, .string("yes"))
+        XCTAssertEqual(scoped.checkpointRequirement.rawState, .unrecognized(.string("yes")))
+        XCTAssertNil(scoped.checkpointRequirement.enabled)
+
+        let state = CompressionCheckpointGateState.resolve(
+            requirement: scoped.checkpointRequirement,
+            activeProvider: scoped.activeProvider,
+            inventory: checkpointInventory(apiVersion: 2))
+
+        XCTAssertEqual(state, .unavailable(.checkpointValueUnrecognized(.string("yes"))))
+        XCTAssertFalse(state.toggleIsVisible)
+        XCTAssertFalse(state.isRecoverableConfigurationState)
+    }
+
+    func testCheckpointToggleRequiresReadyActiveProviderAndExplicitV2Advertisement() {
+        let requirement = CompressionCheckpointRequirement(rawValue: .bool(false))
+        let state = CompressionCheckpointGateState.resolve(
+            requirement: requirement, activeProvider: "durable",
+            inventory: checkpointInventory(apiVersion: 2))
+
+        XCTAssertEqual(state, .controllable(enabled: false, provider: "durable", apiVersion: 2))
+        XCTAssertTrue(state.toggleIsVisible)
+        XCTAssertEqual(state.enabled, false)
+
+        // A different provider advertising v2 cannot authorize the selected
+        // provider. The gate is tied to the active provider, not a catalog row.
+        let wrongProvider = CompressionCheckpointGateState.resolve(
+            requirement: requirement, activeProvider: "other",
+            inventory: checkpointInventory(apiVersion: 2))
+        XCTAssertEqual(wrongProvider, .unavailable(.activeProviderNotReported("other")))
+        XCTAssertFalse(wrongProvider.toggleIsVisible)
+    }
+
+    func testCheckpointToggleStaysUnavailableWithoutScopedReadinessProof() {
+        let state = CompressionCheckpointGateState.resolve(
+            requirement: CompressionCheckpointRequirement(rawValue: .bool(false)),
+            activeProvider: "durable",
+            inventory: checkpointInventory(apiVersion: 2),
+            readinessIsAuthoritative: false)
+
+        XCTAssertEqual(
+            state, .unavailable(.scopedProviderReadinessUnavailable("durable")))
+        XCTAssertFalse(state.toggleIsVisible)
+    }
+
+    func testCheckpointGateBlocksEnabledRequirementRecoverablyWithoutV2Proof() {
+        let requirement = CompressionCheckpointRequirement(rawValue: .bool(true))
+        let state = CompressionCheckpointGateState.resolve(
+            requirement: requirement, activeProvider: "durable",
+            inventory: checkpointInventory(apiVersion: nil))
+
+        XCTAssertEqual(state, .blocked(.checkpointAPINotAdvertised("durable")))
+        XCTAssertTrue(state.isRecoverableConfigurationState)
+        XCTAssertFalse(state.toggleIsVisible)
+        XCTAssertEqual(state.blocker, .checkpointAPINotAdvertised("durable"))
+    }
+
+    func testCheckpointGateRejectsOldOrUnreadyCapabilityClaims() {
+        let requirement = CompressionCheckpointRequirement(rawValue: .bool(true))
+
+        let old = CompressionCheckpointGateState.resolve(
+            requirement: requirement, activeProvider: "durable",
+            inventory: checkpointInventory(apiVersion: 1))
+        XCTAssertEqual(old, .blocked(.checkpointAPIVersionTooOld(provider: "durable", version: 1)))
+
+        let unavailable = CompressionCheckpointGateState.resolve(
+            requirement: requirement, activeProvider: "durable",
+            inventory: checkpointInventory(apiVersion: 2, available: false, status: "unavailable"))
+        XCTAssertEqual(unavailable, .blocked(.activeProviderNotReady("durable")))
+        XCTAssertTrue(unavailable.isRecoverableConfigurationState)
+    }
+
+    func testCheckpointInventoryAcceptsOnlyExactNumericApiVersions() {
+        let decimal = MemoryProviderInventoryRow([
+            "name": "durable", "available": true, "configured": true, "status": "ready",
+            "pre_compress_checkpoint_api_version": 2.5,
+        ])
+        let versionTwo = MemoryProviderInventoryRow([
+            "name": "durable", "available": true, "configured": true, "status": "ready",
+            "pre_compress_checkpoint_api_version": 2,
+        ])
+
+        XCTAssertEqual(decimal?.checkpointAPIVersionRaw, .number(2.5))
+        XCTAssertNil(decimal?.checkpointAPIVersion)
+        XCTAssertFalse(decimal?.advertisesCheckpointAPIV2 ?? true)
+        XCTAssertEqual(versionTwo?.checkpointAPIVersion, 2)
+        XCTAssertTrue(versionTwo?.advertisesCheckpointAPIV2 ?? false)
+    }
+
+    func testCheckpointBlockedPrerequisiteIsAnApplicationOutcomeNotTransportLoss() {
+        let blocked = GatewayError(code: 409,
+                                   message: "BLOCKED_MISSING_PREREQUISITE: provider unavailable")
+        let disconnected = GatewayError(code: -7, message: "connection lost")
+
+        XCTAssertTrue(CompressionCheckpointFailurePolicy.isBlockedPrerequisite(blocked))
+        XCTAssertFalse(CompressionCheckpointFailurePolicy.isBlockedPrerequisite(disconnected))
+
+        // Some gateway paths can return a result envelope rather than a JSON-RPC
+        // error. A `compressed:false` flag must not downgrade the strict
+        // checkpoint block into the ordinary lock-held/no-op state.
+        let result = SessionCompression(.object([
+            "status": .string("blocked"),
+            "message": .string("BLOCKED_MISSING_PREREQUISITE: checkpoint failed"),
+            "compressed": .bool(false),
+        ]))
+        XCTAssertEqual(result.outcome.rawValue, "blocked")
+        XCTAssertEqual(result.headline, "BLOCKED_MISSING_PREREQUISITE: checkpoint failed")
+    }
+
     func testDeclaredConfigSaveDoesNotImplyActivation() {
         XCTAssertEqual(MemoryProviderSaveSemantics.activeSelection(
             afterDeclaredSave: "builtin"), "builtin")
@@ -189,5 +307,25 @@ final class MemoryProviderManagementTests: XCTestCase {
             "value": value,
             "options": options,
         ]
+    }
+
+    private func checkpointInventory(apiVersion: Int?, available: Bool = true,
+                                     status: String = "ready") -> MemoryProviderInventory {
+        var provider: [String: JSONValue] = [
+            "name": "durable",
+            "description": "Durable archive",
+            "available": .bool(available),
+            "configured": true,
+            "status": .string(status),
+            "setup": [:],
+        ]
+        if let apiVersion {
+            provider["pre_compress_checkpoint_api_version"] = .number(Double(apiVersion))
+        }
+        return MemoryProviderInventory([
+            "active": "durable",
+            "providers": [.object(provider)],
+            "builtin_files": [:],
+        ])
     }
 }

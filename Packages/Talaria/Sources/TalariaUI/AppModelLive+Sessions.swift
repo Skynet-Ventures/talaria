@@ -1030,10 +1030,23 @@ extension AppModel {
             if let note = result.note, !note.isEmpty {
                 detail = detail.isEmpty ? note : detail + "\n" + note
             }
-            return SessionActionOutcome(ok: result.outcome != .aborted,
+            if result.outcome == .blocked {
+                let recovery = theme.copy.settingsMemoryCheckpointRecoverablePrefix(theme.themeID)
+                detail = detail.isEmpty ? recovery : detail + "\n" + recovery
+            }
+            return SessionActionOutcome(ok: result.outcome != .aborted && result.outcome != .blocked,
                                         headline: result.headline,
                                         detail: detail.isEmpty ? nil : detail)
         } catch {
+            if CompressionCheckpointFailurePolicy.isBlockedPrerequisite(error) {
+                let recovery = theme.copy.settingsMemoryCheckpointRecoverablePrefix(theme.themeID)
+                let gatewayMessage = (error as? GatewayError)?.message ?? ""
+                let detail = gatewayMessage.isEmpty ? recovery : gatewayMessage + "\n" + recovery
+                return SessionActionOutcome(
+                    ok: false,
+                    headline: theme.copy.settingsMemoryCheckpointBlocked(theme.themeID),
+                    detail: detail)
+            }
             return SessionActionOutcome(ok: false,
                                         headline: Self.sessionFailure(error, theme: theme))
         }
