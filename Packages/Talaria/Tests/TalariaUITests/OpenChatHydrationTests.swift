@@ -34,6 +34,8 @@ final class OpenChatHydrationTests: XCTestCase {
         try await hydration.value
         XCTAssertEqual(chat.messages.map(\.text), ["full question", "full answer"])
         XCTAssertEqual(chat.messages.map(\.rowID), [10, 11])
+        XCTAssertFalse(chat.messages.contains(where: { $0.text == "stub" }),
+                       "the deferred stub must not remain after the latest page lands")
         XCTAssertFalse(chat.transcriptHasOlder)
         XCTAssertEqual(chat.transcriptOlderOffset, 2)
     }

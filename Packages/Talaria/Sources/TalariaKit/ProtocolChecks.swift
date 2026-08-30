@@ -71,6 +71,18 @@ public enum ProtocolChecks {
         try expect(OpenChatHistoryPolicy.hasOlderMessages(
             pageCount: 200, limit: 200, source: .latestPage),
                    "a full latest page is a window, not the whole store")
+        try expect(OpenChatHistoryPolicy.sameBinding(
+            "root", target: "tip", durableID: "root"),
+                   "root id and resume tip are one conversation")
+        try expect(OpenChatHistoryPolicy.attachRestTarget(
+            "Bot Chat", durableID: nil, canonicalTitle: "Bot Chat") == nil,
+                   "a title-only resume does not prefetch REST")
+        let stubUser = ChatMessage(author: .user, text: "stub", rowID: 1)
+        let optimistic = ChatMessage(author: .user, text: "typed during fetch")
+        let newer = OpenChatHistoryPolicy.rowsNewerThanStub(
+            current: [stubUser, optimistic], stubSnapshot: [stubUser])
+        try expect(newer.map(\.id) == [optimistic.id],
+                   "an unchanged deferred stub is not an optimistic send")
     }
 
     static func eventEnvelopeDecoding() throws {

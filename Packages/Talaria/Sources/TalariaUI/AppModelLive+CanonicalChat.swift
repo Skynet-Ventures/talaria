@@ -899,7 +899,7 @@ extension AppModel {
                         gatewayGeneration: Int,
                         durableID: String? = nil) async -> CanonicalAttach {
         let chat = chat(for: botID)
-        let rebinding = !Self.sameOpenChatBinding(
+        let rebinding = !OpenChatHistoryPolicy.sameBinding(
             chat.storedSessionID, target: target, durableID: durableID)
         var pageTask: Task<JSONValue?, Error>?
         do {
@@ -909,7 +909,8 @@ extension AppModel {
             // history window; a flaky REST read keeps the stub/cache instead
             // of failing the open. Mutation-proof paths still request a
             // full projection.
-            let restTarget = Self.attachRestTarget(target, durableID: durableID)
+            let restTarget = OpenChatHistoryPolicy.attachRestTarget(
+                target, durableID: durableID, canonicalTitle: Self.canonicalChatTitle)
             pageTask = hydrate && restTarget != nil
                 ? Task {
                     try await client.latestSessionMessages(
@@ -1227,8 +1228,23 @@ extension AppModel {
         let chat = chat(for: botID)
         let page = Self.chatMessages(fromTranscript: payload)
         guard !page.isEmpty else { return }
-        Self.applyHydratedHistory(
-            page, to: chat, baseline: chat.messages, clearWhenEmpty: false)
+        // Prefetch may land after the deferred stub is already on screen.
+        // Durable stub/cache rows are first-paint placeholders, not optimistic
+        // sends; only in-flight / unpersisted rows ride through the window.
+        let live = chat.messages.filter { message in
+            message.rowID == nil || message.isStreaming
+                || message.toolCalls.contains(where: { $0.state == .running })
+        }
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+        chat.messages = TranscriptHydrationMerge.merge(
+            history: page, baseline: live, current: live,
+            clearWhenEmpty: false, protectedIDs: protectedIDs)
+        if !protectedIDs.isEmpty {
+            let visible = Set(chat.messages.map(\.id))
+            ChatRuntime.shared.retainedFailureRows[chatID] =
+                protectedIDs.intersection(visible)
+        }
         chat.transcriptHasOlder = OpenChatHistoryPolicy.hasOlderMessages(
             pageCount: page.count, limit: OpenChatHistoryPolicy.firstPageLimit,
             source: .latestPage)
@@ -1236,29 +1252,16 @@ extension AppModel {
         chat.isLoadingOlderTranscript = false
     }
 
-    /// Durable key we can address REST with before `session.resume` returns.
-    /// A title-only target has to wait for the ack; using "Bot Chat" as a
-    /// path segment would 404.
-    ///
-    /// `nonisolated`: pure string projection — package tests call it off the
-    /// main actor, and attach must not hop just to pick a REST path segment.
+    /// Thin wrappers so package tests can keep calling AppModel without
+    /// hopping onto the main actor. Logic lives on `OpenChatHistoryPolicy`.
     nonisolated static func attachRestTarget(_ target: String, durableID: String?) -> String? {
-        if let durableID {
-            let trimmed = durableID.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == canonicalBotChatTitle { return nil }
-        return trimmed
+        OpenChatHistoryPolicy.attachRestTarget(
+            target, durableID: durableID, canonicalTitle: canonicalBotChatTitle)
     }
 
-    /// Root id, resume tip, and the bound stored key are the same conversation.
     nonisolated static func sameOpenChatBinding(_ stored: String?, target: String,
                                                durableID: String?) -> Bool {
-        guard let stored, !stored.isEmpty else { return false }
-        if stored == target { return true }
-        if let durableID, stored == durableID { return true }
-        return false
+        OpenChatHistoryPolicy.sameBinding(stored, target: target, durableID: durableID)
     }
 
     /// Open-chat hydration: paint the deferred stub immediately, then merge
@@ -1473,12 +1476,14 @@ extension AppModel {
         accepts: @MainActor () -> Bool
     ) async throws {
         let stub = Self.chatMessages(fromTranscript: .array(resumeMessages))
+        var stubSnapshot: [ChatMessage] = []
         if !stub.isEmpty {
             try Task.checkCancellation()
             guard accepts() else { throw CancellationError() }
             applyHydratedHistory(
                 stub, to: chat, baseline: chat.messages,
                 clearWhenEmpty: false)
+            stubSnapshot = chat.messages
         }
 
         guard OpenChatHistoryPolicy.needsLatestPage(
@@ -1488,14 +1493,13 @@ extension AppModel {
             return
         }
 
-        let baseline = chat.messages
         let payload = try await latestPage()
         try Task.checkCancellation()
         guard accepts() else { throw CancellationError() }
         guard let payload else {
             if stub.isEmpty {
                 applyHydratedHistory(
-                    [], to: chat, baseline: baseline,
+                    [], to: chat, baseline: chat.messages,
                     clearWhenEmpty: clearWhenEmpty)
             }
             return
@@ -1508,9 +1512,20 @@ extension AppModel {
             chat.resetTranscriptWindow()
             return
         }
-        applyHydratedHistory(
-            page, to: chat, baseline: baseline,
-            clearWhenEmpty: clearWhenEmpty)
+        // The stub is already on screen. Only rows that arrived or changed
+        // after that paint are newer than the REST window.
+        let live = OpenChatHistoryPolicy.rowsNewerThanStub(
+            current: chat.messages, stubSnapshot: stubSnapshot)
+        let chatID = ObjectIdentifier(chat)
+        let protectedIDs = ChatRuntime.shared.retainedFailureRows[chatID] ?? []
+        chat.messages = TranscriptHydrationMerge.merge(
+            history: page, baseline: live, current: live,
+            clearWhenEmpty: clearWhenEmpty, protectedIDs: protectedIDs)
+        if !protectedIDs.isEmpty {
+            let visible = Set(chat.messages.map(\.id))
+            ChatRuntime.shared.retainedFailureRows[chatID] =
+                protectedIDs.intersection(visible)
+        }
         chat.transcriptHasOlder = OpenChatHistoryPolicy.hasOlderMessages(
             pageCount: page.count, limit: firstPageLimit, source: source)
         chat.transcriptOlderOffset = page.count

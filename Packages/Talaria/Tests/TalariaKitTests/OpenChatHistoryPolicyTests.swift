@@ -55,6 +55,41 @@ final class OpenChatHistoryPolicyTests: XCTestCase {
             pageCount: 800, limit: 200, source: .resumeProjection))
     }
 
+    func testSameBindingTreatsRootAndResumeTipAsOneConversation() {
+        XCTAssertTrue(OpenChatHistoryPolicy.sameBinding(
+            "root", target: "tip", durableID: "root"))
+        XCTAssertTrue(OpenChatHistoryPolicy.sameBinding(
+            "tip", target: "tip", durableID: "root"))
+        XCTAssertFalse(OpenChatHistoryPolicy.sameBinding(
+            "other", target: "tip", durableID: "root"))
+        XCTAssertFalse(OpenChatHistoryPolicy.sameBinding(
+            nil, target: "tip", durableID: "root"))
+    }
+
+    func testTitleOnlyResumeDoesNotPrefetchREST() {
+        XCTAssertNil(OpenChatHistoryPolicy.attachRestTarget(
+            "Bot Chat", durableID: nil, canonicalTitle: "Bot Chat"))
+        XCTAssertEqual(OpenChatHistoryPolicy.attachRestTarget(
+            "Bot Chat", durableID: "root", canonicalTitle: "Bot Chat"), "root")
+        XCTAssertEqual(OpenChatHistoryPolicy.attachRestTarget(
+            "stored-1", durableID: nil, canonicalTitle: "Bot Chat"), "stored-1")
+    }
+
+    func testRowsNewerThanStubDropsUnchangedPlaceholders() {
+        let stubUser = ChatMessage(author: .user, text: "stub", rowID: 1)
+        let stubBot = ChatMessage(author: .bot, text: "old", rowID: 2)
+        let optimistic = ChatMessage(author: .user, text: "typed during fetch")
+        var streaming = stubBot
+        streaming.text = "old+"
+        streaming.isStreaming = true
+
+        let newer = OpenChatHistoryPolicy.rowsNewerThanStub(
+            current: [stubUser, streaming, optimistic],
+            stubSnapshot: [stubUser, stubBot])
+        XCTAssertEqual(newer.map(\.id), [stubBot.id, optimistic.id])
+        XCTAssertFalse(newer.contains(where: { $0.id == stubUser.id }))
+    }
+
     func testPrependDropsDuplicateDurableRows() {
         let visible = [
             ChatMessage(author: .user, text: "later", rowID: 3),

@@ -784,7 +784,9 @@ extension AppModel {
 
             try await Self.hydrateOpenChatTranscript(
                 chat: chat,
-                resumeMessages: live.messages,
+                resumeMessages: OpenChatHistoryPolicy.openChatResumeMessages(
+                    live.messages,
+                    historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory),
                 historyDeferred: OpenChatHistoryPolicy.resumeDefersHistory,
                 clearWhenEmpty: true,
                 latestPage: {
