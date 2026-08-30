@@ -1239,7 +1239,10 @@ extension AppModel {
     /// Durable key we can address REST with before `session.resume` returns.
     /// A title-only target has to wait for the ack; using "Bot Chat" as a
     /// path segment would 404.
-    static func attachRestTarget(_ target: String, durableID: String?) -> String? {
+    ///
+    /// `nonisolated`: pure string projection — package tests call it off the
+    /// main actor, and attach must not hop just to pick a REST path segment.
+    nonisolated static func attachRestTarget(_ target: String, durableID: String?) -> String? {
         if let durableID {
             let trimmed = durableID.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { return trimmed }
@@ -1250,8 +1253,8 @@ extension AppModel {
     }
 
     /// Root id, resume tip, and the bound stored key are the same conversation.
-    static func sameOpenChatBinding(_ stored: String?, target: String,
-                                    durableID: String?) -> Bool {
+    nonisolated static func sameOpenChatBinding(_ stored: String?, target: String,
+                                               durableID: String?) -> Bool {
         guard let stored, !stored.isEmpty else { return false }
         if stored == target { return true }
         if let durableID, stored == durableID { return true }
