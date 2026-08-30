@@ -70,6 +70,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
     @MainActor
     private func waitUntil(_ predicate: () -> Bool) async {
         for _ in 0..<1_000 where !predicate() { await Task.yield() }
+        if !predicate() {
+            LiveRuntime.shared.reconnectTask?.cancel()
+        }
         XCTAssertTrue(predicate())
     }
 
@@ -770,9 +773,8 @@ final class SupervisedReconnectParityTests: XCTestCase {
         supervisor.randomUnit = { 0 }
         var dialCount = 0
         supervisor.sleep = { _ in
-            // Instant return without a throw is a MainActor busy-loop: the
-            // supervised retry never suspends, so cancel is never observed.
             if dialCount >= 2 { throw CancellationError() }
+            await Task.yield()
         }
         supervisor.dial = { _ in
             dialCount += 1

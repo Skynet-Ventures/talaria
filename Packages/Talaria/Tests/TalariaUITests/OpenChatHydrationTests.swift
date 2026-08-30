@@ -286,15 +286,35 @@ final class OpenChatHydrationTests: XCTestCase {
 private func waitForTask(_ task: Task<Void, Never>?, seconds: Double) async -> Bool {
     guard let task else { return true }
     let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
-    return await withTaskGroup(of: Bool.self) { group in
-        group.addTask { await task.value; return true }
-        group.addTask {
-            try? await Task.sleep(nanoseconds: nanoseconds)
-            return false
+    // TaskGroup joins remaining children after cancelAll(); awaiting
+    // `task.value` from a cancelled child still parks until the task ends.
+    return await withCheckedContinuation { continuation in
+        let once = OpenChatWaitOnce(continuation)
+        Task {
+            await task.value
+            once.resume(true)
         }
-        let first = await group.next() ?? false
-        group.cancelAll()
-        return first
+        Task {
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            once.resume(false)
+        }
+    }
+}
+
+private final class OpenChatWaitOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: Bool) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }
 

@@ -1146,22 +1146,25 @@ extension AppModel {
 
     /// Wait for resign teardown, but never longer than `seconds`. A hung
     /// `close()` left device 8cea17a on `redial.scheduled` with no dial.
+    ///
+    /// Do not use `withTaskGroup` here: after `cancelAll()` the group still
+    /// joins remaining children, and `await task.value` does not abort when
+    /// the waiter is cancelled. A parked resign continuation then hangs the
+    /// wake dial past `backgroundInvalidateTimeout` and parks `swift test`.
     private static func awaitBackgroundInvalidate(
         _ pending: Task<Void, Never>, seconds: TimeInterval
     ) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
+        let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
+        return await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            Task {
                 await pending.value
-                return true
+                once.resume(true)
             }
-            group.addTask {
-                let ns = UInt64(max(seconds, 0) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: ns)
-                return false
+            Task {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                once.resume(false)
             }
-            let finished = await group.next() ?? false
-            group.cancelAll()
-            return finished
         }
     }
 
@@ -1946,5 +1949,24 @@ extension CopyPack {
         case .control: "RELINKING…"
         case .ink: "mending…"
         }
+    }
+}
+
+/// First resume wins. Used so a timeout race can return without joining a
+/// parked `Task.value` waiter (TaskGroup would wait for that child forever).
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: Bool) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }
