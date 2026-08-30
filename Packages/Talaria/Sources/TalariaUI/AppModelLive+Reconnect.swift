@@ -141,6 +141,10 @@ final class ConnectionSupervisor {
     /// while exercising AppModel.refreshConnectionHealth end to end.
     @ObservationIgnored var healthProbe:
         @Sendable (SavedGateway) async -> (ConnectionState, GatewayDiagnostics) =
+            ConnectionSupervisor.productionHealthProbe
+
+    private static let productionHealthProbe:
+        @Sendable (SavedGateway) async -> (ConnectionState, GatewayDiagnostics) =
             { gateway in await GatewayDiagnostics.probe(gateway) }
 
     @ObservationIgnored let keychain = KeychainStore()
@@ -203,6 +207,7 @@ final class ConnectionSupervisor {
 
     func resetTestingSeams() {
         sleep = Self.productionSleep
+        healthProbe = Self.productionHealthProbe
         randomUnit = { Double.random(in: 0..<1) }
         now = { ProcessInfo.processInfo.systemUptime }
         dial = { client in

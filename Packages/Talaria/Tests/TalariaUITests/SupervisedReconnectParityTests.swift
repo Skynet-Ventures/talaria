@@ -44,6 +44,11 @@ final class SupervisedReconnectParityTests: XCTestCase {
         // Production sleep retries forever. A failed-dial test that then
         // awaits reconnectTask would sit in that loop until the 6h job cap.
         supervisor.sleep = { _ in throw CancellationError() }
+        // Wake also probes every saved row via URLSession. A leaked registry
+        // row plus the fixture host would spend 5s+ per test on DNS.
+        supervisor.healthProbe = { _ in
+            (.offline, GatewayDiagnostics(lastError: "reconnect-test"))
+        }
         supervisor.diagnostics.removeValue(forKey: gateway.id)
         return Fixture(model: model, registry: registry, gateway: gateway,
                        baseURL: base, credential: credential, client: client)
@@ -74,6 +79,40 @@ final class SupervisedReconnectParityTests: XCTestCase {
             LiveRuntime.shared.reconnectTask?.cancel()
         }
         XCTAssertTrue(predicate())
+    }
+
+    /// `await reconnectTask.value` is unbounded. Race a 6s cap without
+    /// TaskGroup (which joins the waiter after cancelAll and can hang CI).
+    @MainActor
+    private func awaitTaskSettled(_ task: Task<Void, Never>?,
+                                  seconds: Double = 6,
+                                  name: String = "task") async -> Bool {
+        guard let task else { return true }
+        let nanoseconds = UInt64(max(seconds, 0) * 1_000_000_000)
+        let finished = await withCheckedContinuation { continuation in
+            let once = ReconnectWaitOnce(continuation)
+            Task {
+                await task.value
+                once.resume(true)
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+                once.resume(false)
+            }
+        }
+        if !finished {
+            task.cancel()
+            XCTFail("\(name) still running after \(seconds)s")
+        }
+        return finished
+    }
+
+    @MainActor
+    private func awaitReconnectSettled(seconds: Double = 6) async {
+        let task = LiveRuntime.shared.reconnectTask
+        let finished = await awaitTaskSettled(
+            task, seconds: seconds, name: "reconnectTask")
+        if !finished { LiveRuntime.shared.reconnectTask = nil }
     }
 
     @MainActor
@@ -113,7 +152,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
 
         fixture.model.scheduleSupervisedReconnect()
         let task = LiveRuntime.shared.reconnectTask
-        await task?.value
+        await awaitReconnectSettled()
 
         XCTAssertEqual(dials, 8, "the supervised policy has no attempt ceiling")
         XCTAssertEqual(sleeps, [0.15, 0.3, 0.6, 1.2, 2.4, 4.8, 7.5, 7.5, 7.5])
@@ -150,7 +189,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         await waitUntil { continuation != nil }
         time = 101
         continuation?.resume()
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertFalse(fixture.model.isOffline)
         XCTAssertNil(supervisor.episodeSource)
@@ -240,12 +279,12 @@ final class SupervisedReconnectParityTests: XCTestCase {
         supervisor.reconnectTaskToken = successorToken
         LiveRuntime.shared.reconnectTask = successor
         oldSleep?.resume()
-        await oldTask?.value
+        _ = await awaitTaskSettled(oldTask, name: "old reconnect")
 
         XCTAssertEqual(supervisor.reconnectTaskToken, successorToken)
         XCTAssertNotNil(LiveRuntime.shared.reconnectTask)
         successorGate?.resume()
-        await successor.value
+        _ = await awaitTaskSettled(successor, name: "successor")
     }
 
     @MainActor
@@ -365,7 +404,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
                 adoptionOperations: operations)
         }
         switchContinuation?.resume()
-        await staleSwitch.value
+        _ = await awaitTaskSettled(staleSwitch, name: "stale switch")
 
         XCTAssertEqual(LiveRuntime.shared.baseURL, targetCURL)
         XCTAssertEqual(fixture.model.client.map(ObjectIdentifier.init),
@@ -433,7 +472,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         fixture.model.applicationDidBecomeActive()
         fixture.model.applicationDidBecomeActive()
         await waitUntil { dialCount > 0 }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertGreaterThanOrEqual(dialCount, 1)
         XCTAssertFalse(fixture.model.isOffline)
@@ -514,7 +553,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
 
         fixture.model.applicationDidBecomeActive()
         await waitUntil { dialCount > 0 }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertGreaterThanOrEqual(dialCount, 1)
         XCTAssertTrue(fixture.model.reconnectTraceForTesting.contains("didBecomeActive"))
@@ -546,7 +585,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         fixture.model.applicationDidBecomeActive()
         await waitUntil { dialCount > 0 }
         hung?.resume()
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertGreaterThanOrEqual(dialCount, 1)
         XCTAssertTrue(
@@ -585,7 +624,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         XCTAssertNotEqual(supervisor.reconnectGeneration, hungGeneration)
         fixture.model.applicationDidBecomeActive()
         await waitUntil { wakeDials > 0 }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         hung?.resume()
         for _ in 0..<20 { await Task.yield() }
@@ -608,7 +647,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         await waitUntil {
             fixture.model.reconnectTraceForTesting.contains("connect.failed")
         }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         let steps = fixture.model.reconnectTraceForTesting
         XCTAssertTrue(steps.contains("resign"))
@@ -645,7 +684,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
             fixture.model.reconnectTraceForTesting.contains("connect.started")
         }
         await waitUntil { dialCount > 0 }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertGreaterThanOrEqual(dialCount, 1)
         let steps = fixture.model.reconnectTraceForTesting
@@ -679,7 +718,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         fixture.model.applicationDidBecomeActive()
         fixture.model.applicationDidBecomeActive()
         await waitUntil { dialCount > 0 }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertGreaterThanOrEqual(dialCount, 1)
         XCTAssertTrue(
@@ -715,7 +754,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         await waitUntil {
             fixture.model.reconnectTraceForTesting.contains("connect.failed")
         }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertFalse(fixture.model.isWakeRedialGraceActive)
         XCTAssertTrue(fixture.model.showsOfflineUnreachableChrome)
@@ -749,7 +788,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
             fixture.model.reconnectTraceForTesting.contains("connect.started")
         }
         await waitUntil { dialCount > 0 }
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         let steps = fixture.model.reconnectTraceForTesting
         XCTAssertTrue(steps.contains("credential.rebound"), steps.joined(separator: ","))
@@ -789,7 +828,7 @@ final class SupervisedReconnectParityTests: XCTestCase {
         fixture.model.reconnectNow()
         await waitUntil { dialCount >= 2 }
         LiveRuntime.shared.reconnectTask?.cancel()
-        await LiveRuntime.shared.reconnectTask?.value
+        await awaitReconnectSettled()
 
         XCTAssertGreaterThanOrEqual(dialCount, 2)
         XCTAssertTrue(
@@ -869,5 +908,22 @@ final class SupervisedReconnectParityTests: XCTestCase {
         XCTAssertFalse(String(describing: recovery).contains("secret"))
         XCTAssertFalse(String(describing: recovery).contains("private"))
         XCTAssertFalse(String(describing: recovery).contains("token"))
+    }
+}
+
+private final class ReconnectWaitOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: Bool) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }
