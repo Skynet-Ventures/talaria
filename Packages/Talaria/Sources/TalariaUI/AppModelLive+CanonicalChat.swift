@@ -578,7 +578,8 @@ extension AppModel {
         //     — that a desktop-born one never appears in.
         let live = try await client.createSession(profile: profile,
                                                   title: Self.canonicalChatTitle,
-                                                  hidden: true)
+                                                  hidden: true,
+                                                  runtimeContract: .followProfileConfiguration)
         guard acceptsSnapshot() else {
             throw CancellationError()
         }

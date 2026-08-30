@@ -3,6 +3,27 @@ import XCTest
 @testable import TalariaKit
 
 final class CanonicalSessionProtocolTests: XCTestCase {
+
+    func testBotModeSessionCreateContractsFollowCurrentProfileConfiguration() {
+        let canonical = GatewayClient.sessionCreateParams(
+            profile: "research", title: "Bot Chat", hidden: true,
+            runtimeContract: .followProfileConfiguration)
+        XCTAssertEqual(canonical["profile"]?.stringValue, "research")
+        XCTAssertEqual(canonical["hidden"]?.boolValue, true)
+        XCTAssertEqual(canonical["follow_profile_config"]?.boolValue, true)
+        XCTAssertNil(canonical["room_plumbing"])
+
+        let room = GatewayClient.sessionCreateParams(
+            profile: "research", title: "Group: room-1", hidden: true,
+            runtimeContract: .roomPlumbing)
+        XCTAssertEqual(room["room_plumbing"]?.boolValue, true)
+        XCTAssertEqual(room["follow_profile_config"]?.boolValue, true)
+
+        let ordinary = GatewayClient.sessionCreateParams(profile: "research")
+        XCTAssertNil(ordinary["room_plumbing"])
+        XCTAssertNil(ordinary["follow_profile_config"])
+    }
+
     func testCurrentCanonicalWinsOverLegacyPreferredAndKeepsRootTip() throws {
         let profile = HermesProfile(try json("""
         {"name":"default",

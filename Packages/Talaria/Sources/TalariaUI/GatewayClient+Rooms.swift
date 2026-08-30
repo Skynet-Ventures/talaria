@@ -236,7 +236,9 @@ public extension GatewayClient {
             storedID: storedID, immutableTitle: immutableTitle, legacyTitle: legacyTitle,
             resume: { try await self.resumeSession($0, profile: profile) },
             create: {
-                try await self.createSession(profile: profile, title: immutableTitle, hidden: true)
+                try await self.createSession(
+                    profile: profile, title: immutableTitle, hidden: true,
+                    runtimeContract: .roomPlumbing)
             })
         guard !live.sessionID.isEmpty, !live.storedSessionID.isEmpty else {
             throw GatewayError(code: -8, message: "Room session resolution returned no durable identity.")
