@@ -75,9 +75,6 @@ final class SupervisedReconnectParityTests: XCTestCase {
     @MainActor
     private func waitUntil(_ predicate: () -> Bool) async {
         for _ in 0..<1_000 where !predicate() { await Task.yield() }
-        if !predicate() {
-            LiveRuntime.shared.reconnectTask?.cancel()
-        }
         XCTAssertTrue(predicate())
     }
 
@@ -151,7 +148,6 @@ final class SupervisedReconnectParityTests: XCTestCase {
         }
 
         fixture.model.scheduleSupervisedReconnect()
-        let task = LiveRuntime.shared.reconnectTask
         await awaitReconnectSettled()
 
         XCTAssertEqual(dials, 8, "the supervised policy has no attempt ceiling")
@@ -744,7 +740,9 @@ final class SupervisedReconnectParityTests: XCTestCase {
         fixture.model.isOffline = true
 
         fixture.model.applicationDidBecomeActive()
-        await waitUntil { supervisor.isReconnecting || hung != nil }
+        // `isReconnecting` can flip before the dial continuation is stored.
+        // Resume only after `hung` is set or the parked connect never fails.
+        await waitUntil { hung != nil }
 
         XCTAssertTrue(fixture.model.isWakeRedialGraceActive)
         XCTAssertFalse(fixture.model.showsOfflineUnreachableChrome)
