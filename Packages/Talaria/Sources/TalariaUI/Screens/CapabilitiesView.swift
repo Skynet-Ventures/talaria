@@ -836,6 +836,7 @@ private struct MCPServerSheet: View {
 
     @State private var apiKey = ""
     @State private var showsKeyField = false
+    @State private var showsToolFilter = false
     @State private var confirmingRemoval = false
     @State private var oauthTarget: BrowserTarget?
     @State private var oauthNote: String?
@@ -867,6 +868,12 @@ private struct MCPServerSheet: View {
                         SmallActionButton(theme: theme, title: copy.capTest(themeID),
                                           isBusy: isBusy) {
                             Task { await model.testMCPServer(server, profile: profile) }
+                        }
+                        if server.toolFilter.isEditable {
+                            SmallActionButton(theme: theme, title: copy.capEditTools(themeID),
+                                              isBusy: isBusy) {
+                                showsToolFilter = true
+                            }
                         }
                         if server.auth == "oauth" || probe?.oauthNeeded == true {
                             SmallActionButton(theme: theme, title: copy.capConnect(themeID),
@@ -906,6 +913,9 @@ private struct MCPServerSheet: View {
             OAuthBrowser(url: target.url, theme: theme, title: copy.capConnect(themeID)) {
                 oauthTarget = nil
             }
+        }
+        .sheet(isPresented: $showsToolFilter) {
+            MCPToolFilterSheet(model: model, profile: profile, server: server)
         }
         // Confirmed here rather than on the list so the dialog never has to
         // present through a dismissing sheet.
@@ -960,13 +970,32 @@ private struct MCPServerSheet: View {
             if !server.envKeys.isEmpty {
                 detailLine(copy.capEnvKeys(themeID), server.envKeys.joined(separator: ", "))
             }
-            if let allowed = server.toolAllowList, !allowed.isEmpty {
-                detailLine(copy.capAllowList(themeID), allowed.joined(separator: ", "))
-            }
+            toolFilterDetail
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .modifier(GatewayCardChrome(theme: theme))
+    }
+
+    @ViewBuilder private var toolFilterDetail: some View {
+        switch server.toolFilter.mode {
+        case .all:
+            detailLine(copy.capToolFilter(themeID), copy.capAllTools(themeID))
+        case .include:
+            detailLine(copy.capToolFilter(themeID), copy.capIncludeMode(themeID))
+            detailLine(copy.capFilterPatterns(themeID),
+                       server.toolFilter.patterns.isEmpty
+                        ? copy.capEmptyWhitelist(themeID)
+                        : server.toolFilter.patterns.joined(separator: ", "))
+        case .exclude:
+            detailLine(copy.capToolFilter(themeID), copy.capExcludeMode(themeID))
+            detailLine(copy.capFilterPatterns(themeID),
+                       server.toolFilter.patterns.isEmpty
+                        ? copy.capNoExcludedTools(themeID)
+                        : server.toolFilter.patterns.joined(separator: ", "))
+        case .unavailable:
+            detailLine(copy.capToolFilter(themeID), copy.capFilterUnavailable(themeID))
+        }
     }
 
     private func detailLine(_ label: String, _ value: String) -> some View {
@@ -1084,6 +1113,174 @@ private struct MCPServerSheet: View {
         }
         #endif
         openURL(url)
+    }
+}
+
+// MARK: - MCP tool filter sheet
+
+/// Presentation draft for the filter editor. Keeping this separate from the
+/// probe result makes the UI contract testable: switching nothing on an
+/// exclude-mode server must preserve that mode and its patterns verbatim.
+struct MCPToolFilterEditorDraft: Sendable, Equatable {
+    var mode: MCPToolFilterMode
+    var patterns: [String]
+
+    init(filter: MCPToolFilter) {
+        mode = filter.isEditable ? filter.mode : .all
+        patterns = filter.patterns
+    }
+
+    var filter: MCPToolFilter {
+        MCPToolFilter(mode: mode, patterns: mode == .all ? [] : patterns)
+    }
+}
+
+/// Mode-aware editor for a server's `tools` block. This intentionally edits
+/// configured patterns rather than deriving an include list from a probe: an
+/// exclude-mode catalog entry must keep applying to tools the remote server
+/// adds tomorrow.
+@MainActor
+private struct MCPToolFilterSheet: View {
+    let model: AppModel
+    let profile: String?
+    let initial: MCPServer
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: MCPToolFilterEditorDraft
+
+    init(model: AppModel, profile: String?, server: MCPServer) {
+        self.model = model
+        self.profile = profile
+        self.initial = server
+        _draft = State(initialValue: MCPToolFilterEditorDraft(filter: server.toolFilter))
+    }
+
+    private var theme: ThemePack { model.theme.pack }
+    private var copy: CopyPack { model.theme.copy }
+    private var themeID: ThemeID { model.theme.themeID }
+    private var state: CapabilityState { model.capabilities(for: profile) }
+    private var server: MCPServer {
+        state.mcpServers.first { $0.id == initial.id } ?? initial
+    }
+    private var isBusy: Bool { state.isBusy("mcp:\(server.name)") }
+    private var filter: MCPToolFilter { draft.filter }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    Text(copy.capToolFilterBody(themeID))
+                        .font(themeID == .control ? theme.mono(9.5) : theme.body(12))
+                        .foregroundStyle(theme.sub)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Picker(copy.capToolFilter(themeID), selection: $draft.mode) {
+                        Text(copy.capAllTools(themeID)).tag(MCPToolFilterMode.all)
+                        Text(copy.capIncludeMode(themeID)).tag(MCPToolFilterMode.include)
+                        Text(copy.capExcludeMode(themeID)).tag(MCPToolFilterMode.exclude)
+                    }
+                    .pickerStyle(.segmented)
+
+                    if draft.mode != .all {
+                        patternRows
+                        SmallActionButton(theme: theme, title: copy.capAddFilterPattern(themeID)) {
+                            draft.patterns.append("")
+                        }
+                        GatewayFootnote(theme: theme,
+                                        text: draft.mode == .exclude
+                                            ? copy.capExcludeModeNote(themeID)
+                                            : copy.capIncludeModeNote(themeID))
+                    } else {
+                        GatewayFootnote(theme: theme, text: copy.capAllToolsNote(themeID))
+                    }
+
+                    if let notice = state.notice {
+                        Text(notice)
+                            .font(themeID == .control ? theme.mono(10) : theme.body(12))
+                            .foregroundStyle(theme.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    GatewayFlowButton(theme: theme, label: copy.capSaveFilter(themeID),
+                                      role: .primary) { save() }
+                        .opacity(isBusy ? 0.55 : 1)
+                        .disabled(isBusy)
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 6)
+                .padding(.bottom, 40)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(theme.bg)
+    }
+
+    private var header: some View {
+        HStack(alignment: .center) {
+            Button { dismiss() } label: {
+                Text(copy.cancel)
+                    .font(themeID == .control ? theme.mono(11, weight: .semibold)
+                                                  : theme.body(14, weight: .semibold))
+                    .foregroundStyle(themeID == .ink ? theme.ink.opacity(0.55)
+                                     : (themeID == .control ? theme.sub : theme.accent))
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            Text(copy.capToolFilterTitle(themeID, server.name))
+                .font(themeID == .ink ? theme.display(20, weight: .bold).smallCaps()
+                                      : theme.body(16, weight: .heavy))
+                .foregroundStyle(theme.ink)
+                .lineLimit(1)
+            Spacer()
+            Text(copy.cancel)
+                .font(themeID == .control ? theme.mono(11, weight: .semibold)
+                                              : theme.body(14, weight: .semibold))
+                .hidden()
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 16)
+        .padding(.bottom, 10)
+    }
+
+    private var patternRows: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(draft.patterns.indices), id: \.self) { index in
+                HStack(spacing: 8) {
+                    TextField(copy.capFilterPattern(themeID), text: binding(for: index))
+                        .gatewayFieldTraits()
+                        .modifier(GatewayFlowInputChrome(theme: theme))
+                    Button {
+                        draft.patterns.remove(at: index)
+                    } label: {
+                        Text(verbatim: "−")
+                            .font(theme.mono(14, weight: .bold))
+                            .foregroundStyle(theme.danger)
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(copy.capRemove(themeID))
+                }
+            }
+        }
+    }
+
+    private func binding(for index: Int) -> Binding<String> {
+        Binding(
+            get: { draft.patterns.indices.contains(index) ? draft.patterns[index] : "" },
+            set: { value in
+                guard draft.patterns.indices.contains(index) else { return }
+                draft.patterns[index] = value
+            })
+    }
+
+    private func save() {
+        let requested = filter
+        Task {
+            if await model.setMCPToolFilter(server, filter: requested, profile: profile) {
+                dismiss()
+            }
+        }
     }
 }
 
@@ -1509,6 +1706,142 @@ public extension CopyPack {
         case .soft: "Tools"
         case .control: "TOOL PIN"
         case .ink: "instruments"
+        }
+    }
+
+    func capToolFilter(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Tool filter"
+        case .control: "TOOL FILTER"
+        case .ink: "instrument rule"
+        }
+    }
+
+    func capFilterPatterns(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Patterns"
+        case .control: "PATTERNS"
+        case .ink: "marks"
+        }
+    }
+
+    func capAllTools(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "All tools"
+        case .control: "ALL TOOLS"
+        case .ink: "all instruments"
+        }
+    }
+
+    func capIncludeMode(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Include only"
+        case .control: "INCLUDE"
+        case .ink: "only these"
+        }
+    }
+
+    func capExcludeMode(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Exclude"
+        case .control: "EXCLUDE"
+        case .ink: "withhold these"
+        }
+    }
+
+    func capEmptyWhitelist(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "No tools allowed"
+        case .control: "EMPTY WHITELIST"
+        case .ink: "none are permitted"
+        }
+    }
+
+    func capNoExcludedTools(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "No excluded tools"
+        case .control: "NO EXCLUSIONS"
+        case .ink: "none withheld"
+        }
+    }
+
+    func capFilterUnavailable(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Unsupported filter format — left unchanged"
+        case .control: "UNSUPPORTED FILTER — PRESERVED"
+        case .ink: "an unknown rule, left unaltered"
+        }
+    }
+
+    func capEditTools(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Tools"
+        case .control: "FILTER"
+        case .ink: "shape tools"
+        }
+    }
+
+    func capToolFilterTitle(_ t: ThemeID, _ name: String) -> String {
+        switch t {
+        case .soft: "Tools · \(name)"
+        case .control: "TOOLS · \(name.uppercased())"
+        case .ink: "The instruments of \(name)"
+        }
+    }
+
+    func capToolFilterBody(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Keep an include whitelist or an exclude denylist. Patterns are saved exactly as written."
+        case .control: "PRESERVE INCLUDE / EXCLUDE MODE. PATTERNS ARE WRITTEN VERBATIM."
+        case .ink: "Keep a chosen list, or a list withheld. The marks are inscribed exactly as given."
+        }
+    }
+
+    func capFilterPattern(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Tool name or glob, e.g. *_secret_*"
+        case .control: "TOOL NAME OR GLOB"
+        case .ink: "a name or star-mark"
+        }
+    }
+
+    func capAddFilterPattern(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Add pattern"
+        case .control: "ADD PATTERN"
+        case .ink: "add a mark"
+        }
+    }
+
+    func capSaveFilter(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Save tool filter"
+        case .control: "SAVE FILTER"
+        case .ink: "inscribe the rule"
+        }
+    }
+
+    func capExcludeModeNote(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "Exclude mode stays dynamic: tools the server adds later remain enabled unless a pattern matches them."
+        case .control: "EXCLUDE MODE STAYS DYNAMIC. NEW SERVER TOOLS ARE NOT FROZEN INTO AN INCLUDE LIST."
+        case .ink: "What the way makes tomorrow remains available, unless one of these marks catches it."
+        }
+    }
+
+    func capIncludeModeNote(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "An empty include list is intentional: it allows no tools until you add a pattern."
+        case .control: "EMPTY INCLUDE = EXPLICIT EMPTY WHITELIST."
+        case .ink: "An empty choosing is still a choice: no instruments are permitted."
+        }
+    }
+
+    func capAllToolsNote(_ t: ThemeID) -> String {
+        switch t {
+        case .soft: "This removes only the include/exclude keys. Other server configuration stays unchanged."
+        case .control: "ONLY INCLUDE / EXCLUDE KEYS ARE REMOVED. ALL OTHER SERVER CONFIG REMAINS."
+        case .ink: "Only the rule is lifted; the rest of the way remains as it was."
         }
     }
 

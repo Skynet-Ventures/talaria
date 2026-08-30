@@ -262,13 +262,21 @@ extension AppModel {
         let serversProbe = await Self.probe({ try await client.mcpServers(profile: scope) })
         guard capabilityStateIsCurrent(state, profileID: profile, target: target) else { return }
         switch serversProbe {
-        case .value(let servers):
-            state.mcpServers = servers
+        case .value:
+            state.mcpServers = Self.mcpServers(after: serversProbe,
+                                               retaining: state.mcpServers)
             mcpSupported = true
         case .unsupported:
-            state.mcpServers = []
+            state.mcpServers = Self.mcpServers(after: serversProbe,
+                                               retaining: state.mcpServers)
         case .failed(let message):
-            state.mcpServers = []
+            // A failed list/probe is not an authoritative empty config. In
+            // particular, catalog reinstalls commonly run before OAuth or a
+            // remote server is reachable; clearing the last snapshot here
+            // would make an existing include/exclude filter look erased.
+            // Keep the prior rows until an authoritative list says otherwise.
+            state.mcpServers = Self.mcpServers(after: serversProbe,
+                                               retaining: state.mcpServers)
             mcpSupported = true
             state.notice = noticeText(message)
         }
@@ -466,6 +474,50 @@ extension AppModel {
                                            target: target) else { return nil }
             state.notice = noticeText(Self.shortMessage(error))
             return nil
+        }
+    }
+
+    /// Persist the selected server's tool filter. This is deliberately a
+    /// mode-aware write: include stays include (including an empty whitelist),
+    /// while exclude remains a dynamic denylist whose glob patterns are never
+    /// expanded into the latest probe's finite set of tool names.
+    @discardableResult
+    public func setMCPToolFilter(_ server: MCPServer, filter: MCPToolFilter,
+                                 profile: String?) async -> Bool {
+        let state = capabilities(for: profile)
+        guard filter.isEditable,
+              let index = state.mcpServers.firstIndex(where: { $0.id == server.id }) else {
+            return false
+        }
+        guard mode == .live else {
+            state.mcpServers[index].toolFilter = filter
+            return true
+        }
+        guard let (target, client) = await capabilityContext(profileID: profile, state: state)
+        else { return false }
+        let key = "mcp:\(server.name)"
+        state.busy.insert(key)
+        defer { state.busy.remove(key) }
+        do {
+            try await client.setMCPToolFilter(profile: target.profile,
+                                              name: server.name, filter: filter)
+            guard capabilityStateIsCurrent(state, profileID: profile,
+                                           target: target),
+                  let refreshed = state.mcpServers.firstIndex(where: { $0.id == server.id })
+            else { return false }
+            // Update immediately after the REST acknowledgement. A following
+            // list refresh is best-effort; if it is inconclusive, refreshMCP
+            // leaves this acknowledged filter intact instead of clearing it.
+            state.mcpServers[refreshed].toolFilter = filter
+            state.notice = nil
+            await refreshMCP(state: state, profileID: profile,
+                             target: target, client: client)
+            return true
+        } catch {
+            guard capabilityStateIsCurrent(state, profileID: profile,
+                                           target: target) else { return false }
+            state.notice = noticeText(Self.shortMessage(error))
+            return false
         }
     }
 
@@ -756,6 +808,19 @@ extension AppModel {
             return .unsupported
         } catch {
             return .failed(shortMessage(error))
+        }
+    }
+
+    /// A list failure is inconclusive, while an unsupported RPC or a returned
+    /// empty list is authoritative. Keeping this policy separate makes it
+    /// hard for a future refresh path to accidentally erase a configured
+    /// include/exclude filter merely because its probe could not connect.
+    static func mcpServers(after probe: CapabilityProbe<[MCPServer]>,
+                           retaining previous: [MCPServer]) -> [MCPServer] {
+        switch probe {
+        case .value(let servers): return servers
+        case .unsupported: return []
+        case .failed: return previous
         }
     }
 
