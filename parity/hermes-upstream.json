@@ -1,30 +1,50 @@
 {
   "schemaVersion": 1,
-  "repository": "https://github.com/nousresearch/hermes-agent.git",
+  "repository": "https://github.com/NousResearch/hermes-agent.git",
   "ref": "HEAD",
-  "commit": "40643cbaf9b767af146694131ffb8f8160f25e1c",
-  "auditedAt": "2026-08-20",
-  "talariaBaseline": "04695b91e8fe7cc59a8638e266b5b151c58144ab",
+  "commit": "9d9f44d63826b18503f44c754e48e1f4f83b3a6e",
+  "auditedAt": "2026-08-29",
+  "talariaBaseline": "f2f97ee4cc0ba973f162b0a3df3011639f5fd7c2",
   "authorityFiles": [
     {
-      "path": "apps/desktop/src/plugins/hermes-bots/plugin.js",
-      "sha256": "738e108f12134bf651b9e43a795d87c6b24dd0bd3c2e0da1e533b1912fb2783e"
+      "path": "apps/desktop/src/plugins/hermes-bots/plugin.tsx",
+      "sha256": "aba0948ef058d127097d18db5da2811d44e49fb0a7da41e43cfdbba9fac31b7c"
+    },
+    {
+      "path": "apps/desktop/src/plugins/hermes-bots/canonical-chat.ts",
+      "sha256": "2b55772aef3dc55da4664d16f2ace9d2434b85526cc8fb17bf6d6fcf0e012db6"
+    },
+    {
+      "path": "apps/desktop/src/plugins/hermes-bots/group-turns.ts",
+      "sha256": "8b7d67077deea1de4a49ebd7887576ef35f5f270fde7ea758138bc330d18861d"
+    },
+    {
+      "path": "apps/desktop/src/plugins/hermes-bots/profile-config.tsx",
+      "sha256": "de9ddc8ecc32ccba03b603641ab17215a82ffc50a40077be7e4f0d58b7a8ab59"
+    },
+    {
+      "path": "apps/desktop/src/plugins/hermes-bots/routing.ts",
+      "sha256": "491c57bbb9fa6295bb96c473a3970008706b084d63f10e4df4e2f161a14e1e87"
+    },
+    {
+      "path": "apps/desktop/src/plugins/hermes-bots/bot-state.ts",
+      "sha256": "51d92618983dae0d4e301086d8480f07348efc599a2e2866385e14352acec5f4"
     },
     {
       "path": "website/docs/user-guide/bot-mode.md",
-      "sha256": "3b614687a88c6da3213fcaef6f6a0d1a801a2bfed4407c36c5666b6d588d4e97"
+      "sha256": "43136a19bd8ec6766083f6fec49b924d0b42a1c6e9736ebd865cae97017c0915"
     },
     {
       "path": "website/docs/user-guide/desktop.md",
-      "sha256": "0d69317f4b78160b5f747acbca8267e4a8025ebd2153d1c2e133d8b85d0e3e9c"
+      "sha256": "710ec80dd9a982de13a6230d76327356e27e9e0167f906f4e25908305c12fc24"
     },
     {
       "path": "website/docs/user-guide/multi-connection-desktop.md",
-      "sha256": "ef5cb45bee0ace82bcad61f8a94db00ea6ec95bc56218b434ed7e28bd09ec422"
+      "sha256": "daf1d45119c1985f481286ff267d4e06806d5f0102c966c5198a612cc9816f1c"
     },
     {
       "path": "apps/desktop/DESIGN.md",
-      "sha256": "5967f00ea0b44928c6f88736658e9d3d2bf6ad9fdd790cb3fa635910c5d1c27d"
+      "sha256": "35e093282b2fe86ccfbc9c09575fd8a930330eb3066f5a72c258c2f0a0104218"
     }
   ]
 }
