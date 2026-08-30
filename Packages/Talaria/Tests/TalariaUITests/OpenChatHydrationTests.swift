@@ -328,9 +328,18 @@ private actor OpenChatPageBarrier {
             }
             let first = await group.next() ?? false
             group.cancelAll()
-            if !first { failIfStillWaiting() }
+            if !first { resumeStuckWaiters() }
             return first
         }
+    }
+
+    /// Unblock load()/waitUntilEntered so a timed-out first-paint test
+    /// cannot leave a continuation parked for the rest of `swift test`.
+    private func resumeStuckWaiters() {
+        for waiter in enteredWaiters { waiter.resume() }
+        enteredWaiters.removeAll()
+        releaseContinuation?.resume(returning: nil)
+        releaseContinuation = nil
     }
 
     func release(_ value: JSONValue?) async {
