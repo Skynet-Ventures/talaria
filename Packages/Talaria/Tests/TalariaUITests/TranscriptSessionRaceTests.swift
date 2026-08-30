@@ -5,6 +5,51 @@ import XCTest
 @testable import TalariaUI
 
 final class TranscriptSessionRaceTests: XCTestCase {
+    func testOwnerBackfillReceiptRequiresExactProfileAndNonnegativeCount() throws {
+        let receipt = try SessionOwnerBackfillReceipt(
+            ["ok": true, "stamped": 3, "profile": "research"],
+            expectedProfile: "research")
+        XCTAssertEqual(receipt.stamped, 3)
+        XCTAssertEqual(receipt.profile, "research")
+
+        for malformed: JSONValue in [
+            ["ok": false, "stamped": 3, "profile": "research"],
+            ["ok": true, "stamped": -1, "profile": "research"],
+            ["ok": true, "stamped": 3, "profile": "default"],
+            ["ok": true, "profile": "research"],
+        ] {
+            XCTAssertThrowsError(try SessionOwnerBackfillReceipt(
+                malformed, expectedProfile: "research"))
+        }
+    }
+
+    func testOwnerBackfillUsesExactAuthenticatedProfileRoute() async throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://owner-backfill.example/base/"))
+        let client = GatewayClient(
+            baseURL: baseURL, credential: .sessionToken("owner-token"),
+            restExecutor: { request, limit in
+                XCTAssertNil(limit)
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertEqual(request.url?.path, "/base/api/sessions/owner-backfill")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Hermes-Session-Token"),
+                               "owner-token")
+                let body = try XCTUnwrap(request.httpBody)
+                let json = try JSONDecoder().decode(JSONValue.self, from: body)
+                XCTAssertEqual(json["profile"]?.stringValue, "research")
+                let responseBody = try JSONEncoder().encode(JSONValue.object([
+                    "ok": true, "stamped": 4, "profile": "research",
+                ]))
+                let response = try XCTUnwrap(HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]))
+                return (responseBody, response)
+            })
+
+        let receipt = try await client.backfillLegacySessionOwners(profile: "research")
+
+        XCTAssertEqual(receipt.stamped, 4)
+        XCTAssertEqual(receipt.profile, "research")
+    }
     @MainActor
     func testRetainedFailureProjectsCorrectionsAtScalarOffsetsAndOwnsTailAssistant() throws {
         let live = LiveSession(try json([

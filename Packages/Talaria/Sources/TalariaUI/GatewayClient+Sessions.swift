@@ -45,6 +45,23 @@ public struct SessionSearchHit: Identifiable, Sendable, Equatable {
     }
 }
 
+/// Durable migration receipt for pre-ownership Hermes session rows.
+struct SessionOwnerBackfillReceipt: Sendable, Equatable {
+    var stamped: Int
+    var profile: String
+
+    init(_ value: JSONValue, expectedProfile: String) throws {
+        guard value["ok"]?.boolValue == true,
+              let stamped = value["stamped"]?.intValue, stamped >= 0,
+              let profile = value["profile"]?.stringValue,
+              profile == expectedProfile else {
+            throw GatewayError(code: -8, message: "owner-backfill returned an invalid receipt")
+        }
+        self.stamped = stamped
+        self.profile = profile
+    }
+}
+
 /// session.compress result, normalized across the three shapes the gateway
 /// can answer with (local compress, compute-host compress, lock held).
 public struct SessionCompression: Sendable {
@@ -236,6 +253,21 @@ extension GatewayClient {
     }
 
     // MARK: - REST (durable-key surfaces)
+
+    /// Stamp legacy NULL-owner rows in this exact profile store. The server is
+    /// idempotent and never overwrites an existing owner. Callers must still
+    /// prove the serving gateway/profile before invoking this mutation.
+    func backfillLegacySessionOwners(profile: String) async throws
+        -> SessionOwnerBackfillReceipt {
+        let normalized = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            throw GatewayError(code: -8, message: "owner-backfill requires an exact profile")
+        }
+        let result = try await restJSON(
+            path: "api/sessions/owner-backfill", method: "POST",
+            body: ["profile": .string(normalized)])
+        return try SessionOwnerBackfillReceipt(result, expectedProfile: normalized)
+    }
 
     /// Rename a stored session that is not live (PATCH /api/sessions/{id}).
     /// The WS session.title RPC only resolves runtime sids, so this is the
