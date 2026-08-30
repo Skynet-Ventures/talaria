@@ -800,6 +800,9 @@ public actor GatewayClient {
         let probeTimeout = min(3, readyTimeout)
         do {
             _ = try await wireAuth.status(timeout: probeTimeout)
+        } catch let http as GatewayHTTPError {
+            // Managed-cloud boot retries 502/503/504. Do not erase the type.
+            throw http
         } catch {
             throw GatewayError(
                 code: -2,

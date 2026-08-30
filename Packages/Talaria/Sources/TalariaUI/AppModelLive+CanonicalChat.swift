@@ -920,9 +920,14 @@ extension AppModel {
             // REST latest page is first paint. Do not wait for session.resume
             // of the 584-msg default chat (Mini `ws write slow >10s`).
             if hydrate, let restTarget {
+                let expectedChatID = ObjectIdentifier(chat)
+                let expectedGeneration = gatewayGeneration
                 Task { @MainActor [weak self] in
                     let page = try? await pageTask?.value
-                    self?.paintOpenChatLatestPage(page, botID: botID)
+                    self?.paintOpenChatLatestPage(
+                        page, botID: botID, expectedStoredID: restTarget,
+                        expectedGeneration: expectedGeneration,
+                        expectedChatID: expectedChatID)
                 }
             }
             let live = try await client.resumeSession(
@@ -1208,6 +1213,8 @@ extension AppModel {
     func kickOpenChatLatestPageIfPossible(botID: String) {
         guard let stored = cachedOpenChatStoredID(botID: botID) else { return }
         guard gatewayRoute(for: botID) ?? stateRoute(for: botID) != nil else { return }
+        let expectedChatID = ObjectIdentifier(chat(for: botID))
+        let expectedGeneration = LiveRuntime.shared.generation
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard let route = self.gatewayRoute(for: botID) ?? self.stateRoute(for: botID)
@@ -1220,13 +1227,26 @@ extension AppModel {
             }
             let page = try? await client.latestSessionMessages(
                 storedID: stored, profile: route.profile)
-            self.paintOpenChatLatestPage(page, botID: botID)
+            self.paintOpenChatLatestPage(
+                page, botID: botID, expectedStoredID: stored,
+                expectedGeneration: expectedGeneration,
+                expectedChatID: expectedChatID)
         }
     }
 
-    func paintOpenChatLatestPage(_ payload: JSONValue?, botID: String) {
+    func paintOpenChatLatestPage(_ payload: JSONValue?, botID: String,
+                                 expectedStoredID: String? = nil,
+                                 expectedGeneration: Int? = nil,
+                                 expectedChatID: ObjectIdentifier? = nil) {
         guard let payload else { return }
+        if let expectedGeneration, expectedGeneration != LiveRuntime.shared.generation {
+            return
+        }
         let chat = chat(for: botID)
+        if let expectedChatID, ObjectIdentifier(chat) != expectedChatID { return }
+        guard OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: chat.storedSessionID, expectedStoredID: expectedStoredID)
+        else { return }
         let page = Self.chatMessages(fromTranscript: payload)
         guard !page.isEmpty else { return }
         // Prefetch may land after the deferred stub is already on screen.

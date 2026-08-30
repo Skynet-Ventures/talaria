@@ -75,6 +75,15 @@ final class OpenChatHistoryPolicyTests: XCTestCase {
             "stored-1", durableID: nil, canonicalTitle: "Bot Chat"), "stored-1")
     }
 
+    func testAcceptsPrefetchedPageOnlyForTheSameBinding() {
+        XCTAssertTrue(OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: nil, expectedStoredID: "root"))
+        XCTAssertTrue(OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: "root", expectedStoredID: "root"))
+        XCTAssertFalse(OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: "other", expectedStoredID: "root"))
+    }
+
     func testRowsNewerThanStubDropsUnchangedPlaceholders() {
         let stubUser = ChatMessage(author: .user, text: "stub", rowID: 1)
         let stubBot = ChatMessage(author: .bot, text: "old", rowID: 2)

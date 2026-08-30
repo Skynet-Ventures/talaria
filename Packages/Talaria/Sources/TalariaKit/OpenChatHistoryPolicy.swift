@@ -114,6 +114,16 @@ public enum OpenChatHistoryPolicy {
         }
     }
 
+    /// A REST prefetch started for one binding must not paint another.
+    public static func acceptsPrefetchedPage(currentStoredID: String?,
+                                             expectedStoredID: String?) -> Bool {
+        guard let expected = expectedStoredID?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !expected.isEmpty
+        else { return true }
+        let current = currentStoredID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current.isEmpty || current == expected
+    }
+
     /// Older pages arrive oldest-first after `chatMessages` normalization.
     /// Drop rows the visible transcript already owns by durable id.
     public static func prepend(existing: [ChatMessage],

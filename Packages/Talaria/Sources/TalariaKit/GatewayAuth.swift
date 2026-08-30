@@ -125,7 +125,10 @@ public enum GatewayURL {
         guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return url
         }
-        if comps.port == nil, usesHermesDefaultPort(host: host) {
+        // Scheme-less / plain HTTP private IPs used to hit :80. Explicit
+        // https keeps :443 so a TLS reverse proxy on the LAN is not rewritten
+        // to Hermes :9119 and then persisted by registry repair.
+        if comps.port == nil, comps.scheme == "http", usesHermesDefaultPort(host: host) {
             comps.port = hermesDefaultPort
         }
         return comps.url

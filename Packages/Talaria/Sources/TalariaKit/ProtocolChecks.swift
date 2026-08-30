@@ -83,6 +83,12 @@ public enum ProtocolChecks {
             current: [stubUser, optimistic], stubSnapshot: [stubUser])
         try expect(newer.map(\.id) == [optimistic.id],
                    "an unchanged deferred stub is not an optimistic send")
+        try expect(OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: "root", expectedStoredID: "root"),
+                   "prefetch for the same durable key may paint")
+        try expect(!OpenChatHistoryPolicy.acceptsPrefetchedPage(
+            currentStoredID: "other", expectedStoredID: "root"),
+                   "a late prefetch must not paint a rebound chat")
     }
 
     static func eventEnvelopeDecoding() throws {
@@ -127,6 +133,12 @@ public enum ProtocolChecks {
                    "LAN IP without a port is hermes :9119")
         try expect(GatewayURL.normalize("https://gw.example.com/hermes/")?.absoluteString == "https://gw.example.com/hermes",
                    "trailing slash stripped, path prefix kept")
+        try expect(GatewayURL.normalize("https://192.168.1.20")?.absoluteString
+                    == "https://192.168.1.20",
+                   "explicit https on a LAN IP keeps :443, not hermes :9119")
+        try expect(GatewayURL.normalize("https://localhost")?.absoluteString
+                    == "https://localhost",
+                   "explicit https localhost keeps :443")
         try expect(GatewayURL.originForDisplay(GatewayURL.normalize("100.87.108.5")!)
                     == "http://100.87.108.5:9119",
                    "journal/banner origin includes scheme and port")
