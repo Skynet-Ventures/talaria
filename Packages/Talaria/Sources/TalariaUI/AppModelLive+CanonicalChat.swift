@@ -1248,7 +1248,7 @@ extension AppModel {
             if !trimmed.isEmpty { return trimmed }
         }
         let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == canonicalChatTitle { return nil }
+        if trimmed.isEmpty || trimmed == canonicalBotChatTitle { return nil }
         return trimmed
     }
 
